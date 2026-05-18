@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { t } from "../../i18n";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { useEditorStore } from "../../stores/editor";
+import { useUiStore } from "../../stores/ui";
+import { useNotificationStore } from "../../stores/notification";
 import { normalizeAppError } from "../../services/errors";
 import FileTree from "./FileTree.vue";
+import EditorTabs from "./EditorTabs.vue";
 import MonacoHost from "./MonacoHost.vue";
 
 const props = defineProps<{
@@ -11,6 +14,8 @@ const props = defineProps<{
 }>();
 
 const editorStore = useEditorStore();
+const uiStore = useUiStore();
+const notificationStore = useNotificationStore();
 const openError = ref<string | null>(null);
 
 const activeFile = computed(() => editorStore.active);
@@ -24,6 +29,64 @@ async function handleOpen(relPath: string) {
     openError.value = `[${e.code}] ${e.message}`;
   }
 }
+
+function leafName(relPath: string): string {
+  const parts = relPath.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || relPath;
+}
+
+function handleSelectTab(id: string) {
+  editorStore.setActive(id);
+}
+
+async function handleCloseTab(id: string) {
+  const file = editorStore.openFiles.find((f) => f.id === id);
+  if (file && file.isDirty) {
+    const ok = await confirm(
+      `${leafName(file.relPath)} has unsaved changes. Close without saving?`,
+      { title: "Close unsaved file", kind: "warning" },
+    );
+    if (!ok) return;
+  }
+  editorStore.closeFile(id);
+}
+
+async function saveActive(): Promise<void> {
+  const file = activeFile.value;
+  if (!file || !file.isDirty) return;
+  try {
+    await editorStore.saveFile(file.id);
+  } catch (err) {
+    const e = normalizeAppError(err);
+    notificationStore.addNotice("error", `Failed to save ${leafName(file.relPath)}: ${e.message}`, {
+      code: e.code,
+      operation: `editor.save:${file.relPath}`,
+      replaceOperation: true,
+    });
+  }
+}
+
+function isSaveShortcut(event: KeyboardEvent): boolean {
+  if (event.key !== "s" && event.key !== "S") return false;
+  if (event.altKey || event.shiftKey) return false;
+  // Cmd+S on macOS, Ctrl+S elsewhere — accept either to avoid platform sniffing.
+  return event.metaKey || event.ctrlKey;
+}
+
+function onKeyDown(event: KeyboardEvent) {
+  if (uiStore.activeTab !== "editor") return;
+  if (!isSaveShortcut(event)) return;
+  event.preventDefault();
+  void saveActive();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKeyDown, { capture: true });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKeyDown, { capture: true });
+});
 </script>
 
 <template>
@@ -36,16 +99,13 @@ async function handleOpen(relPath: string) {
       />
     </aside>
     <section class="editor-pane">
-      <header class="editor-pane-header">
-        <span class="editor-pane-title">{{ t("app.tab.editor") }}</span>
-        <span v-if="activeFile" class="editor-pane-meta">
-          <code>{{ activeFile.relPath }}</code>
-          <span class="editor-pane-pill">{{ activeFile.language }}</span>
-          <span class="editor-pane-pill">{{ activeFile.lineEnding.toUpperCase() }}</span>
-          <span v-if="activeFile.hadBom" class="editor-pane-pill">BOM</span>
-          <span v-if="activeFile.isDirty" class="editor-pane-pill is-dirty">●</span>
-        </span>
-      </header>
+      <EditorTabs
+        v-if="editorStore.openFiles.length"
+        :files="editorStore.openFiles"
+        :active-id="editorStore.activeFileId"
+        @select="handleSelectTab"
+        @close="handleCloseTab"
+      />
       <div class="editor-pane-body">
         <div v-if="openError" class="editor-pane-error">{{ openError }}</div>
         <div v-if="!activeFile" class="editor-pane-placeholder">
@@ -56,25 +116,15 @@ async function handleOpen(relPath: string) {
         </div>
         <MonacoHost v-show="activeFile" class="editor-pane-monaco" />
       </div>
-      <footer v-if="editorStore.openFiles.length" class="editor-pane-footer">
-        <span class="editor-pane-footer-label">Open ({{ editorStore.openFiles.length }}):</span>
-        <button
-          v-for="file in editorStore.openFiles"
-          :key="file.id"
-          type="button"
-          class="editor-pane-tab"
-          :class="{ active: file.id === editorStore.activeFileId, dirty: file.isDirty }"
-          :title="file.relPath"
-          @click="editorStore.setActive(file.id)"
-        >
-          <span class="editor-pane-tab-name">{{ file.relPath }}</span>
-          <span
-            class="editor-pane-tab-close"
-            role="button"
-            aria-label="Close"
-            @click.stop="editorStore.closeFile(file.id)"
-          >×</span>
-        </button>
+      <footer class="editor-pane-status">
+        <span v-if="activeFile" class="editor-pane-status-path">{{ activeFile.relPath }}</span>
+        <span v-else class="editor-pane-status-path is-muted">No file open</span>
+        <span v-if="activeFile" class="editor-pane-status-flags">
+          <span class="editor-pane-status-pill">{{ activeFile.language }}</span>
+          <span class="editor-pane-status-pill">{{ activeFile.lineEnding.toUpperCase() }}</span>
+          <span v-if="activeFile.hadBom" class="editor-pane-status-pill">BOM</span>
+          <span v-if="activeFile.isDirty" class="editor-pane-status-pill is-dirty">● unsaved</span>
+        </span>
       </footer>
     </section>
   </div>
@@ -105,54 +155,6 @@ async function handleOpen(relPath: string) {
   min-width: 0;
   min-height: 0;
   background: var(--bg-color, var(--sidebar-bg));
-}
-
-.editor-pane-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 12px;
-}
-
-.editor-pane-title {
-  font-weight: 600;
-  color: var(--text-secondary, var(--text-color));
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 11px;
-}
-
-.editor-pane-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary, var(--text-color));
-}
-
-.editor-pane-meta code {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--code-bg, rgba(127, 127, 127, 0.12));
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
-  font-size: 12px;
-  color: var(--text-color);
-}
-
-.editor-pane-pill {
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--border-color);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.85;
-}
-
-.editor-pane-pill.is-dirty {
-  border-color: var(--accent-color, #5b9bff);
-  color: var(--accent-color, #5b9bff);
 }
 
 .editor-pane-body {
@@ -194,83 +196,61 @@ async function handleOpen(relPath: string) {
 
 .editor-pane-error {
   padding: 8px 12px;
-  margin-bottom: 12px;
+  margin: 8px 12px 0;
   border: 1px solid var(--danger-color, #d04a4a);
   border-radius: 6px;
   color: var(--danger-color, #d04a4a);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+  flex: 0 0 auto;
 }
 
-.editor-pane-footer {
+.editor-pane-status {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 12px;
+  padding: 4px 12px;
   border-top: 1px solid var(--border-color);
-  overflow-x: auto;
   background: var(--sidebar-bg);
-}
-
-.editor-pane-footer-label {
   font-size: 11px;
   color: var(--text-secondary, var(--text-color));
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-right: 4px;
   flex: 0 0 auto;
 }
 
-.editor-pane-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border: 1px solid var(--border-color);
-  background: transparent;
-  border-radius: 4px;
-  color: var(--text-color);
-  font-size: 12px;
-  cursor: pointer;
-  flex: 0 0 auto;
-  max-width: 220px;
-}
-
-.editor-pane-tab:hover {
-  background: var(--hover-bg, rgba(127, 127, 127, 0.12));
-}
-
-.editor-pane-tab.active {
-  border-color: var(--accent-color, #5b9bff);
-  color: var(--accent-color, #5b9bff);
-}
-
-.editor-pane-tab-name {
+.editor-pane-status-path {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
 }
 
-.editor-pane-tab.dirty .editor-pane-tab-name::after {
-  content: " ●";
-  color: var(--accent-color, #5b9bff);
+.editor-pane-status-path.is-muted {
+  opacity: 0.6;
+  font-family: inherit;
 }
 
-.editor-pane-tab-close {
+.editor-pane-status-flags {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
-.editor-pane-tab-close:hover {
-  background: var(--hover-bg, rgba(127, 127, 127, 0.18));
+.editor-pane-status-pill {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.editor-pane-status-pill.is-dirty {
+  border-color: var(--accent-color, #5b9bff);
+  color: var(--accent-color, #5b9bff);
+  opacity: 1;
 }
 </style>
