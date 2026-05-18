@@ -264,6 +264,58 @@ pub struct RawRound {
     pub response: String,
 }
 
+/// Returns `true` if the given backend + model combination supports image inputs.
+///
+/// When `false`, the agent loop strips image data from conversation history
+/// before building the API request, preventing errors from models that do not
+/// accept `image_url` / `input_image` blocks.
+pub fn model_supports_images(backend: &LlmBackend, effective_model: &str) -> bool {
+    match backend {
+        LlmBackend::Anthropic { .. }
+        | LlmBackend::AnthropicAgentSdk
+        | LlmBackend::OpenAiCodex { .. } => true,
+        LlmBackend::OpenRouter { .. } => {
+            let m = effective_model.to_ascii_lowercase();
+            m.contains("claude")
+                || m.contains("gpt-4o")
+                || m.contains("gpt-5")
+                || m.contains("gemini")
+                || m.contains("glm")
+                || m.contains("minimax")
+        }
+        LlmBackend::Custom {
+            api_model,
+            endpoint,
+            api_format,
+            ..
+        } => match api_format {
+            crate::commands::ApiFormat::AnthropicMessages => true,
+            crate::commands::ApiFormat::OpenaiResponses => {
+                let m = api_model.to_ascii_lowercase();
+                m.contains("claude")
+                    || m.contains("gpt-4o")
+                    || m.contains("gpt-5")
+                    || m.contains("gemini")
+            }
+            crate::commands::ApiFormat::OpenaiChat => {
+                let m = api_model.to_ascii_lowercase();
+                let e = endpoint.to_ascii_lowercase();
+                // DeepSeek handles images gracefully with a text-replacement note,
+                // but we strip early to avoid polluting the prompt with "omitted" noise.
+                if m.starts_with("deepseek-") || e.contains("deepseek") {
+                    return false;
+                }
+                // MiniMax M2.5 supports images.
+                if m.contains("minimax") || e.contains("minimax") || e.contains("minimaxi") {
+                    return true;
+                }
+                // Generic check — conservative patterns matching the frontend logic.
+                m.contains("claude") || m.contains("gpt") || m.contains("gemini") || m.contains("glm")
+            }
+        },
+    }
+}
+
 pub(super) fn normalize_tool_args(args: &mut serde_json::Value) {
     const ALIASES: &[(&str, &str)] = &[
         ("file_path", "filePath"),

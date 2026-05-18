@@ -35,8 +35,9 @@ use crate::session::store::SessionStore;
 use crate::tool::{ToolExecutionContext, ToolLoadMode, ToolRegistry, ToolResult, ToolRuntimeState};
 
 use backend::{
-    is_prompt_too_long_error, is_retryable_llm_error, model_context_limit, normalize_tool_args,
-    session_unity_state, LlmCallResult, MAX_TOOL_ITERATIONS,
+    is_prompt_too_long_error, is_retryable_llm_error, model_context_limit,
+    model_supports_images, normalize_tool_args, session_unity_state, LlmCallResult,
+    MAX_TOOL_ITERATIONS,
 };
 use prompt_context::{
     detect_input_system, detect_render_pipeline, parse_physics_config, parse_tag_manager,
@@ -6414,7 +6415,14 @@ impl AgentInstance {
             } else {
                 model_context_limit(&self.effective_model)
             };
-            let prepared_messages = compact::prepare_messages_for_llm(&messages);
+            let mut prepared_messages = compact::prepare_messages_for_llm(&messages);
+            // Strip image data when the current model does not support vision,
+            // preventing API errors from models that reject image_url/input_image blocks.
+            if !model_supports_images(&self.backend, &self.effective_model) {
+                for msg in &mut prepared_messages {
+                    msg.images = None;
+                }
+            }
             let request_tools = self.build_request_tool_names().await;
             let api_tools = self.build_api_tools(&request_tools).await;
             let estimated_input_tokens =
