@@ -46,7 +46,35 @@ const emit = defineEmits<{
   (e: "click", event: MouseEvent): void;
   (e: "mouseup", event: MouseEvent): void;
   (e: "focus", event: FocusEvent): void;
+  (e: "drop", event: DragEvent): void;
 }>();
+
+const isDragOver = ref(false);
+let dragEnterCounter = 0;
+
+function handleDragEnter(_event: DragEvent) {
+  dragEnterCounter += 1;
+  isDragOver.value = true;
+}
+
+function handleDragLeave(_event: DragEvent) {
+  dragEnterCounter -= 1;
+  if (dragEnterCounter <= 0) {
+    dragEnterCounter = 0;
+    isDragOver.value = false;
+  }
+}
+
+function handleDragOver(event: DragEvent) {
+  event.preventDefault();
+}
+
+function handleDrop(event: DragEvent) {
+  dragEnterCounter = 0;
+  isDragOver.value = false;
+  event.preventDefault();
+  emit("drop", event);
+}
 
 const slots = useSlots();
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -147,7 +175,14 @@ watch(() => props.compact, () => {
 </script>
 
 <template>
-  <div class="chat-composer" :class="{ 'is-compact': compact, 'has-top-extension': extendTop }">
+  <div
+    class="chat-composer"
+    :class="{ 'is-compact': compact, 'has-top-extension': extendTop, 'is-drag-over': isDragOver }"
+    @dragenter="handleDragEnter"
+    @dragleave="handleDragLeave"
+    @dragover="handleDragOver"
+    @drop="handleDrop"
+  >
     <div v-if="hasOverlay" class="chat-composer-overlay">
       <slot name="overlay" />
     </div>
@@ -246,6 +281,13 @@ watch(() => props.compact, () => {
 
 .chat-composer:focus-within {
   border-color: var(--accent-color);
+}
+
+.chat-composer.is-drag-over {
+  border-color: var(--accent-color);
+  outline: 2px dashed var(--accent-color);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent-soft) 12%, var(--input-bg));
 }
 
 .chat-composer.is-compact {

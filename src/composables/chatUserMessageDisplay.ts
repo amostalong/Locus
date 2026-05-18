@@ -7,6 +7,9 @@ const UNITY_ASSET_REFS_BLOCK_RE =
 const LOCUS_REFERENCES_BLOCK_RE =
   /(?:^|\r?\n)[ \t]*<locus-references>[\s\S]*?<\/locus-references>[ \t]*(?:\r?\n)?/gi;
 
+const LOCUS_ATTACHMENT_BLOCK_RE =
+  /(?:^|\r?\n)[ \t]*<locus-attachment[\s\S]*?<\/locus-attachment>[ \t]*(?:\r?\n)?/gi;
+
 const LOCUS_CONSOLE_BLOCK_RE =
   /(?:^|\r?\n)[ \t]*<locus-console>([\s\S]*?)<\/locus-console>[ \t]*(?:\r?\n)?/gi;
 
@@ -34,7 +37,8 @@ function stripSystemReminderBlocks(text: string) {
 function stripUnityAssetRefBlocks(text: string) {
   return text
     .replace(UNITY_ASSET_REFS_BLOCK_RE, "\n")
-    .replace(LOCUS_REFERENCES_BLOCK_RE, "\n");
+    .replace(LOCUS_REFERENCES_BLOCK_RE, "\n")
+    .replace(LOCUS_ATTACHMENT_BLOCK_RE, "\n");
 }
 
 function stripLocusConsoleBlocks(text: string) {

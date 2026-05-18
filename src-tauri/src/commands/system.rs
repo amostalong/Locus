@@ -3,6 +3,28 @@ use tauri::AppHandle;
 #[cfg(not(windows))]
 use tauri_plugin_notification::NotificationExt;
 
+#[tauri::command]
+pub async fn write_temp_file(
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    // 使用系统临时目录，按文件名保存
+    let temp_dir = std::env::temp_dir().join("LocusChatFiles");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    // 避免文件名冲突，加时间戳前缀
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let safe_name = format!("{}_{}", timestamp, name);
+    let file_path = temp_dir.join(&safe_name);
+
+    std::fs::write(&file_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 #[cfg(windows)]
 const WINDOWS_NOTIFICATION_DISPLAY_NAME: &str = "Locus";
 

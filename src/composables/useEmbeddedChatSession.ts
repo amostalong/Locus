@@ -25,6 +25,7 @@ import {
 import type {
   ChatMessage,
   EffortLevel,
+  FileAttachment,
   ImageAttachment,
   AssetRefAttachment,
   PendingQuestion,
@@ -44,6 +45,7 @@ export interface EmbeddedChatRequest {
   userIntent?: UserIntentMeta | null;
   images?: ImageAttachment[] | null;
   assetRefs?: AssetRefAttachment[] | null;
+  files?: FileAttachment[] | null;
 }
 
 interface EmbeddedChatState extends StreamState {
@@ -124,7 +126,10 @@ function replaceMessageById(list: ChatMessage[], message: ChatMessage): ChatMess
   const index = list.findIndex((item) => item.id === message.id);
   if (index < 0) return [...list, message];
   const next = [...list];
-  next.splice(index, 1, message);
+  next.splice(index, 1, {
+    ...message,
+    files: list[index]!.files ?? message.files,
+  });
   return next;
 }
 
@@ -485,9 +490,19 @@ function applyMutation(state: EmbeddedChatState, mutation: StreamMutation) {
     case "upsertUserMessage":
       state.messages = mergeUserMessage(state.messages, mutation.message);
       break;
-    case "replaceMessages":
-      state.messages = [...mutation.messages];
+    case "replaceMessages": {
+      // 保留当前消息中的 files 字段（compaction 后服务端不认识这个字段）
+      const currentFilesMap = new Map(
+        state.messages
+          .filter((m) => m.files && m.files.length > 0)
+          .map((m) => [m.id, m.files]),
+      );
+      state.messages = mutation.messages.map((msg) => {
+        const files = currentFilesMap.get(msg.id);
+        return files ? { ...msg, files } : msg;
+      });
       break;
+    }
     case "resetRound":
       resetRoundState(state);
       break;
@@ -846,6 +861,7 @@ export function useEmbeddedChatSession(options: UseEmbeddedChatSessionOptions) {
       createdAt: Date.now() / 1000,
       images: request.images && request.images.length > 0 ? request.images : undefined,
       assetRefs: request.assetRefs && request.assetRefs.length > 0 ? request.assetRefs : undefined,
+      files: request.files && request.files.length > 0 ? request.files : undefined,
       thinkingSignature: userIntentSignature,
       intentMeta: userIntent,
     });

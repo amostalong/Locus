@@ -129,19 +129,27 @@ function isMatchingPendingUserMessage(candidate: ChatMessage, message: ChatMessa
   return !!candidateContent && !!incomingContent && incomingContent.includes(candidateContent);
 }
 
+/** 合并远程消息到本地消息，保留本地特有的字段（如 files） */
+function mergeIntoMessage(local: ChatMessage, remote: ChatMessage): ChatMessage {
+  return {
+    ...remote,
+    files: local.files ?? remote.files,
+  };
+}
+
 export function mergeUserMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
   const message = hydrateChatMessageIntent(incoming);
   const existingIndex = messages.findIndex((item) => item.id === message.id);
   if (existingIndex >= 0) {
     const next = [...messages];
-    next.splice(existingIndex, 1, message);
+    next.splice(existingIndex, 1, mergeIntoMessage(messages[existingIndex]!, message));
     return next;
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (!isMatchingPendingUserMessage(messages[index]!, message)) continue;
     const next = [...messages];
-    next.splice(index, 1, message);
+    next.splice(index, 1, mergeIntoMessage(messages[index]!, message));
     return next;
   }
 

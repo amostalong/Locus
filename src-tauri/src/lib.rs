@@ -1053,6 +1053,7 @@ pub fn run() {
             commands::save_python_runtime_selection,
             commands::send_system_notification,
             commands::request_app_exit,
+            commands::write_temp_file,
             commands::get_config_registry,
             commands::get_log_entries,
             commands::clear_log_entries,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, useSlots, watch } from "vue";
-import { FileText } from "lucide";
+import { FileText, File as FileIcon } from "lucide";
 import type { AssetRefAttachment, AssistantRenderPart, ChatMessage, ImageAttachment, ToolCallDisplay, ToolCallInfo, UserIntentMeta } from "../../types";
 import { t } from "../../i18n";
 import {
@@ -52,6 +52,8 @@ import KnowledgeProposalCard from "./KnowledgeProposalCard.vue";
 import ChatWaitingIndicator from "./ChatWaitingIndicator.vue";
 import AssetChip from "../AssetChip.vue";
 import LucideIcon from "../icons/LucideIcon.vue";
+import { ipcInvoke } from "../../services/ipc";
+import { getLocusRuntime } from "../../services/locusRuntime";
 
 type TranscriptVariant = "session" | "embedded";
 type UserContentMode = "plain" | "asset";
@@ -643,6 +645,7 @@ function hasVisibleMessagePayload(message: ChatMessage) {
     || message.knowledgeProposal
     || message.images?.length
     || message.assetRefs?.length
+    || message.files?.length
     || (message.role === "user" && messageConsoleEntries(message).length > 0)
     || (message.role === "user" && userMessageDisplayContent(message).trim())
   );
@@ -898,6 +901,8 @@ function shouldRenderItem(item: MessageRenderItem) {
     return !!(
       userMessageDisplayContent(item.message)
       || (props.showUserImages && item.message.images && item.message.images.length > 0)
+      || (item.message.assetRefs && item.message.assetRefs.length > 0)
+      || (item.message.files && item.message.files.length > 0)
       || (props.enableIntentBadges && messageIntentBadges(item.message).length > 0)
     );
   }
@@ -2228,6 +2233,44 @@ function openImage(src: string) {
   if (!src) return;
   emit("openImage", src);
 }
+
+async function openFile(file: FileAttachment) {
+  console.log("[ChatTranscript] openFile", file?.name, file?.content?.length);
+  try {
+    if (!file || !file.content) {
+      console.warn("[ChatTranscript] openFile: missing file or content", file);
+      return;
+    }
+
+    // Tauri 环境：写入临时文件后用 OS 默认程序打开
+    if (getLocusRuntime().kind === "tauri") {
+      const { openPath } = await import("@tauri-apps/plugin-opener");
+      const filePath = await ipcInvoke<string>("write_temp_file", {
+        name: file.name,
+        content: file.content,
+      });
+      console.log("[ChatTranscript] openFile: written to temp path", filePath);
+      await openPath(filePath);
+      console.log("[ChatTranscript] openFile: opened via OS");
+      return;
+    }
+
+    // 浏览器环境：Blob URL 下载兜底
+    const blob = new Blob([file.content], { type: file.mimeType || "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    console.log("[ChatTranscript] openFile: download triggered (browser fallback)");
+  } catch (e) {
+    console.warn("[ChatTranscript] openFile error:", e);
+  }
+}
 </script>
 
 <template>
@@ -2326,16 +2369,37 @@ function openImage(src: string) {
                 </div>
 
                 <div
-                  v-if="showUserImages && item.message.images && item.message.images.length > 0"
-                  class="chat-transcript-user-images"
+                  v-if="item.message.files && item.message.files.length > 0"
+                  class="chat-transcript-user-files"
                 >
-                  <img
-                    v-for="(_img, imgIdx) in item.message.images"
-                    :key="imgIdx"
-                    :src="imageDataUrl(item.message, imgIdx)"
-                    class="chat-transcript-user-image-thumb"
+                  <span
+                    v-for="(file, fileIdx) in item.message.files"
+                    :key="`${item.id}:file:${fileIdx}`"
+                    class="chat-transcript-user-file-chip chat-transcript-user-file-chip-clickable"
+                    @click.stop="openFile(file)"
+                    title="点击打开文件"
+                  >
+                    <LucideIcon :icon="FileIcon" :size="14" class="chat-transcript-user-file-chip-icon" />
+                    <span class="chat-transcript-user-file-name">{{ file.name }}</span>
+                  </span>
+                </div>
+
+                <div
+                  v-if="showUserImages && item.message.images && item.message.images.length > 0"
+                  class="chat-transcript-user-files"
+                >
+                  <span
+                    v-for="(img, imgIdx) in item.message.images"
+                    :key="`${item.id}:img:${imgIdx}`"
+                    class="chat-transcript-user-file-chip chat-transcript-user-image-chip"
                     @click.stop="openImage(imageDataUrl(item.message, imgIdx))"
-                  />
+                  >
+                    <img
+                      :src="imageDataUrl(item.message, imgIdx)"
+                      class="chat-transcript-user-image-chip-thumb"
+                    />
+                    <span class="chat-transcript-user-file-name">{{ img.name || 'image.' + img.mimeType.split('/')[1] || 'png' }}</span>
+                  </span>
                 </div>
 
                 <div
@@ -2990,18 +3054,54 @@ function openImage(src: string) {
   border-color: color-mix(in srgb, var(--accent-color) 35%, var(--border-color));
 }
 
-.chat-transcript-user-images {
+.chat-transcript-user-files {
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 6px;
+  max-width: min(100%, 78ch);
 }
 
-.chat-transcript-user-image-thumb {
-  max-width: 240px;
-  max-height: 180px;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
-  object-fit: contain;
+.chat-transcript-message.is-session.user.user-align-right .chat-transcript-user-files {
+  justify-content: flex-end;
+}
+
+.chat-transcript-user-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  max-width: min(240px, 100%);
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel-bg) 68%, var(--msg-user-bg) 32%);
+  color: var(--text-color);
+  font-size: 12px;
+  cursor: default;
+  transition: background 0.15s;
+}
+.chat-transcript-user-file-chip:hover {
+  background: color-mix(in srgb, var(--panel-bg) 50%, var(--msg-user-bg) 50%);
+}
+.chat-transcript-user-file-chip-icon {
+  pointer-events: none;
+}
+.chat-transcript-user-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-transcript-user-image-chip-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.chat-transcript-user-image-chip,
+.chat-transcript-user-file-chip-clickable {
   cursor: pointer;
 }
 

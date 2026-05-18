@@ -18,7 +18,7 @@ describe("RichChatInput image attachment layout", () => {
     const en = read("src/language/en.json");
 
     expect(source).toContain('class="composer-attachment-list"');
-    expect(source).toContain('class="image-attachment-thumb-button ui-select-none"');
+    expect(source).toContain('class="attachment-item-img-btn ui-select-none"');
     expect(source).toContain('@click="openImagePreview(index)"');
     expect(source).toContain("const previewImageIndex = ref<number | null>(null);");
     expect(source).toContain('class="image-preview-overlay"');

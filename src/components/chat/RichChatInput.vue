@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useSlots, watch } from "vue";
 import type { ComponentPublicInstance } from "vue";
-import { FileText, Layers, X } from "lucide";
+import { FileText, Layers, Paperclip, X, File as FileIcon } from "lucide";
 import { t } from "../../i18n";
+import { useModelStore } from "../../stores/model";
 import { searchWorkspaceAssets } from "../../services/asset";
 import { knowledgeQuery } from "../../services/knowledge";
 import {
@@ -13,6 +14,7 @@ import { useNotificationStore } from "../../stores/notification";
 import type {
   AssetRefAttachment,
   ChatComposerSendPayload,
+  FileAttachment,
   ImageAttachment,
   KnowledgeDocumentType,
   KnowledgeSearchResult,
@@ -106,6 +108,10 @@ interface ConsoleTextAttachment {
   createdAt: number;
 }
 
+interface ImageAttachmentItem extends ImageAttachment {
+  name: string;
+}
+
 interface ConsoleTextInput {
   text?: string | null;
   title?: string | null;
@@ -162,6 +168,7 @@ const emit = defineEmits<{
 const composerRef = ref<InstanceType<typeof ChatComposer> | null>(null);
 const notificationStore = useNotificationStore();
 const projectStore = useProjectStore();
+const modelStore = useModelStore();
 const slots = useSlots();
 const { state: chatInputSettings } = useChatInputSettings();
 
@@ -175,7 +182,7 @@ const {
 
 const pastedContent = ref("");
 const showPasteEditor = ref(false);
-const imageAttachments = ref<ImageAttachment[]>([]);
+const imageAttachments = ref<ImageAttachmentItem[]>([]);
 const assetRefAttachments = ref<AssetRefAttachment[]>([]);
 const showAssetRefDetails = ref(false);
 const consoleTextAttachments = ref<ConsoleTextAttachment[]>([]);
@@ -226,6 +233,7 @@ const assetRefSyncSourceId = `rich-chat-input-${Date.now().toString(36)}-${Math.
 
 const hasTopAttachments = computed(() =>
   imageAttachments.value.length > 0
+  || fileAttachments.value.length > 0
   || assetRefAttachments.value.length > 0
   || consoleTextAttachments.value.length > 0
   || localFileAttachments.value.length > 0,
@@ -235,6 +243,7 @@ const canSend = computed(() =>
   !!props.modelValue.trim()
   || !!pastedContent.value
   || imageAttachments.value.length > 0
+  || fileAttachments.value.length > 0
   || assetRefAttachments.value.length > 0
   || consoleTextAttachments.value.length > 0
   || localFileAttachments.value.length > 0,
@@ -1406,10 +1415,20 @@ function appendAssetRefsPromptBlock(text: string, assetRefs: AssetRefAttachment[
   return text.trim() ? `${text}\n\n${block}` : block;
 }
 
+function appendFileAttachmentsPromptBlock(text: string, items: FileAttachment[]): string {
+  if (items.length === 0) return text;
+  const blocks = items.map((file) =>
+    `<locus-attachment name="${file.name}" size="${file.size}">\n\`\`\`\n${file.content}\n\`\`\`\n</locus-attachment>`,
+  );
+  const block = blocks.join("\n\n");
+  return text.trim() ? `${text}\n\n${block}` : block;
+}
+
 function resetDraft() {
   setInputValue("");
   pastedContent.value = "";
   imageAttachments.value = [];
+  fileAttachments.value = [];
   clearConsoleTextAttachments();
   clearLocalFileAttachments();
   setAssetRefAttachments([]);
@@ -1444,12 +1463,14 @@ function buildSendPayload(
   assetRefs: AssetRefAttachment[],
   intent: ComposerIntentState,
   displayText?: string,
+  files?: FileAttachment[],
 ): ChatComposerSendPayload {
   return {
     text,
     displayText: displayText ?? text,
     images,
     assetRefs,
+    files,
     mode: intent.mode === "plan" ? "plan" : null,
     userIntent: buildUserIntentMeta(intent),
   };
@@ -1458,6 +1479,7 @@ function buildSendPayload(
 function canExecuteActionCommand(): boolean {
   return !pastedContent.value
     && imageAttachments.value.length === 0
+    && fileAttachments.value.length === 0
     && assetRefAttachments.value.length === 0
     && consoleTextAttachments.value.length === 0
     && localFileAttachments.value.length === 0
@@ -1529,6 +1551,7 @@ function handleSend() {
     !cleanedInput
     && !pastedContent.value
     && images.length === 0
+    && files.length === 0
     && assetRefs.length === 0
     && consoleTexts.length === 0
     && localFiles.length === 0
@@ -1698,9 +1721,60 @@ function addImageFile(file: File) {
     imageAttachments.value.push({
       data: dataUrl.substring(commaIndex + 1),
       mimeType: file.type || "image/png",
+      name: file.name,
     });
   };
   reader.readAsDataURL(file);
+}
+
+function addFileAttachment(file: File) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let content = reader.result as string;
+    // 去掉 BOM 头（某些 Windows 文件带这个）
+    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+    fileAttachments.value.push({
+      name: file.name,
+      size: file.size,
+      mimeType: file.type || "application/octet-stream",
+      content,
+    });
+  };
+  reader.readAsText(file);
+}
+
+function removeFileAttachment(index: number) {
+  fileAttachments.value.splice(index, 1);
+}
+
+/** 弹出系统文件选择框，选中的文件行为与拖拽完全一致 */
+function openFilePicker() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.style.display = "none";
+  input.addEventListener("change", () => {
+    const files = input.files;
+    if (!files) return;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file.size) continue;
+
+      if (file.type.startsWith("image/")) {
+        if (!modelAllowsImages.value) {
+          notificationStore.addNotice("warning", t("chat.modelNotSupportImage"));
+          continue;
+        }
+        addImageFile(file);
+      } else {
+        addFileAttachment(file);
+      }
+    }
+    // 用完释放
+    input.remove();
+  });
+  document.body.appendChild(input);
+  input.click();
 }
 
 function removeImage(index: number) {
@@ -1718,6 +1792,71 @@ function openImagePreview(index: number) {
 
 function closeImagePreview() {
   previewImageIndex.value = null;
+}
+
+/** 当前选中的 LLM 是否支持图片输入 */
+function modelSupportsImages(): boolean {
+  const modelId = modelStore.selectedModelId;
+  if (!modelId) return false;
+
+  const model = modelStore.allModels.find((m) => m.id === modelId);
+  if (!model) return false;
+
+  switch (model.provider) {
+    case "anthropic":
+    case "anthropic_sdk":
+      return true;
+
+    case "openai_codex":
+      return true;
+
+    case "openrouter": {
+      const lowerId = modelId.toLowerCase();
+      const lowerName = model.name.toLowerCase();
+      return lowerId.includes("claude")
+        || lowerId.includes("gpt-4o")
+        || lowerId.includes("gpt-5")
+        || lowerId.includes("gemini")
+        || lowerId.includes("glm-4")
+        || lowerId.includes("glm-5")
+        || lowerId.includes("minimax")
+        || lowerName.includes("claude")
+        || lowerName.includes("gpt")
+        || lowerName.includes("gemini");
+    }
+
+    case "custom": {
+      const lowerName = model.name.toLowerCase();
+      return lowerName.includes("claude")
+        || lowerName.includes("gpt")
+        || lowerName.includes("gemini");
+    }
+
+    default:
+      return false;
+  }
+}
+
+const modelAllowsImages = computed(() => props.allowImages && modelSupportsImages());
+
+function handleFileDrop(event: DragEvent) {
+  const files = event.dataTransfer?.files;
+  if (!files || files.length === 0) return;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (!file.size) continue;
+
+    if (file.type.startsWith("image/")) {
+      if (!modelAllowsImages.value) {
+        notificationStore.addNotice("warning", t("chat.modelNotSupportImage"));
+        continue;
+      }
+      addImageFile(file);
+    } else {
+      addFileAttachment(file);
+    }
+  }
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
@@ -2132,6 +2271,7 @@ defineExpose({
       @keyup="handleTextareaKeyup"
       @mouseup="handleTextareaInteraction"
       @focus="handleTextareaInteraction"
+      @drop="handleFileDrop"
       @send="handleSend"
       @cancel="emit('cancel')"
     >
@@ -2249,20 +2389,39 @@ defineExpose({
             />
           </template>
           <div
+            v-for="(file, index) in fileAttachments"
+            :key="`file:${index}`"
+            class="attachment-item"
+          >
+            <span class="attachment-item-icon">
+              <LucideIcon :icon="FileIcon" :size="16" />
+            </span>
+            <span class="attachment-item-name" :title="file.name">{{ file.name }}</span>
+            <button
+              class="attachment-item-remove ui-select-none"
+              type="button"
+              :aria-label="t('chat.paste.remove')"
+              @click="removeFileAttachment(index)"
+            >
+              &times;
+            </button>
+          </div>
+          <div
             v-for="(image, index) in imageAttachments"
             :key="`image:${index}`"
-            class="image-attachment-item"
+            class="attachment-item"
           >
             <button
-              class="image-attachment-thumb-button ui-select-none"
+              class="attachment-item-img-btn ui-select-none"
               type="button"
               :aria-label="t('chat.paste.previewImage')"
               @click="openImagePreview(index)"
             >
-              <img :src="imagePreviewUrl(image)" class="image-attachment-thumb" alt="" />
+              <img :src="imagePreviewUrl(image)" class="attachment-item-thumb" alt="" />
             </button>
+            <span class="attachment-item-name" :title="image.name">{{ image.name }}</span>
             <button
-              class="image-attachment-remove ui-select-none"
+              class="attachment-item-remove ui-select-none"
               type="button"
               :aria-label="t('chat.paste.remove')"
               @click="removeImage(index)"
@@ -2310,14 +2469,27 @@ defineExpose({
           </div>
         </div>
       </template>
-      <template v-if="hasFooterStart" #footer-start>
-        <slot name="footer-start" />
-        <slot name="top-start" />
+      <template #footer-start>
+        <template v-if="hasFooterStart">
+          <slot name="footer-start" />
+          <slot name="top-start" />
+        </template>
       </template>
-      <template v-if="hasFooterEnd" #footer-end>
-        <slot name="footer-end" />
-        <slot name="top-end" />
-        <slot name="footer" />
+      <template #footer-end>
+        <button
+          class="file-attach-btn ui-select-none"
+          type="button"
+          :title="t('chat.fileAttach')"
+          :aria-label="t('chat.fileAttach')"
+          @click="openFilePicker"
+        >
+          <LucideIcon :icon="Paperclip" :size="16" />
+        </button>
+        <template v-if="hasFooterEnd">
+          <slot name="footer-end" />
+          <slot name="top-end" />
+          <slot name="footer" />
+        </template>
       </template>
     </ChatComposer>
   </ChatInputShell>
@@ -3173,50 +3345,74 @@ defineExpose({
   transform: translateY(6px);
 }
 
-.image-attachment-item {
-  position: relative;
+.file-attach-btn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--border-color);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--panel-bg) 72%, var(--input-bg) 28%);
-}
-
-.image-attachment-thumb-button {
-  display: block;
-  width: 100%;
-  height: 100%;
   padding: 0;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--input-bg) 80%, var(--panel-bg) 20%);
-  cursor: zoom-in;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: none;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 
-.image-attachment-thumb-button:focus-visible {
-  outline: 1px solid var(--accent-color);
-  outline-offset: 1px;
+.file-attach-btn:hover {
+  color: var(--text-color);
+  background: var(--hover-bg);
 }
 
-.image-attachment-thumb {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.file-attach-btn:active {
+  background: color-mix(in srgb, var(--hover-bg) 60%, transparent);
 }
 
-.image-attachment-remove {
-  position: absolute;
-  top: -1px;
-  right: -1px;
-  width: 14px;
-  height: 14px;
+.attachment-item {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  max-width: min(200px, calc(100vw - 96px));
+  padding: 0 6px 0 4px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel-bg) 70%, var(--input-bg) 30%);
+}
+
+.attachment-item-icon {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.attachment-item-name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-color);
+}
+
+.attachment-item-remove {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   padding: 0;
+  margin-left: auto;
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
   border-radius: 50%;
   background: var(--panel-bg);
@@ -3228,16 +3424,41 @@ defineExpose({
   transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
 }
 
-.image-attachment-item:hover .image-attachment-remove,
-.image-attachment-remove:focus-visible {
+.attachment-item:hover .attachment-item-remove,
+.attachment-item-remove:focus-visible {
   opacity: 1;
 }
 
-.image-attachment-remove:hover,
-.image-attachment-remove:focus-visible {
+.attachment-item-remove:hover,
+.attachment-item-remove:focus-visible {
   color: var(--text-color);
   background: var(--hover-bg);
   border-color: color-mix(in srgb, var(--border-color) 82%, transparent);
+}
+
+.attachment-item-img-btn {
+  flex: 0 0 auto;
+  display: block;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--input-bg) 80%, var(--panel-bg) 20%);
+  cursor: zoom-in;
+}
+
+.attachment-item-img-btn:focus-visible {
+  outline: 1px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+.attachment-item-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .image-preview-overlay {
