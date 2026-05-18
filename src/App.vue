@@ -185,6 +185,10 @@ const agentView = createLazyViewState(
   () => import("./components/AgentView.vue"),
   "loadAgentView",
 );
+const editorView = createLazyViewState(
+  () => import("./components/editor/EditorView.vue"),
+  "loadEditorView",
+);
 const settingsView = createLazyViewState(
   () => import("./components/SettingsView.vue"),
   "loadSettingsView",
@@ -213,6 +217,10 @@ const viewPackageViewError = viewPackageView.error;
 const agentViewComponent = agentView.component;
 const agentViewLoading = agentView.loading;
 const agentViewError = agentView.error;
+
+const editorViewComponent = editorView.component;
+const editorViewLoading = editorView.loading;
+const editorViewError = editorView.error;
 
 const settingsViewComponent = settingsView.component;
 const settingsViewLoading = settingsView.loading;
@@ -246,6 +254,11 @@ watch(() => uiStore.viewMounted, (mounted) => {
 watch(() => uiStore.agentMounted, (mounted) => {
   if (!mounted) return;
   void agentView.ensureLoaded();
+}, { immediate: true });
+
+watch(() => uiStore.editorMounted, (mounted) => {
+  if (!mounted) return;
+  void editorView.ensureLoaded();
 }, { immediate: true });
 
 watch(() => uiStore.settingsMounted, (mounted) => {
@@ -707,6 +720,11 @@ watch(() => projectStore.workingDir, () => {
         >{{ t("app.tab.dev") }}</button>
         <button
           class="tab-item"
+          :class="{ active: uiStore.activeTab === 'editor' }"
+          @click="uiStore.setTab('editor')"
+        >{{ t("app.tab.editor") }}</button>
+        <button
+          class="tab-item"
           :class="{ active: uiStore.activeTab === 'knowledge' }"
           @click="uiStore.setTab('knowledge')"
         >{{ t("app.tab.knowledge") }}</button>
@@ -925,6 +943,20 @@ watch(() => projectStore.workingDir, () => {
           :class="{ 'is-loading': agentViewLoading, 'is-error': !!agentViewError }"
         >
           {{ agentViewError || t("common.loading") }}
+        </div>
+
+        <component
+          :is="editorViewComponent"
+          v-if="uiStore.editorMounted && editorViewComponent"
+          v-show="uiStore.activeTab === 'editor'"
+          :working-dir="projectStore.workingDir"
+        />
+        <div
+          v-else-if="uiStore.editorMounted && uiStore.activeTab === 'editor'"
+          class="tab-loading-state"
+          :class="{ 'is-loading': editorViewLoading, 'is-error': !!editorViewError }"
+        >
+          {{ editorViewError || t("common.loading") }}
         </div>
 
         <component

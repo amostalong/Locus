@@ -17,7 +17,7 @@ interface NativeWindowClientSizeEvent {
 }
 
 export const useUiStore = defineStore("ui", () => {
-  const activeTab = ref<"chat" | "collab" | "knowledge" | "asset" | "views" | "agent" | "settings">("chat");
+  const activeTab = ref<"chat" | "collab" | "knowledge" | "asset" | "views" | "agent" | "editor" | "settings">("chat");
   const settingsCategoryHint = ref<"api" | "models" | "permissions" | "proxy" | "general" | "display" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
   const alwaysOnTop = ref(false);
   const isMaximized = ref(false);
@@ -37,6 +37,7 @@ export const useUiStore = defineStore("ui", () => {
   const assetMounted = ref(false);
   const viewMounted = ref(false);
   const agentMounted = ref(false);
+  const editorMounted = ref(false);
   const settingsMounted = ref(false);
 
   let appWindow: TauriWindow | null = null;
@@ -191,6 +192,7 @@ export const useUiStore = defineStore("ui", () => {
     if (tab === "asset") assetMounted.value = true;
     if (tab === "views") viewMounted.value = true;
     if (tab === "agent") agentMounted.value = true;
+    if (tab === "editor") editorMounted.value = true;
     if (tab === "settings") settingsMounted.value = true;
   }
 
@@ -285,6 +287,7 @@ export const useUiStore = defineStore("ui", () => {
     assetMounted,
     viewMounted,
     agentMounted,
+    editorMounted,
     settingsMounted,
     init,
     cleanup,

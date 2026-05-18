@@ -1,5 +1,6 @@
 {
   "app.tab.dev": "Sessions",
+  "app.tab.editor": "Editor",
   "app.tab.collab": "Collab",
   "app.tab.knowledge": "Knowledge",
   "app.tab.asset": "Assets",

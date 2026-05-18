@@ -863,6 +863,8 @@ pub fn run() {
             commands::list_dir_entries,
             commands::list_dir_entries_page,
             commands::search_workspace_entries,
+            commands::editor_read_file,
+            commands::editor_write_file,
             commands::save_raw_context,
             commands::get_todos,
             commands::cancel_chat,
