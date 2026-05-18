@@ -46,6 +46,7 @@ export default defineConfig(async () => ({
           vendor: ["vue", "pinia", "marked", "highlight.js"],
           "binary-preview": ["ag-psd"],
           "three-preview": ["three"],
+          monaco: ["monaco-editor"],
         },
       },
     },
