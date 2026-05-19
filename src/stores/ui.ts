@@ -5,6 +5,7 @@ import type { Window as TauriWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { hasTauriWindowRuntime } from "../services/tauriRuntime";
+import type { CodeRefAttachment } from "../types";
 
 const WINDOW_RESIZE_SETTLE_DELAY_MS = 420;
 const MIN_TRACKABLE_WINDOW_WIDTH_PX = 320;
@@ -26,6 +27,7 @@ export const useUiStore = defineStore("ui", () => {
   const nativeWindowHeight = ref<number | null>(null);
   const showOnboarding = ref(false);
   const pendingChatPrefill = ref<{ id: number; text: string } | null>(null);
+  const pendingCodeRef = ref<{ id: number; ref: CodeRefAttachment } | null>(null);
   const pendingKnowledgeSelection = ref<{
     id: number;
     dashboard: "design" | "memory" | "skill" | "reference";
@@ -218,6 +220,19 @@ export const useUiStore = defineStore("ui", () => {
     pendingChatPrefill.value = null;
   }
 
+  function stageCodeRef(ref: CodeRefAttachment) {
+    pendingCodeRef.value = {
+      id: Date.now(),
+      ref,
+    };
+  }
+
+  function clearPendingCodeRef(id?: number) {
+    if (!pendingCodeRef.value) return;
+    if (id != null && pendingCodeRef.value.id !== id) return;
+    pendingCodeRef.value = null;
+  }
+
   function stageKnowledgeSelection(selection: Omit<NonNullable<typeof pendingKnowledgeSelection.value>, "id">) {
     pendingKnowledgeSelection.value = {
       id: Date.now(),
@@ -281,6 +296,7 @@ export const useUiStore = defineStore("ui", () => {
     nativeWindowHeight,
     showOnboarding,
     pendingChatPrefill,
+    pendingCodeRef,
     pendingKnowledgeSelection,
     collabMounted,
     knowledgeMounted,
@@ -296,6 +312,8 @@ export const useUiStore = defineStore("ui", () => {
     clearSettingsCategoryHint,
     stageChatPrefill,
     clearPendingChatPrefill,
+    stageCodeRef,
+    clearPendingCodeRef,
     stageKnowledgeSelection,
     clearPendingKnowledgeSelection,
     toggleAlwaysOnTop,

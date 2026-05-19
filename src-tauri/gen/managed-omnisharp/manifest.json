@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "generatedAt": "2026-05-21T09:31:43.575Z",
+  "omnisharpVersion": "v1.39.15",
+  "runtimes": [
+    {
+      "id": "windows-x64",
+      "executable": "windows-x64/OmniSharp.exe",
+      "sourceArchive": "omnisharp-win-x64-net6.0.zip"
+    }
+  ]
+}

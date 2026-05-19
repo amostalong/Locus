@@ -11,9 +11,11 @@ import {
   type DirEntry,
 } from "../../services/project";
 import { useNotificationStore } from "../../stores/notification";
+import { useUiStore } from "../../stores/ui";
 import type {
   AssetRefAttachment,
   ChatComposerSendPayload,
+  CodeRefAttachment,
   FileAttachment,
   ImageAttachment,
   KnowledgeDocumentType,
@@ -168,6 +170,7 @@ const emit = defineEmits<{
 const composerRef = ref<InstanceType<typeof ChatComposer> | null>(null);
 const notificationStore = useNotificationStore();
 const projectStore = useProjectStore();
+const uiStore = useUiStore();
 const modelStore = useModelStore();
 const slots = useSlots();
 const { state: chatInputSettings } = useChatInputSettings();
@@ -180,8 +183,9 @@ const {
   findExactAvailableCommand,
 } = useCommandRegistry(skillsRef, agentIdRef);
 
-const pastedContent = ref("");
 const showPasteEditor = ref(false);
+const editingFileIndex = ref<number | null>(null);
+const pastedFileSeq = ref(0);
 const imageAttachments = ref<ImageAttachmentItem[]>([]);
 const assetRefAttachments = ref<AssetRefAttachment[]>([]);
 const showAssetRefDetails = ref(false);
@@ -189,6 +193,7 @@ const consoleTextAttachments = ref<ConsoleTextAttachment[]>([]);
 const showConsoleTextDetails = ref(false);
 const localFileAttachments = ref<LocalFileAttachment[]>([]);
 const showLocalFileDetails = ref(false);
+const codeRefAttachments = ref<CodeRefAttachment[]>([]);
 const previewImageIndex = ref<number | null>(null);
 const composerIntent = ref<ComposerIntentState>(emptyComposerIntent());
 const activeOperator = ref<ActiveOperator | null>(null);
@@ -234,6 +239,7 @@ const assetRefSyncSourceId = `rich-chat-input-${Date.now().toString(36)}-${Math.
 const hasTopAttachments = computed(() =>
   imageAttachments.value.length > 0
   || fileAttachments.value.length > 0
+  || codeRefAttachments.value.length > 0
   || assetRefAttachments.value.length > 0
   || consoleTextAttachments.value.length > 0
   || localFileAttachments.value.length > 0,
@@ -242,8 +248,10 @@ const hasTopAttachments = computed(() =>
 const canSend = computed(() =>
   !!props.modelValue.trim()
   || !!pastedContent.value
+  || props.isStreaming
   || imageAttachments.value.length > 0
   || fileAttachments.value.length > 0
+  || codeRefAttachments.value.length > 0
   || assetRefAttachments.value.length > 0
   || consoleTextAttachments.value.length > 0
   || localFileAttachments.value.length > 0,
@@ -1424,11 +1432,37 @@ function appendFileAttachmentsPromptBlock(text: string, items: FileAttachment[])
   return text.trim() ? `${text}\n\n${block}` : block;
 }
 
+function escapeXmlAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function appendCodeRefsPromptBlock(text: string, items: CodeRefAttachment[]): string {
+  if (items.length === 0) return text;
+  const blocks = items.map((ref) => {
+    const attrs = [
+      `path="${escapeXmlAttr(ref.relPath)}"`,
+      `lines="${ref.startLine}-${ref.endLine}"`,
+      `kind="${ref.kind}"`,
+      ref.symbolName ? `symbol="${escapeXmlAttr(ref.symbolName)}"` : "",
+      `lang="${escapeXmlAttr(ref.language)}"`,
+    ].filter(Boolean).join(" ");
+    return `<locus-coderef ${attrs}>\n\`\`\`${ref.language === "plaintext" ? "" : ref.language}\n${ref.excerpt}\n\`\`\`\n</locus-coderef>`;
+  });
+  const block = blocks.join("\n\n");
+  return text.trim() ? `${text}\n\n${block}` : block;
+}
+
 function resetDraft() {
   setInputValue("");
-  pastedContent.value = "";
   imageAttachments.value = [];
   fileAttachments.value = [];
+  pastedFileSeq.value = 0;
+  closeFileEditor();
+  codeRefAttachments.value = [];
   clearConsoleTextAttachments();
   clearLocalFileAttachments();
   setAssetRefAttachments([]);
@@ -1477,9 +1511,9 @@ function buildSendPayload(
 }
 
 function canExecuteActionCommand(): boolean {
-  return !pastedContent.value
-    && imageAttachments.value.length === 0
+  return imageAttachments.value.length === 0
     && fileAttachments.value.length === 0
+    && codeRefAttachments.value.length === 0
     && assetRefAttachments.value.length === 0
     && consoleTextAttachments.value.length === 0
     && localFileAttachments.value.length === 0
@@ -1546,15 +1580,15 @@ function handleSend() {
   const assetRefs = dedupeAssetRefs([...assetRefAttachments.value, ...inlineAssetRefs.assetRefs]);
   const consoleTexts = [...consoleTextAttachments.value];
   const localFiles = [...localFileAttachments.value];
+  const codeRefs = [...codeRefAttachments.value];
 
   if (
     !cleanedInput
-    && !pastedContent.value
     && images.length === 0
-    && files.length === 0
+    && localFiles.length === 0
+    && codeRefs.length === 0
     && assetRefs.length === 0
     && consoleTexts.length === 0
-    && localFiles.length === 0
   ) {
     if (hasComposerIntent(mergedIntent)) {
       showUserIntentMissingInputNotice();
@@ -1562,13 +1596,12 @@ function handleSend() {
     return;
   }
 
-  const text = pastedContent.value
-    ? (cleanedInput ? `${cleanedInput}\n\n${pastedContent.value}` : pastedContent.value)
-    : cleanedInput;
+  const text = cleanedInput;
 
   const textWithConsole = appendConsoleTextPromptBlock(text, consoleTexts);
   const textWithLocalFiles = appendLocalFilesPromptBlock(textWithConsole, localFiles);
-  const sendText = appendAssetRefsPromptBlock(textWithLocalFiles, assetRefs);
+  const textWithCodeRefs = appendCodeRefsPromptBlock(textWithLocalFiles, codeRefs);
+  const sendText = appendAssetRefsPromptBlock(textWithCodeRefs, assetRefs);
   const displayText = appendLocalFilesDisplayBlock(
     appendConsoleTextDisplayBlock(text, consoleTexts),
     localFiles,
@@ -1707,8 +1740,18 @@ function handlePaste(event: ClipboardEvent) {
   const text = event.clipboardData?.getData("text/plain") || "";
   if (text.length > PASTE_THRESHOLD) {
     event.preventDefault();
-    pastedContent.value = text;
+    addPastedTextAttachment(text);
   }
+}
+
+function addPastedTextAttachment(text: string) {
+  pastedFileSeq.value += 1;
+  fileAttachments.value.push({
+    name: `pasted-${pastedFileSeq.value}.txt`,
+    size: text.length,
+    mimeType: "text/plain",
+    content: text,
+  });
 }
 
 function addImageFile(file: File) {
@@ -1745,6 +1788,23 @@ function addFileAttachment(file: File) {
 
 function removeFileAttachment(index: number) {
   fileAttachments.value.splice(index, 1);
+}
+
+function removeCodeRef(index: number) {
+  codeRefAttachments.value.splice(index, 1);
+}
+
+function codeRefShortLabel(ref: CodeRefAttachment): string {
+  const fileName = ref.relPath.split(/[/\\]/).pop() || ref.relPath;
+  if (ref.symbolName) return ref.symbolName;
+  if (ref.kind === "file") return fileName;
+  return `${fileName}:${ref.startLine}${ref.endLine !== ref.startLine ? `-${ref.endLine}` : ""}`;
+}
+
+function codeRefSecondary(ref: CodeRefAttachment): string {
+  const fileName = ref.relPath.split(/[/\\]/).pop() || ref.relPath;
+  if (ref.kind === "file") return ref.relPath;
+  return `${fileName}:${ref.startLine}${ref.endLine !== ref.startLine ? `-${ref.endLine}` : ""}`;
 }
 
 /** 弹出系统文件选择框，选中的文件行为与拖拽完全一致 */
@@ -1889,16 +1949,22 @@ function handleDocumentMouseDown(event: MouseEvent) {
   closeLocalFileDetails();
 }
 
-function openPasteEditor() {
+function openFileEditor(index: number) {
+  if (index < 0 || index >= fileAttachments.value.length) return;
+  editingFileIndex.value = index;
   showPasteEditor.value = true;
 }
 
-function closePasteEditor() {
+function closeFileEditor() {
   showPasteEditor.value = false;
+  editingFileIndex.value = null;
 }
 
-function removePastedContent() {
-  pastedContent.value = "";
+function removeEditingFile() {
+  const index = editingFileIndex.value;
+  if (index == null) return;
+  fileAttachments.value.splice(index, 1);
+  closeFileEditor();
 }
 
 function removePlanBadge() {
@@ -1972,6 +2038,16 @@ watch(
 watch(shouldCollapseAssetRefs, (collapsed) => {
   if (!collapsed) closeAssetRefDetails();
 });
+
+watch(
+  () => uiStore.pendingCodeRef?.id,
+  (id) => {
+    const pending = uiStore.pendingCodeRef;
+    if (!id || !pending) return;
+    codeRefAttachments.value.push(pending.ref);
+    uiStore.clearPendingCodeRef(id);
+  },
+);
 
 onMounted(() => {
   unityAssetDropSubscriptionDisposed = false;
@@ -2391,7 +2467,9 @@ defineExpose({
           <div
             v-for="(file, index) in fileAttachments"
             :key="`file:${index}`"
-            class="attachment-item"
+            class="attachment-item attachment-item-clickable"
+            :title="t('chat.paste.clickToEdit')"
+            @click="openFileEditor(index)"
           >
             <span class="attachment-item-icon">
               <LucideIcon :icon="FileIcon" :size="16" />
@@ -2401,7 +2479,29 @@ defineExpose({
               class="attachment-item-remove ui-select-none"
               type="button"
               :aria-label="t('chat.paste.remove')"
-              @click="removeFileAttachment(index)"
+              @click.stop="removeFileAttachment(index)"
+            >
+              &times;
+            </button>
+          </div>
+          <div
+            v-for="(ref, index) in codeRefAttachments"
+            :key="`coderef:${index}:${ref.relPath}:${ref.startLine}`"
+            class="attachment-item attachment-item-coderef"
+            :title="`${ref.relPath}:${ref.startLine}-${ref.endLine}`"
+          >
+            <span class="attachment-item-icon">
+              <LucideIcon :icon="FileText" :size="16" />
+            </span>
+            <span class="attachment-item-name">
+              <span class="attachment-item-primary">{{ codeRefShortLabel(ref) }}</span>
+              <span class="attachment-item-secondary">{{ codeRefSecondary(ref) }}</span>
+            </span>
+            <button
+              class="attachment-item-remove ui-select-none"
+              type="button"
+              :aria-label="t('chat.paste.remove')"
+              @click="removeCodeRef(index)"
             >
               &times;
             </button>
@@ -2496,24 +2596,28 @@ defineExpose({
 
   <Teleport to="body">
     <Transition name="paste-editor-overlay">
-      <div v-if="showPasteEditor" class="paste-editor-overlay" @mousedown.self="closePasteEditor">
+      <div
+        v-if="showPasteEditor && editingFileIndex != null && fileAttachments[editingFileIndex]"
+        class="paste-editor-overlay"
+        @mousedown.self="closeFileEditor"
+      >
         <div class="paste-editor-modal">
           <div class="paste-editor-header">
-            <span class="paste-editor-title">{{ t("chat.paste.editTitle") }}</span>
-            <button class="paste-editor-close ui-select-none" @click="closePasteEditor">&times;</button>
+            <span class="paste-editor-title">{{ fileAttachments[editingFileIndex].name }}</span>
+            <button class="paste-editor-close ui-select-none" @click="closeFileEditor">&times;</button>
           </div>
           <textarea
-            v-model="pastedContent"
+            v-model="fileAttachments[editingFileIndex].content"
             class="paste-editor-textarea"
             spellcheck="false"
           />
           <div class="paste-editor-footer">
-            <span class="paste-editor-info">{{ pastedContent.length }} chars</span>
+            <span class="paste-editor-info">{{ fileAttachments[editingFileIndex].content.length }} chars</span>
             <div class="paste-editor-actions">
-              <button class="paste-editor-btn paste-editor-btn-danger ui-select-none" @click="removePastedContent(); closePasteEditor()">
+              <button class="paste-editor-btn paste-editor-btn-danger ui-select-none" @click="removeEditingFile">
                 {{ t("chat.paste.remove") }}
               </button>
-              <button class="paste-editor-btn paste-editor-btn-primary ui-select-none" @click="closePasteEditor">
+              <button class="paste-editor-btn paste-editor-btn-primary ui-select-none" @click="closeFileEditor">
                 {{ t("chat.paste.done") }}
               </button>
             </div>
@@ -3384,6 +3488,16 @@ defineExpose({
   background: color-mix(in srgb, var(--panel-bg) 70%, var(--input-bg) 30%);
 }
 
+.attachment-item-clickable {
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.attachment-item-clickable:hover {
+  background: color-mix(in srgb, var(--hover-bg) 70%, var(--panel-bg) 30%);
+  border-color: color-mix(in srgb, var(--accent-color) 28%, var(--border-color));
+}
+
 .attachment-item-icon {
   flex: 0 0 auto;
   display: flex;
@@ -3402,6 +3516,33 @@ defineExpose({
   font-size: 12px;
   line-height: 1;
   color: var(--text-color);
+}
+
+.attachment-item-coderef {
+  max-width: min(280px, calc(100vw - 96px));
+}
+
+.attachment-item-coderef .attachment-item-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1.1;
+}
+
+.attachment-item-primary {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-item-secondary {
+  font-size: 11px;
+  color: var(--text-secondary, var(--text-color));
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachment-item-remove {
@@ -3524,91 +3665,6 @@ defineExpose({
 .image-preview-overlay-enter-from,
 .image-preview-overlay-leave-to {
   opacity: 0;
-}
-
-.paste-preview {
-  background: var(--input-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.paste-preview-body {
-  max-height: 120px;
-  overflow-y: auto;
-  padding: 10px 14px;
-  cursor: pointer;
-}
-
-.paste-preview-text {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-color);
-  white-space: pre-wrap;
-  word-break: break-word;
-  opacity: 0.8;
-  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
-}
-
-.paste-preview-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 14px 8px;
-}
-
-.paste-badge {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  padding: 2px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  background: var(--bg-color);
-}
-
-.paste-char-count {
-  font-size: 11px;
-  color: var(--text-secondary);
-  opacity: 0.7;
-  margin-left: auto;
-  margin-right: 8px;
-}
-
-.paste-remove {
-  background: none;
-  border: none;
-  font-size: 18px;
-  line-height: 1;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
-  transition: all 0.12s;
-}
-
-.paste-remove:hover {
-  color: var(--text-color);
-  background: var(--hover-bg);
-}
-
-.paste-preview-enter-active {
-  transition: all 0.2s ease-out;
-}
-
-.paste-preview-leave-active {
-  transition: all 0.15s ease-in;
-}
-
-.paste-preview-enter-from,
-.paste-preview-leave-to {
-  opacity: 0;
-  max-height: 0;
-  margin-bottom: 0;
-  transform: translateY(8px);
 }
 
 .paste-editor-overlay {

@@ -5,6 +5,7 @@ import { useEditorStore } from "../../stores/editor";
 import { useUiStore } from "../../stores/ui";
 import { useNotificationStore } from "../../stores/notification";
 import { normalizeAppError } from "../../services/errors";
+import type { CodeRefAttachment } from "../../types";
 import FileTree from "./FileTree.vue";
 import EditorTabs from "./EditorTabs.vue";
 import MonacoHost from "./MonacoHost.vue";
@@ -66,6 +67,11 @@ async function saveActive(): Promise<void> {
   }
 }
 
+function handleCodeRef(ref: CodeRefAttachment) {
+  uiStore.stageCodeRef(ref);
+  uiStore.setTab("chat");
+}
+
 function isSaveShortcut(event: KeyboardEvent): boolean {
   if (event.key !== "s" && event.key !== "S") return false;
   if (event.altKey || event.shiftKey) return false;
@@ -114,7 +120,7 @@ onBeforeUnmount(() => {
             Working directory: <code>{{ props.workingDir || "(not set)" }}</code>
           </p>
         </div>
-        <MonacoHost v-show="activeFile" class="editor-pane-monaco" />
+        <MonacoHost v-show="activeFile" class="editor-pane-monaco" @code-ref="handleCodeRef" />
       </div>
       <footer class="editor-pane-status">
         <span v-if="activeFile" class="editor-pane-status-path">{{ activeFile.relPath }}</span>

@@ -115,6 +115,36 @@ export interface ChatComposerSendPayload {
   assetRefs: AssetRefAttachment[];
   mode?: string | null;
   userIntent?: UserIntentMeta | null;
+  files?: FileAttachment[];
+}
+
+export interface FileAttachment {
+  name: string;
+  size: number;
+  mimeType: string;
+  content: string;
+}
+
+export type CodeRefKind = "selection" | "line" | "function" | "class" | "file";
+
+export interface CodeRefAttachment {
+  /** Workspace-relative path. */
+  relPath: string;
+  /** What the user picked to reference. */
+  kind: CodeRefKind;
+  /** 1-based line/column range. endLine inclusive. */
+  startLine: number;
+  endLine: number;
+  /** Only meaningful for "selection" / "line"; functions/classes span whole lines. */
+  startColumn?: number;
+  endColumn?: number;
+  /** Symbol name when kind is "function" or "class". */
+  symbolName?: string;
+  /** Monaco language id (csharp, typescript, hlsl, ...). */
+  language: string;
+  /** Excerpted code text covering the range, LF-normalized. */
+  excerpt: string;
+}
 }
 
 export type KnowledgeProposalVerify = "none" | "required";
