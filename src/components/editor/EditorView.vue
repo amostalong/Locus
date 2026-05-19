@@ -9,6 +9,7 @@ import type { CodeRefAttachment } from "../../types";
 import FileTree from "./FileTree.vue";
 import EditorTabs from "./EditorTabs.vue";
 import MonacoHost from "./MonacoHost.vue";
+import QuickOpenPalette from "./QuickOpenPalette.vue";
 
 const props = defineProps<{
   workingDir: string;
@@ -18,6 +19,11 @@ const editorStore = useEditorStore();
 const uiStore = useUiStore();
 const notificationStore = useNotificationStore();
 const openError = ref<string | null>(null);
+const showQuickOpen = ref(false);
+
+const SHIFT_DOUBLE_PRESS_WINDOW_MS = 300;
+let lastShiftAt = 0;
+let interveningKey = false;
 
 const activeFile = computed(() => editorStore.active);
 
@@ -81,9 +87,43 @@ function isSaveShortcut(event: KeyboardEvent): boolean {
 
 function onKeyDown(event: KeyboardEvent) {
   if (uiStore.activeTab !== "editor") return;
+
+  if (
+    event.key === "Shift"
+    && !event.repeat
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+  ) {
+    const now = performance.now();
+    if (
+      lastShiftAt
+      && !interveningKey
+      && now - lastShiftAt < SHIFT_DOUBLE_PRESS_WINDOW_MS
+    ) {
+      lastShiftAt = 0;
+      interveningKey = false;
+      event.preventDefault();
+      showQuickOpen.value = true;
+      return;
+    }
+    lastShiftAt = now;
+    interveningKey = false;
+    return;
+  }
+
+  if (event.key !== "Shift") {
+    interveningKey = true;
+  }
+
   if (!isSaveShortcut(event)) return;
   event.preventDefault();
   void saveActive();
+}
+
+function handleQuickOpen(relPath: string) {
+  showQuickOpen.value = false;
+  void handleOpen(relPath);
 }
 
 onMounted(() => {
@@ -122,6 +162,11 @@ onBeforeUnmount(() => {
         </div>
         <MonacoHost v-show="activeFile" class="editor-pane-monaco" @code-ref="handleCodeRef" />
       </div>
+      <QuickOpenPalette
+        :visible="showQuickOpen"
+        @close="showQuickOpen = false"
+        @open="handleQuickOpen"
+      />
       <footer class="editor-pane-status">
         <span v-if="activeFile" class="editor-pane-status-path">{{ activeFile.relPath }}</span>
         <span v-else class="editor-pane-status-path is-muted">No file open</span>
