@@ -20,6 +20,8 @@
     "python:bundle": "bun run scripts/prepare-managed-python.mjs",
     "git:bundle": "bun run scripts/prepare-managed-git.mjs",
     "ort:bundle": "bun run scripts/prepare-ort-runtime.mjs",
+    "omnisharp:prepare": "bun run scripts/prepare-managed-omnisharp.mjs",
+    "omnisharp:test": "bun run scripts/prepare-managed-omnisharp.mjs --test",
     "licenses:bundle": "bun run scripts/generate-third-party-bundle.mjs",
     "preview": "vite preview",
     "tauri": "bun run scripts/run-tauri.mjs",

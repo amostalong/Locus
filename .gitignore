@@ -28,6 +28,10 @@ src-tauri/gen/managed-python/manifest.json
 src-tauri/gen/managed-python/pip.pyz
 src-tauri/gen/managed-git/windows-*/
 src-tauri/gen/managed-git/manifest.json
+src-tauri/gen/managed-omnisharp/windows-*/
+src-tauri/gen/managed-omnisharp/macos-*/
+src-tauri/gen/managed-omnisharp/linux-*/
+src-tauri/gen/managed-omnisharp/manifest.json
 src-tauri/gen/ort-runtime/windows-*/
 
 # Editor directories and files

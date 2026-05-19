@@ -25,6 +25,7 @@ pub mod knowledge_index;
 pub mod knowledge_store;
 mod knowledge_watcher;
 mod llm;
+pub mod lsp;
 pub(crate) mod merge;
 pub mod network;
 pub mod process_util;
@@ -730,6 +731,7 @@ pub fn run() {
             app.manage(unity_reference_import_state);
             app.manage(feishu_reference_import_state);
             app.manage(log_store_for_setup.clone());
+            app.manage(Arc::new(crate::lsp::LspManager::new()));
             startup_for_setup.mark("setup_state_managed");
             startup_for_setup.mark("setup_backend_ready");
 
@@ -1086,6 +1088,9 @@ pub fn run() {
             commands::agent_graph_tool_cancel,
             commands::agent_graph_tool_reopen,
             commands::fetch_app_update_manifest,
+            commands::lsp_start,
+            commands::lsp_send,
+            commands::lsp_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
