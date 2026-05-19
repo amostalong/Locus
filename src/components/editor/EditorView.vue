@@ -160,7 +160,12 @@ onBeforeUnmount(() => {
             Working directory: <code>{{ props.workingDir || "(not set)" }}</code>
           </p>
         </div>
-        <MonacoHost v-show="activeFile" class="editor-pane-monaco" @code-ref="handleCodeRef" />
+        <MonacoHost
+          v-show="activeFile"
+          class="editor-pane-monaco"
+          :working-dir="props.workingDir"
+          @code-ref="handleCodeRef"
+        />
       </div>
       <QuickOpenPalette
         :visible="showQuickOpen"

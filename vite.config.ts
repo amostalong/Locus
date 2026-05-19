@@ -42,14 +42,31 @@ export default defineConfig(async () => ({
     chunkSizeWarningLimit: 800, // three.js chunk ~725KB, already lazy-loaded
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ["vue", "pinia", "marked", "highlight.js"],
-          "binary-preview": ["ag-psd"],
-          "three-preview": ["three"],
-          monaco: ["monaco-editor"],
+        manualChunks(id) {
+          if (id.includes("node_modules/three")) return "three-preview";
+          if (id.includes("node_modules/ag-psd")) return "binary-preview";
+          if (
+            id.includes("node_modules/monaco-editor")
+            || id.includes("node_modules/@codingame/")
+            || id.includes("node_modules/monaco-languageclient")
+            || id.includes("node_modules/vscode-languageclient")
+            || id.includes("node_modules/vscode-languageserver-protocol")
+            || id.includes("node_modules/vscode-jsonrpc")
+          ) return "monaco";
+          if (
+            id.includes("node_modules/vue")
+            || id.includes("node_modules/pinia")
+            || id.includes("node_modules/marked")
+            || id.includes("node_modules/highlight.js")
+          ) return "vendor";
+          return undefined;
         },
       },
     },
+  },
+
+  worker: {
+    format: "es",
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

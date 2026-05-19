@@ -1,42 +1,20 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as monaco from "monaco-editor";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
-import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
-import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
-import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 
 import { useEditorStore, type OpenFile } from "../../stores/editor";
 import { createAnimationFrameResizeObserver } from "../../composables/resizeObserver";
-import { registerUnityLanguages } from "../../services/unityLanguages";
+import { ensureMonacoVscodeServices } from "../../services/monacoVscodeServices";
+import {
+  startCsharpLanguageClient,
+  type LanguageClientHandle,
+} from "../../services/lspClient";
 import { findEnclosing, type EnclosingSymbol } from "../../services/codeRefDetect";
 import type { CodeRefAttachment, CodeRefKind } from "../../types";
 
-const monacoEnv: monaco.Environment = {
-  getWorker(_workerId, label) {
-    switch (label) {
-      case "json":
-        return new JsonWorker();
-      case "css":
-      case "scss":
-      case "less":
-        return new CssWorker();
-      case "html":
-      case "handlebars":
-      case "razor":
-        return new HtmlWorker();
-      case "typescript":
-      case "javascript":
-        return new TsWorker();
-      default:
-        return new EditorWorker();
-    }
-  },
-};
-(self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = monacoEnv;
-
-registerUnityLanguages(monaco);
+const props = defineProps<{
+  workingDir: string;
+}>();
 
 function resolveMonacoTheme(): string {
   const themeAttr = document.documentElement.getAttribute("data-theme");
@@ -56,6 +34,8 @@ let themeObserver: MutationObserver | null = null;
 let hasFunctionCtx: monaco.editor.IContextKey<boolean> | null = null;
 let hasClassCtx: monaco.editor.IContextKey<boolean> | null = null;
 let cursorListener: monaco.IDisposable | null = null;
+let csharpClient: LanguageClientHandle | null = null;
+let csharpClientPending: Promise<void> | null = null;
 
 function syncModel() {
   if (!editor) return;
@@ -222,8 +202,53 @@ function registerCodeRefActions(ed: monaco.editor.IStandaloneCodeEditor) {
   });
 }
 
-onMounted(() => {
+async function ensureCsharpClient(workspaceDir: string): Promise<void> {
+  const dir = workspaceDir.trim();
+  if (!dir) return;
+  if (csharpClient && csharpClient.workspaceDir === dir) return;
+  if (csharpClientPending) {
+    await csharpClientPending;
+    if (csharpClient && csharpClient.workspaceDir === dir) return;
+  }
+  csharpClientPending = (async () => {
+    if (csharpClient) {
+      const old = csharpClient;
+      csharpClient = null;
+      await old.stop().catch((err) => {
+        console.warn("[lsp] failed to stop previous C# client:", err);
+      });
+    }
+    try {
+      csharpClient = await startCsharpLanguageClient(dir);
+    } catch (err) {
+      console.error("[lsp] failed to start C# language client:", err);
+    }
+  })();
+  try {
+    await csharpClientPending;
+  } finally {
+    csharpClientPending = null;
+  }
+}
+
+async function disposeCsharpClient(): Promise<void> {
+  if (csharpClientPending) {
+    await csharpClientPending.catch(() => {});
+    csharpClientPending = null;
+  }
+  if (csharpClient) {
+    const c = csharpClient;
+    csharpClient = null;
+    await c.stop().catch((err) => {
+      console.warn("[lsp] failed to stop C# client on teardown:", err);
+    });
+  }
+}
+
+onMounted(async () => {
   if (!container.value) return;
+
+  await ensureMonacoVscodeServices();
 
   applyTheme();
 
@@ -257,9 +282,24 @@ onMounted(() => {
     attributes: true,
     attributeFilter: ["data-theme"],
   });
+
+  if (props.workingDir.trim()) {
+    void ensureCsharpClient(props.workingDir);
+  }
 });
 
 watch(() => editorStore.active, syncModel);
+
+watch(
+  () => props.workingDir,
+  (next) => {
+    if (next.trim()) {
+      void ensureCsharpClient(next);
+    } else {
+      void disposeCsharpClient();
+    }
+  },
+);
 
 onBeforeUnmount(() => {
   themeObserver?.disconnect();
@@ -274,6 +314,7 @@ onBeforeUnmount(() => {
   editor?.setModel(null);
   editor?.dispose();
   editor = null;
+  void disposeCsharpClient();
 });
 
 defineExpose({

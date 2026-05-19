@@ -8,6 +8,7 @@ import {
   type EditorLineEnding,
 } from "../services/editorFs";
 import { languageFromPath } from "../services/editorLanguage";
+import { useProjectStore } from "./project";
 
 export interface OpenFile {
   id: string;
@@ -18,6 +19,13 @@ export interface OpenFile {
   hadBom: boolean;
   originalContent: string;
   model: monaco.editor.ITextModel;
+}
+
+function joinPath(workingDir: string, relPath: string): string {
+  const base = workingDir.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+  const tail = relPath.replace(/^[\\/]+/, "").replace(/\\/g, "/");
+  if (!base) return tail;
+  return `${base}/${tail}`;
 }
 
 export const useEditorStore = defineStore("editor", () => {
@@ -43,7 +51,10 @@ export const useEditorStore = defineStore("editor", () => {
 
     const file = await editorReadFile(relPath);
     const language = languageFromPath(relPath);
-    const model = markRaw(monaco.editor.createModel(file.content, language));
+    const projectStore = useProjectStore();
+    const absPath = joinPath(projectStore.workingDir, relPath);
+    const uri = absPath ? monaco.Uri.file(absPath) : undefined;
+    const model = markRaw(monaco.editor.createModel(file.content, language, uri));
 
     const entry: OpenFile = {
       id,
