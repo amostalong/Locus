@@ -145,7 +145,6 @@ export interface CodeRefAttachment {
   /** Excerpted code text covering the range, LF-normalized. */
   excerpt: string;
 }
-}
 
 export type KnowledgeProposalVerify = "none" | "required";
 export type KnowledgeProposalStatus =
