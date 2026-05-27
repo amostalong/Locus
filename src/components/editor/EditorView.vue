@@ -32,6 +32,7 @@ async function handleOpen(relPath: string) {
   try {
     await editorStore.openFile(relPath);
   } catch (err) {
+    console.error("[editor] openFile failed for", relPath, err);
     const e = normalizeAppError(err);
     openError.value = `[${e.code}] ${e.message}`;
   }

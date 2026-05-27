@@ -18,7 +18,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_VERSION = "v1.39.13";
+const DEFAULT_VERSION = "v1.39.15";
 const VERSION = process.env.LOCUS_OMNISHARP_VERSION?.trim() || DEFAULT_VERSION;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -31,17 +31,20 @@ const runTest = args.has("--test");
 function platformAsset() {
   const platform = process.platform;
   const arch = process.arch;
-  // The artefacts WITHOUT the `-net6.0` suffix are framework-/mono-based and
-  // run against runtimes that ship with the OS:
-  //   - Windows: .NET Framework 4.7.2 (built into Win10+).
-  //   - macOS/Linux: mono runtime (requires `brew install mono` or distro pkg).
-  // The `-net6.0` variants are framework-dependent .NET 6 builds that need a
-  // separately-installed `dotnet` 6 runtime. We default to the OS-runtime
-  // variant on Windows for zero-config; macOS/Linux still need a runtime.
+  // Use the `-net6.0` variants everywhere. The .NET-Framework / mono builds
+  // (no suffix) ship a Microsoft.Build that's frozen at v15.x and can only
+  // load MSBuild instances from a matching CLR; on a modern host (Win10+
+  // with .NET 8 SDK) MSBuildLocator picks up VS Build Tools 2017 and Roslyn
+  // crashes loading every .csproj with "ProjectCacheService.DisposeAsync
+  // has no implementation". The net6.0 variant runs on the .NET runtime and
+  // happily loads the SDK-style MSBuild from `dotnet\sdk\<ver>\MSBuild.dll`.
+  // It needs a .NET 6+ runtime — `DOTNET_ROLL_FORWARD=Major` (set in
+  // src-tauri/src/lsp.rs) lets the apphost roll forward to .NET 8 if 6
+  // isn't installed.
   if (platform === "win32") {
-    if (arch === "x64") return { name: `omnisharp-win-x64.zip`, dirKey: "windows-x64", format: "zip", exe: "OmniSharp.exe" };
+    if (arch === "x64") return { name: `omnisharp-win-x64-net6.0.zip`, dirKey: "windows-x64", format: "zip", exe: "OmniSharp.exe" };
     if (arch === "arm64") return { name: `omnisharp-win-arm64-net6.0.zip`, dirKey: "windows-arm64", format: "zip", exe: "OmniSharp.exe" };
-    if (arch === "ia32") return { name: `omnisharp-win-x86.zip`, dirKey: "windows-x86", format: "zip", exe: "OmniSharp.exe" };
+    if (arch === "ia32") return { name: `omnisharp-win-x86-net6.0.zip`, dirKey: "windows-x86", format: "zip", exe: "OmniSharp.exe" };
   }
   if (platform === "darwin") {
     if (arch === "x64") return { name: `omnisharp-osx-x64-net6.0.zip`, dirKey: "macos-x64", format: "zip", exe: "OmniSharp" };

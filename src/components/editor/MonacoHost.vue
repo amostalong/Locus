@@ -4,7 +4,10 @@ import * as monaco from "monaco-editor";
 
 import { useEditorStore, type OpenFile } from "../../stores/editor";
 import { createAnimationFrameResizeObserver } from "../../composables/resizeObserver";
-import { ensureMonacoVscodeServices } from "../../services/monacoVscodeServices";
+import {
+  applyVscodeColorTheme,
+  ensureMonacoVscodeServices,
+} from "../../services/monacoVscodeServices";
 import {
   startCsharpLanguageClient,
   type LanguageClientHandle,
@@ -15,11 +18,6 @@ import type { CodeRefAttachment, CodeRefKind } from "../../types";
 const props = defineProps<{
   workingDir: string;
 }>();
-
-function resolveMonacoTheme(): string {
-  const themeAttr = document.documentElement.getAttribute("data-theme");
-  return themeAttr === "light" ? "vs" : "vs-dark";
-}
 
 const editorStore = useEditorStore();
 const container = ref<HTMLElement | null>(null);
@@ -51,7 +49,7 @@ function syncModel() {
 }
 
 function applyTheme() {
-  monaco.editor.setTheme(resolveMonacoTheme());
+  void applyVscodeColorTheme();
 }
 
 function currentFile(): OpenFile | null {
@@ -254,7 +252,6 @@ onMounted(async () => {
 
   editor = monaco.editor.create(container.value, {
     model: null,
-    theme: resolveMonacoTheme(),
     automaticLayout: false,
     fontSize: 13,
     minimap: { enabled: false },

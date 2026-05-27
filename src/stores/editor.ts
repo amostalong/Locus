@@ -8,6 +8,7 @@ import {
   type EditorLineEnding,
 } from "../services/editorFs";
 import { languageFromPath } from "../services/editorLanguage";
+import { ensureMonacoVscodeServices } from "../services/monacoVscodeServices";
 import { useProjectStore } from "./project";
 
 export interface OpenFile {
@@ -49,10 +50,21 @@ export const useEditorStore = defineStore("editor", () => {
       return existing;
     }
 
+    // Wait for monaco-vscode-api services before creating any model.
+    // Without this, a fast click can race ahead of MonacoHost.onMounted's
+    // own initialize() and createModel will throw "file not found" because
+    // the file service has no overlay registered yet for the file:// URI.
+    await ensureMonacoVscodeServices();
+
     const file = await editorReadFile(relPath);
     const language = languageFromPath(relPath);
     const projectStore = useProjectStore();
-    const absPath = joinPath(projectStore.workingDir, relPath);
+    const workingDir = projectStore.workingDir.trim();
+    const absPath = workingDir ? joinPath(workingDir, relPath) : "";
+    // Use a `file://` URI so OmniSharp recognizes the document — it reads
+    // the file directly off disk, so we don't need to populate any
+    // in-memory file system overlay. The model carries the buffer for
+    // monaco itself.
     const uri = absPath ? monaco.Uri.file(absPath) : undefined;
     const model = markRaw(monaco.editor.createModel(file.content, language, uri));
 

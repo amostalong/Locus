@@ -282,6 +282,8 @@ pub fn model_supports_images(backend: &LlmBackend, effective_model: &str) -> boo
                 || m.contains("gemini")
                 || m.contains("glm")
                 || m.contains("minimax")
+                || m.contains("kimi")
+                || m.contains("moonshot")
         }
         LlmBackend::Custom {
             api_model,
@@ -296,6 +298,8 @@ pub fn model_supports_images(backend: &LlmBackend, effective_model: &str) -> boo
                     || m.contains("gpt-4o")
                     || m.contains("gpt-5")
                     || m.contains("gemini")
+                    || m.contains("kimi")
+                    || m.contains("moonshot")
             }
             crate::commands::ApiFormat::OpenaiChat => {
                 let m = api_model.to_ascii_lowercase();
@@ -307,6 +311,10 @@ pub fn model_supports_images(backend: &LlmBackend, effective_model: &str) -> boo
                 }
                 // MiniMax M2.5 supports images.
                 if m.contains("minimax") || e.contains("minimax") || e.contains("minimaxi") {
+                    return true;
+                }
+                // Moonshot Kimi (k2 / vl / latest / 2.6 ...) — multimodal.
+                if m.contains("kimi") || m.contains("moonshot") || e.contains("moonshot") {
                     return true;
                 }
                 // Generic check — conservative patterns matching the frontend logic.

@@ -1880,16 +1880,23 @@ function modelSupportsImages(): boolean {
         || lowerId.includes("glm-4")
         || lowerId.includes("glm-5")
         || lowerId.includes("minimax")
+        || lowerId.includes("kimi")
+        || lowerId.includes("moonshot")
         || lowerName.includes("claude")
         || lowerName.includes("gpt")
-        || lowerName.includes("gemini");
+        || lowerName.includes("gemini")
+        || lowerName.includes("kimi");
     }
 
     case "custom": {
+      const lowerId = modelId.toLowerCase();
       const lowerName = model.name.toLowerCase();
       return lowerName.includes("claude")
         || lowerName.includes("gpt")
-        || lowerName.includes("gemini");
+        || lowerName.includes("gemini")
+        || lowerName.includes("kimi")
+        || lowerId.includes("kimi")
+        || lowerId.includes("moonshot");
     }
 
     default:

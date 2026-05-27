@@ -29,6 +29,39 @@ class TauriLspMessageReader extends AbstractMessageReader implements MessageRead
     this.session
       .onMessage((raw) => {
         try {
+          if (typeof console !== "undefined") {
+            const msg = raw as {
+              method?: string;
+              id?: unknown;
+              params?: unknown;
+              result?: unknown;
+              error?: unknown;
+            };
+            const tag = msg.method ?? (msg.error ? `error(id=${String(msg.id)})` : `response(id=${String(msg.id)})`);
+            const stringify = (v: unknown): string => {
+              try {
+                const s = JSON.stringify(v);
+                return s && s.length > 600 ? s.slice(0, 600) + "…" : s ?? String(v);
+              } catch {
+                return String(v);
+              }
+            };
+            // Surface OmniSharp project-load errors and result payloads so
+            // we can tell whether the server has analysis info vs. silently
+            // returning empty results. window/logMessage is too noisy to log
+            // in full (OmniSharp emits hundreds during boot).
+            if (msg.method === "o#/error") {
+              console.log("[lsp:rx]", tag, stringify(msg.params));
+            } else if (msg.method === "window/logMessage") {
+              // Skip — too verbose during startup.
+            } else if (msg.result !== undefined && !msg.method) {
+              console.log("[lsp:rx]", tag, stringify(msg.result));
+            } else if (msg.method) {
+              console.log("[lsp:rx]", tag);
+            } else {
+              console.log("[lsp:rx]", tag);
+            }
+          }
           callback(raw as Message);
         } catch (err) {
           this.fireError(err instanceof Error ? err : new Error(String(err)));
@@ -57,6 +90,10 @@ class TauriLspMessageWriter extends AbstractMessageWriter implements MessageWrit
 
   async write(msg: Message): Promise<void> {
     try {
+      if (typeof console !== "undefined") {
+        const m = msg as { method?: string; id?: unknown };
+        console.log("[lsp:tx]", m.method ?? `response(id=${String(m.id)})`);
+      }
       await this.session.send(msg);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));

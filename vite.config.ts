@@ -69,6 +69,53 @@ export default defineConfig(async () => ({
     format: "es",
   },
 
+  // monaco-vscode-api packages register extension assets via
+  // `new URL('./resources/...', import.meta.url)`. Vite's dep pre-bundler
+  // moves the JS into `.vite/deps/` but does NOT copy the referenced
+  // resources, so those URLs 404 in dev (the Tauri dev server then serves
+  // index.html as fallback, which the WASM/JSON loaders then choke on
+  // — "expected magic word 00 61 73 6d, found 3c 21 64 6f"). Excluding
+  // the packages disables pre-bundling and keeps the resource URLs valid.
+  optimizeDeps: {
+    // ESM packages that ship resource files referenced via
+    // `import.meta.url`. Pre-bundling rewrites those URLs into `.vite/deps/`
+    // but the resources don't get copied, so we keep the original
+    // resolution for these.
+    exclude: [
+      "monaco-editor",
+      "monaco-languageclient",
+      "vscode",
+      "@codingame/monaco-vscode-api",
+      "@codingame/monaco-vscode-editor-api",
+      "@codingame/monaco-vscode-extension-api",
+      "@codingame/monaco-vscode-configuration-service-override",
+      "@codingame/monaco-vscode-csharp-default-extension",
+      "@codingame/monaco-vscode-editor-service-override",
+      "@codingame/monaco-vscode-extensions-service-override",
+      "@codingame/monaco-vscode-files-service-override",
+      "@codingame/monaco-vscode-languages-service-override",
+      "@codingame/monaco-vscode-model-service-override",
+      "@codingame/monaco-vscode-monarch-service-override",
+      "@codingame/monaco-vscode-textmate-service-override",
+      "@codingame/monaco-vscode-theme-defaults-default-extension",
+      "@codingame/monaco-vscode-theme-service-override",
+    ],
+    // CJS packages — must be pre-bundled so the browser sees real ESM
+    // named exports (BaseLanguageClient, AbstractMessageReader, etc.)
+    // instead of `module.exports`.
+    include: [
+      "vscode-jsonrpc",
+      "vscode-jsonrpc/browser.js",
+      "vscode-languageclient",
+      "vscode-languageclient/browser.js",
+      "vscode-languageserver-protocol",
+      "vscode-languageserver-protocol/browser",
+    ],
+    esbuildOptions: {
+      target: "es2022",
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent vite from obscuring rust errors
