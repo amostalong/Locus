@@ -1066,6 +1066,7 @@ watch(() => projectStore.workingDir, () => {
           @model-defaults-changed="modelStore.applyModelDefaults"
           @codex-transport-changed="modelStore.applyCodexModelConfig"
           @custom-endpoints-changed="modelStore.applyCustomEndpoints"
+          @workspace-override-changed="modelStore.loadWorkspaceDefaults"
           @reset-onboarding="onResetOnboarding"
         />
         <div

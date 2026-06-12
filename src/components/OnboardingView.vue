@@ -85,9 +85,10 @@ function emitSettingsState(event: "authChanged"): void;
 function emitSettingsState(event: "modelDefaultsChanged", defaults: ModelDefaults): void;
 function emitSettingsState(event: "codexTransportChanged", config: CodexModelConfig): void;
 function emitSettingsState(event: "customEndpointsChanged", endpoints: CustomEndpoint[]): void;
+function emitSettingsState(event: "workspaceOverrideChanged"): void;
 function emitSettingsState(event: "resetOnboarding"): void;
 function emitSettingsState(
-  event: "authChanged" | "modelDefaultsChanged" | "codexTransportChanged" | "customEndpointsChanged" | "resetOnboarding",
+  event: "authChanged" | "modelDefaultsChanged" | "codexTransportChanged" | "customEndpointsChanged" | "workspaceOverrideChanged" | "resetOnboarding",
   payload?: ModelDefaults | CodexModelConfig | CustomEndpoint[],
 ) {
   if (event === "authChanged") {
@@ -98,6 +99,8 @@ function emitSettingsState(
     modelStore.applyCodexModelConfig(payload as CodexModelConfig);
   } else if (event === "customEndpointsChanged") {
     modelStore.applyCustomEndpoints(payload as CustomEndpoint[]);
+  } else if (event === "workspaceOverrideChanged") {
+    modelStore.loadWorkspaceDefaults();
   }
 }
 

@@ -252,7 +252,7 @@ function handlePointerDown(event: PointerEvent) {
   line-height: 1.5;
   vertical-align: baseline;
   transition: background 0.15s, border-color 0.15s;
-  max-width: 300px;
+  max-width: 100%;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;

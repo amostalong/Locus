@@ -580,6 +580,7 @@ export function useAppBootstrap() {
           target: path,
         }),
         measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target: path }),
+        measureWorkspaceSwitchAsync("load_workspace_model_override", () => modelStore.loadWorkspaceDefaults(), { target: path }),
       ]);
     } finally {
       console.info(
@@ -594,6 +595,7 @@ export function useAppBootstrap() {
   async function closeSettings() {
     uiStore.setTab("chat");
     await authStore.checkAuth();
+    await modelStore.loadWorkspaceDefaults();
     await modelStore.loadCodexAvailableModels();
     modelStore.resolveSelectedModel(true);
   }

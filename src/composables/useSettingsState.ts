@@ -24,6 +24,9 @@ import type {
 import {
   getModelDefaults,
   saveModelDefaults as serviceSaveModelDefaults,
+  getWorkspaceModelOverride as serviceGetWorkspaceOverride,
+  saveWorkspaceModelOverride as serviceSaveWorkspaceOverride,
+  disableWorkspaceModelOverride as serviceDisableWorkspaceOverride,
   getCodexModelConfig,
   saveCodexModelConfig as serviceSaveCodexModelConfig,
   getCustomEndpoints,
@@ -50,6 +53,7 @@ import { normalizeAppError } from "../services/errors";
 import { useNotificationStore } from "../stores/notification";
 import type {
   ModelDefaults,
+  WorkspaceModelOverride,
   CustomEndpoint,
   EffortLevel,
   ApiFormat,
@@ -111,6 +115,7 @@ type SettingsEmit = {
   (e: "authChanged"): void;
   (e: "modelDefaultsChanged", defaults: ModelDefaults): void;
   (e: "codexTransportChanged", config: CodexModelConfig): void;
+  (e: "workspaceOverrideChanged"): void;
   (e: "customEndpointsChanged", endpoints: CustomEndpoint[]): void;
   (e: "resetOnboarding"): void;
 };
@@ -763,6 +768,48 @@ export function useSettingsState(emit: SettingsEmit) {
     }
   }
 
+  // ── Workspace model override ─────────────────────────────────────────
+  const workspaceOverride = ref<WorkspaceModelOverride | null>(null);
+  const workspaceOverrideSaveMsg = ref("");
+
+  async function loadWorkspaceOverride() {
+    try {
+      workspaceOverride.value = await serviceGetWorkspaceOverride();
+    } catch {
+      workspaceOverride.value = null;
+    }
+  }
+
+  async function saveWorkspaceOverride() {
+    if (!workspaceOverride.value) return;
+    try {
+      await serviceSaveWorkspaceOverride(workspaceOverride.value);
+      workspaceOverrideSaveMsg.value = t("settings.models.saved");
+      setTimeout(() => { workspaceOverrideSaveMsg.value = ""; }, 2000);
+      emit("workspaceOverrideChanged");
+    } catch (e) {
+      const err = normalizeAppError(e);
+      useNotificationStore().addNotice("error", t("settings.models.saveFailed", err.message), {
+        code: err.code,
+        operation: "saveWorkspaceModelOverride",
+      });
+    }
+  }
+
+  async function disableWorkspaceOverride() {
+    try {
+      await serviceDisableWorkspaceOverride();
+      workspaceOverride.value = null;
+      emit("workspaceOverrideChanged");
+    } catch (e) {
+      const err = normalizeAppError(e);
+      useNotificationStore().addNotice("error", t("settings.models.saveFailed", err.message), {
+        code: err.code,
+        operation: "disableWorkspaceModelOverride",
+      });
+    }
+  }
+
   // ── Tool permissions ─────────────────────────────────────────────────
   const permSaveMsg = ref("");
   const fileToolWorkspaceBoundary = ref(false);
@@ -1169,6 +1216,8 @@ export function useSettingsState(emit: SettingsEmit) {
     if (cachedDefaults) modelDefaults.value = cachedDefaults;
     else await loadModelDefaults();
 
+    await loadWorkspaceOverride();
+
     if (cachedPerms) {
       const normalized: Record<string, "auto" | "ask"> = {};
       for (const [k, v] of Object.entries(cachedPerms)) {
@@ -1259,6 +1308,13 @@ export function useSettingsState(emit: SettingsEmit) {
     modelSaveMsg,
     loadModelDefaults,
     saveModelDefaults,
+
+    // workspace model override
+    workspaceOverride,
+    workspaceOverrideSaveMsg,
+    loadWorkspaceOverride,
+    saveWorkspaceOverride,
+    disableWorkspaceOverride,
 
     // tool permissions
     permSaveMsg,

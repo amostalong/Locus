@@ -1,11 +1,13 @@
 import { ref, computed, watch } from "vue";
 import { defineStore } from "pinia";
 import { useAuthStore } from "./auth";
+import { useProjectStore } from "./project";
 import { pickPreferredModelId } from "./modelSelection";
 import * as modelService from "../services/model";
 import type {
   ModelOption,
   ModelDefaults,
+  WorkspaceModelOverride,
   CustomEndpoint,
   EffortLevel,
   CodexModelConfig,
@@ -145,6 +147,7 @@ function normalizeCodexModels(models?: ModelOption[] | null): ModelOption[] {
 
 export const useModelStore = defineStore("model", () => {
   const authStore = useAuthStore();
+  const projectStore = useProjectStore();
 
   const customEndpoints = ref<CustomEndpoint[]>([]);
   const codexRemoteModels = ref<ModelOption[]>([]);
@@ -155,9 +158,22 @@ export const useModelStore = defineStore("model", () => {
   const defaultEffort = ref<EffortLevel>("medium");
   const hasUserDefaultEffort = ref(false);
   const modelDefaults = ref<ModelDefaults>({ mainModel: "", planModel: "", subagentModels: {} });
+  const workspaceOverride = ref<WorkspaceModelOverride | null>(null);
   let effortPersistenceReady = false;
 
   // -- Getters --
+
+  const effectiveModelDefaults = computed<ModelDefaults>(() => {
+    const ov = workspaceOverride.value;
+    if (ov?.enabled) {
+      return {
+        mainModel: ov.mainModel || modelDefaults.value.mainModel,
+        planModel: ov.planModel || modelDefaults.value.planModel,
+        subagentModels: { ...modelDefaults.value.subagentModels, ...ov.subagentModels },
+      };
+    }
+    return modelDefaults.value;
+  });
 
   const codexModels = computed<ModelOption[]>(() =>
     codexRemoteModels.value.length > 0 ? codexRemoteModels.value : codexFallbackModels
@@ -262,9 +278,19 @@ export const useModelStore = defineStore("model", () => {
       return;
     }
 
-    const next = pickPreferredModelId(models, modelDefaults.value, lastModelId.value);
+    const next = pickPreferredModelId(models, effectiveModelDefaults.value, lastModelId.value);
     if (next) selectedModelId.value = next;
   }, { immediate: true });
+
+  // Reload workspace model override when working dir changes
+  watch(() => projectStore.workingDir, () => {
+    void loadWorkspaceDefaults();
+  });
+
+  // Re-evaluate model selection when workspace override changes
+  watch(workspaceOverride, () => {
+    resolveSelectedModel(true);
+  });
 
 
   // -- Actions --
@@ -333,7 +359,7 @@ export const useModelStore = defineStore("model", () => {
       return;
     }
 
-    const next = pickPreferredModelId(models, modelDefaults.value, lastModelId.value);
+    const next = pickPreferredModelId(models, effectiveModelDefaults.value, lastModelId.value);
     if (next) selectedModelId.value = next;
   }
 
@@ -367,6 +393,26 @@ export const useModelStore = defineStore("model", () => {
     modelDefaults.value = defaults;
   }
 
+  async function loadWorkspaceDefaults() {
+    try {
+      workspaceOverride.value = await modelService.getWorkspaceModelOverride();
+    } catch {
+      workspaceOverride.value = null;
+    }
+  }
+
+  async function saveWorkspaceOverride(data: WorkspaceModelOverride) {
+    await modelService.saveWorkspaceModelOverride(data);
+    workspaceOverride.value = data;
+    resolveSelectedModel(true);
+  }
+
+  async function disableWorkspaceOverride() {
+    await modelService.disableWorkspaceModelOverride();
+    workspaceOverride.value = null;
+    resolveSelectedModel(true);
+  }
+
   function applyCustomEndpoints(endpoints: CustomEndpoint[]) {
     customEndpoints.value = endpoints;
   }
@@ -385,6 +431,8 @@ export const useModelStore = defineStore("model", () => {
     defaultEffort,
     hasUserDefaultEffort,
     modelDefaults,
+    workspaceOverride,
+    effectiveModelDefaults,
     allModels,
     availableModels,
     codexModels,
@@ -404,6 +452,9 @@ export const useModelStore = defineStore("model", () => {
     applyContextEffort,
     restoreDefaultEffort,
     applyModelDefaults,
+    loadWorkspaceDefaults,
+    saveWorkspaceOverride,
+    disableWorkspaceOverride,
     applyCustomEndpoints,
     applyCodexModelConfig,
   };

@@ -2233,7 +2233,7 @@ export const useChatStore = defineStore("chat", () => {
     // For plan mode, temporarily use planModel if configured
     let model = modelStore.selectedModelId || null;
     if (overrides?.mode === "plan") {
-      const planModel = modelStore.modelDefaults.planModel;
+      const planModel = modelStore.effectiveModelDefaults.planModel;
       if (planModel && modelStore.availableModels.some((m) => m.id === planModel)) {
         model = planModel;
       }
@@ -2260,7 +2260,7 @@ export const useChatStore = defineStore("chat", () => {
         assetRefs: assetRefs.length > 0 ? assetRefs : null,
         mode: overrides?.mode || null,
         userIntent,
-        subagentModels: Object.keys(modelStore.modelDefaults.subagentModels).length > 0 ? modelStore.modelDefaults.subagentModels : null,
+        subagentModels: Object.keys(modelStore.effectiveModelDefaults.subagentModels).length > 0 ? modelStore.effectiveModelDefaults.subagentModels : null,
         knowledgeMode: knowledgeAccessState.mode,
       });
       logChatStreamDebug("chat request resolved", {
@@ -2367,7 +2367,7 @@ export const useChatStore = defineStore("chat", () => {
         assetRefs: null,
         mode: "compact",
         userIntent: null,
-        subagentModels: Object.keys(modelStore.modelDefaults.subagentModels).length > 0 ? modelStore.modelDefaults.subagentModels : null,
+        subagentModels: Object.keys(modelStore.effectiveModelDefaults.subagentModels).length > 0 ? modelStore.effectiveModelDefaults.subagentModels : null,
         knowledgeMode: knowledgeAccessState.mode,
       });
 

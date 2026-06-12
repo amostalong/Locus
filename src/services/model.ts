@@ -48,3 +48,15 @@ export function saveCustomEndpoints(endpoints: CustomEndpoint[]): Promise<void> 
 export function testCustomEndpoint(endpoint: CustomEndpoint): Promise<string> {
   return ipcInvoke<string>("test_custom_endpoint", { endpoint });
 }
+
+export function getWorkspaceModelOverride(): Promise<import("../types").WorkspaceModelOverride | null> {
+  return ipcInvoke<import("../types").WorkspaceModelOverride | null>("get_workspace_model_override");
+}
+
+export function saveWorkspaceModelOverride(overrideData: import("../types").WorkspaceModelOverride): Promise<void> {
+  return ipcInvoke("save_workspace_model_override", { overrideData });
+}
+
+export function disableWorkspaceModelOverride(): Promise<void> {
+  return ipcInvoke("disable_workspace_model_override");
+}

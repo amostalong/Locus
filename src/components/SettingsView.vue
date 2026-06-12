@@ -27,6 +27,7 @@ import KnowledgeSettings from "./settings/KnowledgeSettings.vue";
 import SubscriptionDisclaimerModal from "./SubscriptionDisclaimerModal.vue";
 import { useUiStore } from "../stores/ui";
 import { useChatStore } from "../stores/chat";
+import { useProjectStore } from "../stores/project";
 
 defineProps<{
   allModels: ModelOption[];
@@ -40,6 +41,7 @@ const emit = defineEmits<{
   modelDefaultsChanged: [defaults: ModelDefaults];
   codexTransportChanged: [config: CodexModelConfig];
   customEndpointsChanged: [endpoints: CustomEndpoint[]];
+  workspaceOverrideChanged: [];
   resetOnboarding: [];
 }>();
 
@@ -52,6 +54,7 @@ const {
   codexStep, codexStatus, codexQuota, codexRetrying, codexModelConfig, codexUserCode, codexUrl, codexCodeCopied, cancelCodexLogin, codexLogout, retryCodexValidation, copyCode, setCodexTransportMode, loadCodexRateLimits,
   showDisclaimer, requestOAuthLogin, requestCodexLogin, cancelDisclaimer,
   modelDefaults, modelSaveMsg, saveModelDefaults,
+  workspaceOverride, workspaceOverrideSaveMsg, saveWorkspaceOverride, disableWorkspaceOverride,
   permSaveMsg, toolList, approvalBehaviorList, toolPermissions,
   fileToolWorkspaceBoundary, fileToolWorkspaceBoundaryReady, fileToolWorkspaceBoundaryBusy,
   setToolPermission, setFileToolWorkspaceBoundaryEnabled,
@@ -61,6 +64,7 @@ const {
 
 const uiStore = useUiStore();
 const chatStore = useChatStore();
+const projectStore = useProjectStore();
 
 watch(
   () => uiStore.settingsCategoryHint,
@@ -280,8 +284,14 @@ watch(
           :agents="agents"
           :subagents="subagents"
           :model-save-msg="modelSaveMsg"
+          :working-dir="projectStore.workingDir"
+          :workspace-override="workspaceOverride"
+          :workspace-override-save-msg="workspaceOverrideSaveMsg"
           @update:model-defaults="modelDefaults = $event"
           @save="saveModelDefaults"
+          @update:workspace-override="workspaceOverride = $event"
+          @save-workspace-override="saveWorkspaceOverride"
+          @disable-workspace-override="disableWorkspaceOverride"
         />
       </template>
 

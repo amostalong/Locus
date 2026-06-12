@@ -962,6 +962,114 @@ pub async fn save_codex_model_config(config: CodexModelConfig) -> Result<(), App
     Ok(())
 }
 
+// ── Workspace model overrides ───────────────────────────────────────────
+// Persists a per-workspace model override file under the persistent config
+// directory, keyed by a blake3 hash of the canonical workspace path.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceModelOverride {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub main_model: String,
+    #[serde(default)]
+    pub plan_model: String,
+    #[serde(default)]
+    pub subagent_models: std::collections::HashMap<String, String>,
+}
+
+impl Default for WorkspaceModelOverride {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            main_model: String::new(),
+            plan_model: String::new(),
+            subagent_models: std::collections::HashMap::new(),
+        }
+    }
+}
+
+fn workspace_override_path_for_path(path: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let canonical = path.trim();
+    if canonical.is_empty() {
+        return Ok(None);
+    }
+    let key: String = blake3::hash(canonical.as_bytes()).to_hex()[..8].to_string();
+    let dir = persistent_config_dir()?.join("ws_model");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create ws_model dir: {}", e))?;
+    Ok(Some(dir.join(format!("{}.json", key))))
+}
+
+async fn workspace_override_path(workspace: &Workspace) -> Result<Option<std::path::PathBuf>, String> {
+    let path = workspace.path.read().await;
+    workspace_override_path_for_path(&path)
+}
+
+#[tauri::command]
+pub async fn get_workspace_model_override(
+    workspace: State<'_, Arc<Workspace>>,
+) -> Result<Option<WorkspaceModelOverride>, AppError> {
+    let Some(path) = workspace_override_path(&workspace)
+        .await
+        .map_err(AppError::from)?
+    else {
+        return Ok(None);
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<WorkspaceModelOverride>(&content) {
+            Ok(data) => Ok(Some(data)),
+            Err(e) => {
+                eprintln!("[Locus] failed to parse workspace model override: {}", e);
+                Ok(None)
+            }
+        },
+        Err(_) => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub async fn save_workspace_model_override(
+    override_data: WorkspaceModelOverride,
+    workspace: State<'_, Arc<Workspace>>,
+) -> Result<(), AppError> {
+    let Some(path) = workspace_override_path(&workspace)
+        .await
+        .map_err(AppError::from)?
+    else {
+        return Err(AppError::new(
+            "ws_override.no_workspace",
+            "No workspace set",
+        ));
+    };
+
+    let json = serde_json::to_string_pretty(&override_data)
+        .map_err(|e| AppError::new("ws_override.serialize", format!("Failed to serialize: {}", e)))?;
+    std::fs::write(&path, &json)
+        .map_err(|e| AppError::new("ws_override.write", format!("Failed to write: {}", e)))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn disable_workspace_model_override(
+    workspace: State<'_, Arc<Workspace>>,
+) -> Result<(), AppError> {
+    let Some(path) = workspace_override_path(&workspace)
+        .await
+        .map_err(AppError::from)?
+    else {
+        return Ok(());
+    };
+
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| AppError::new("ws_override.remove", format!("Failed to remove: {}", e)))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {

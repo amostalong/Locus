@@ -1080,6 +1080,9 @@
   "settings.models.subagentDefault": "Inherit current session",
   "settings.models.saved": "Saved",
   "settings.models.saveFailed": "Save default model failed: {0}",
+  "settings.models.workspaceOverride.title": "Workspace Override",
+  "settings.models.workspaceOverride.enable": "Use independent model settings for this workspace",
+  "settings.models.workspaceOverride.save": "Save Workspace Override",
 
   "settings.custom.title": "Custom Model Endpoints",
   "settings.custom.desc": "Add custom API endpoints supporting OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages formats.",

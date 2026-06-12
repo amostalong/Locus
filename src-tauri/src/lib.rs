@@ -1324,6 +1324,9 @@ pub fn run() {
             commands::agent_graph_tool_cancel,
             commands::agent_graph_tool_reopen,
             commands::fetch_app_update_manifest,
+            commands::get_workspace_model_override,
+            commands::save_workspace_model_override,
+            commands::disable_workspace_model_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

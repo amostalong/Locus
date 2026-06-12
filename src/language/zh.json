@@ -1080,6 +1080,9 @@
   "settings.models.subagentDefault": "继承当前会话",
   "settings.models.saved": "已保存",
   "settings.models.saveFailed": "保存默认模型失败: {0}",
+  "settings.models.workspaceOverride.title": "工作区覆盖",
+  "settings.models.workspaceOverride.enable": "为此工作区使用独立模型设置",
+  "settings.models.workspaceOverride.save": "保存工作区覆盖",
 
   "settings.custom.title": "自定义模型端点",
   "settings.custom.desc": "添加自定义 API 端点，支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 格式。",

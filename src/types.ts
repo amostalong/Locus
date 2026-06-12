@@ -424,6 +424,13 @@ export interface ModelDefaults {
   claudeCodeEnabled?: boolean;
 }
 
+export interface WorkspaceModelOverride {
+  enabled: boolean;
+  mainModel: string;
+  planModel: string;
+  subagentModels: Record<string, string>;
+}
+
 export type CodexTransportMode = "http" | "websocket";
 
 export interface CodexModelConfig {
