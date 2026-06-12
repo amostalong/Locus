@@ -9,6 +9,7 @@ import { acquireSelectionLock } from "../../composables/useSelectionLock";
 import { getDebugMode } from "../../services/permissions";
 import { normalizeAppError } from "../../services/errors";
 import { useNotificationStore } from "../../stores/notification";
+import { useCopyFeedback } from "../../composables/useCopyFeedback";
 import {
   clearDebugConsole,
   getDebugConsoleSnapshot,
@@ -60,6 +61,9 @@ const listRef = ref<HTMLElement | null>(null);
 const expandedEntryIds = ref<Set<string>>(new Set());
 const activeResizeColumn = ref<ResizableConsoleColumn | null>(null);
 const columnWidths = ref<ConsoleColumnWidths>(loadStoredColumnWidths());
+const { copyText } = useCopyFeedback();
+const copiedRowId = ref<string | null>(null);
+let copiedRowTimer: ReturnType<typeof setTimeout> | null = null;
 
 const levelOptions = computed(() => [
   { value: "all", label: t("settings.console.level.all") },
@@ -259,6 +263,22 @@ function toggleMessageExpanded(entryId: string) {
   expandedEntryIds.value = next;
 }
 
+function copyEntryContent(entry: DebugConsoleEntry) {
+  const time = formatTime(entry.timestampMs);
+  const source = entry.source === "backend"
+    ? t("settings.console.source.backend")
+    : t("settings.console.source.frontend");
+  const text = `[${time}] [${source}] [${entry.module}] ${entry.message}`;
+  copyText(text);
+
+  copiedRowId.value = entry.id;
+  if (copiedRowTimer) clearTimeout(copiedRowTimer);
+  copiedRowTimer = setTimeout(() => {
+    copiedRowId.value = null;
+    copiedRowTimer = null;
+  }, 1200);
+}
+
 let columnResizeMoveHandler: ((event: MouseEvent) => void) | null = null;
 let columnResizeUpHandler: (() => void) | null = null;
 let releaseColumnResizeSelectionLock: (() => void) | null = null;
@@ -388,6 +408,10 @@ onUnmounted(() => {
   unsubscribe?.();
   unsubscribe = null;
   stopColumnResize(false);
+  if (copiedRowTimer) {
+    clearTimeout(copiedRowTimer);
+    copiedRowTimer = null;
+  }
 });
 
 watch(
@@ -508,7 +532,8 @@ watch(
             v-for="entry in filteredEntries"
             :key="entry.id"
             class="console-row"
-            :class="`level-${entry.level}`"
+            :class="[`level-${entry.level}`, { copied: copiedRowId === entry.id }]"
+            @contextmenu.prevent="copyEntryContent(entry)"
           >
             <span class="console-time">{{ formatTime(entry.timestampMs) }}</span>
             <span class="console-source">
@@ -825,5 +850,33 @@ watch(
   outline: 1px solid var(--accent-color);
   outline-offset: 2px;
   border-radius: 3px;
+}
+
+.console-row.copied {
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  transition: background 0.08s ease;
+}
+
+.console-row.copied::after {
+  content: "已复制";
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--accent-color);
+  color: white;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  line-height: 1.5;
+  pointer-events: none;
+  opacity: 0;
+  animation: console-copied-fade 1.2s ease forwards;
+}
+
+@keyframes console-copied-fade {
+  0%   { opacity: 0; transform: translateY(-4px); }
+  15%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
 }
 </style>

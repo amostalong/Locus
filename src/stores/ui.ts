@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { hasTauriWindowRuntime } from "../services/tauriRuntime";
 import type { UserMessageDraft } from "../composables/chatMessageDraft";
+import type { CodeRefAttachment } from "../types";
 
 const WINDOW_RESIZE_SETTLE_DELAY_MS = 420;
 const MIN_TRACKABLE_WINDOW_WIDTH_PX = 320;
@@ -29,7 +30,7 @@ interface PendingChatPrefill extends ChatPrefillOptions {
 }
 
 export const useUiStore = defineStore("ui", () => {
-  const activeTab = ref<"chat" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
+  const activeTab = ref<"chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
   const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
   const alwaysOnTop = ref(false);
   const isMaximized = ref(false);
@@ -40,6 +41,7 @@ export const useUiStore = defineStore("ui", () => {
   const nativeWindowHeight = ref<number | null>(null);
   const showOnboarding = ref(false);
   const pendingChatPrefill = ref<PendingChatPrefill | null>(null);
+  const pendingCodeRef = ref<{ id: number; ref: CodeRefAttachment } | null>(null);
   const pendingKnowledgeSelection = ref<{
     id: number;
     dashboard: "design" | "memory" | "skill" | "reference";
@@ -52,6 +54,7 @@ export const useUiStore = defineStore("ui", () => {
   const viewMounted = ref(false);
   const pluginsMounted = ref(false);
   const agentMounted = ref(false);
+  const editorMounted = ref(false);
   const settingsMounted = ref(false);
 
   let appWindow: TauriWindow | null = null;
@@ -216,6 +219,7 @@ export const useUiStore = defineStore("ui", () => {
     if (tab === "views") viewMounted.value = true;
     if (tab === "plugins") pluginsMounted.value = true;
     if (tab === "agent") agentMounted.value = true;
+    if (tab === "editor") editorMounted.value = true;
     if (tab === "settings") settingsMounted.value = true;
   }
 
@@ -226,6 +230,19 @@ export const useUiStore = defineStore("ui", () => {
 
   function clearSettingsCategoryHint() {
     settingsCategoryHint.value = null;
+  }
+
+  function stageCodeRef(ref: CodeRefAttachment) {
+    pendingCodeRef.value = {
+      id: Date.now(),
+      ref,
+    };
+  }
+
+  function clearPendingCodeRef(id?: number) {
+    if (!pendingCodeRef.value) return;
+    if (id != null && pendingCodeRef.value.id !== id) return;
+    pendingCodeRef.value = null;
   }
 
   function stageChatPrefill(text: string, options: ChatPrefillOptions = {}) {
@@ -315,6 +332,7 @@ export const useUiStore = defineStore("ui", () => {
     nativeWindowHeight,
     showOnboarding,
     pendingChatPrefill,
+    pendingCodeRef,
     pendingKnowledgeSelection,
     collabMounted,
     knowledgeMounted,
@@ -322,12 +340,15 @@ export const useUiStore = defineStore("ui", () => {
     viewMounted,
     pluginsMounted,
     agentMounted,
+    editorMounted,
     settingsMounted,
     init,
     cleanup,
     setTab,
     openSettingsCategory,
     clearSettingsCategoryHint,
+    stageCodeRef,
+    clearPendingCodeRef,
     stageChatPrefill,
     stageChatDraftPrefill,
     clearPendingChatPrefill,

@@ -5,6 +5,7 @@
   "app.tab.asset": "Assets",
   "app.tab.views": "Views",
   "app.tab.plugins": "Plugins",
+  "app.tab.editor": "Editor",
   "plugin.installed.title": "Installed",
   "plugin.installed.empty": "No plugins installed",
   "plugin.install.action": "Install",

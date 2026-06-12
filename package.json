@@ -37,6 +37,19 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@codingame/monaco-vscode-api": "~33.0.9",
+    "@codingame/monaco-vscode-configuration-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-csharp-default-extension": "~33.0.9",
+    "@codingame/monaco-vscode-editor-api": "~33.0.9",
+    "@codingame/monaco-vscode-editor-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-extensions-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-files-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-languages-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-model-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-monarch-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-textmate-service-override": "~33.0.9",
+    "@codingame/monaco-vscode-theme-defaults-default-extension": "~33.0.9",
+    "@codingame/monaco-vscode-theme-service-override": "~33.0.9",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
@@ -51,12 +64,20 @@
     "lucide": "^1.11.0",
     "marked": "^17.0.4",
     "marked-highlight": "^2.2.3",
+    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@~33.0.9",
+    "monaco-languageclient": "10.7.0",
     "pinia": "^3.0.4",
     "three": "^0.183.2",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
     "vditor": "^3.11.2",
     "vue": "^3.5.13"
+  },
+  "overrides": {
+    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@~33.0.9"
+  },
+  "resolutions": {
+    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@~33.0.9"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

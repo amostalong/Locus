@@ -5,6 +5,7 @@
   "app.tab.asset": "资产",
   "app.tab.views": "视图",
   "app.tab.plugins": "插件",
+  "app.tab.editor": "编辑器",
   "plugin.installed.title": "已安装",
   "plugin.installed.empty": "未安装插件",
   "plugin.install.action": "安装",

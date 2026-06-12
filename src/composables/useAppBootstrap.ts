@@ -307,6 +307,7 @@ export function useAppBootstrap() {
       await runQueue(
         [
           () => import("../components/SettingsView.vue"),
+          () => import("../components/editor/EditorView.vue"),
           () => import("../components/CollabView.vue"),
           () => import("../components/KnowledgeView.vue"),
           () => import("../components/AssetView.vue"),

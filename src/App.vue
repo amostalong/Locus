@@ -27,6 +27,8 @@ import BaseContextMenu from "./components/ui/BaseContextMenu.vue";
 import AppUpdateModal from "./components/AppUpdateModal.vue";
 
 import { provideDiffOverlay } from "./composables/useDiffOverlay";
+import { useResizablePanel } from "./composables/useResizablePanel";
+import { populateSavedLayoutDefaults } from "./services/layoutDefaults";
 import { initTheme } from "./composables/useTheme";
 import { initFonts, useDisplaySettings } from "./composables/useDisplaySettings";
 import { isKnowledgeDownloadWindowLocation } from "./services/knowledgeDownloadWindow";
@@ -100,6 +102,7 @@ const showPluginEntry = true;
 
 initTheme(isUnityEmbedWindow ? "unityEmbed" : "main");
 initFonts();
+populateSavedLayoutDefaults();
 
 // -- Stores --
 const uiStore = useUiStore();
@@ -112,6 +115,19 @@ const notificationStore = useNotificationStore();
 const appUpdateStore = useAppUpdateStore();
 const { state: displaySettings } = useDisplaySettings();
 const unityEmbedBootstrapped = ref(false);
+
+// -- Split layout (chat left panel resizable) --
+const splitContainerRef = ref<HTMLElement | null>(null);
+const { size: chatPanelWidth, isDragging: isSplitDragging, onMouseDown: onSplitDividerMouseDown } =
+  useResizablePanel(splitContainerRef, {
+    storageKey: "locus-chat-panel-width",
+    defaultSize: Math.round(window.innerWidth * 0.45),
+    minSize: 280,
+    maxSize: (container) => {
+      return Math.min(container.clientWidth * 0.62, container.clientWidth - 420);
+    },
+    direction: "horizontal",
+  });
 const unityEmbedBootstrapError = ref<string | null>(null);
 const KNOWLEDGE_RUNTIME_LOADING_OPERATION = "knowledgeEmbeddingRuntimeLoading";
 const KNOWLEDGE_RUNTIME_STARTUP_POLL_COUNT = 16;
@@ -214,8 +230,12 @@ const settingsView = createLazyViewState(
   "loadSettingsView",
 );
 
+const editorView = createLazyViewState(
+  () => import("./components/editor/EditorView.vue"),
+  "loadEditorView",
+);
+
 const chatViewComponent = chatView.component;
-const chatViewLoading = chatView.loading;
 const chatViewError = chatView.error;
 
 const collabViewComponent = collabView.component;
@@ -246,6 +266,10 @@ const settingsViewComponent = settingsView.component;
 const settingsViewLoading = settingsView.loading;
 const settingsViewError = settingsView.error;
 
+const editorViewComponent = editorView.component;
+const editorViewLoading = editorView.loading;
+const editorViewError = editorView.error;
+
 type AppTab = typeof uiStore.activeTab;
 
 interface TopTabItem {
@@ -255,7 +279,7 @@ interface TopTabItem {
 }
 
 const topTabs = computed<TopTabItem[]>(() => [
-  { id: "chat", labelKey: "app.tab.dev", visible: true },
+  { id: "editor", labelKey: "app.tab.editor", visible: true },
   { id: "knowledge", labelKey: "app.tab.knowledge", visible: displaySettings.showKnowledgeTab },
   { id: "collab", labelKey: "app.tab.collab", visible: displaySettings.showCollabTab },
   { id: "asset", labelKey: "app.tab.asset", visible: displaySettings.showAssetTab },
@@ -271,10 +295,8 @@ function isTopTabVisible(tab: AppTab) {
   return visibleTopTabs.value.some((item) => item.id === tab);
 }
 
-watch(() => uiStore.activeTab, (tab) => {
-  if (tab !== "chat") return;
-  void chatView.ensureLoaded();
-}, { immediate: true });
+// Chat is always visible in the left panel, load immediately
+void chatView.ensureLoaded();
 
 watch(() => uiStore.collabMounted, (mounted) => {
   if (!mounted) return;
@@ -311,9 +333,14 @@ watch(() => uiStore.settingsMounted, (mounted) => {
   void settingsView.ensureLoaded();
 }, { immediate: true });
 
+watch(() => uiStore.editorMounted, (mounted) => {
+  if (!mounted) return;
+  void editorView.ensureLoaded();
+}, { immediate: true });
+
 watch([() => uiStore.activeTab, visibleTopTabs], () => {
   if (isTopTabVisible(uiStore.activeTab)) return;
-  uiStore.setTab("chat");
+  uiStore.setTab("editor");
 }, { immediate: true });
 
 // -- Workspace dropdown (local UI) --
@@ -833,8 +860,27 @@ watch(() => projectStore.workingDir, () => {
     @dragover.capture="handleMainUnityAssetDrag"
     @drop.capture="handleMainUnityAssetDrop"
   >
-    <div class="main-area">
-      <div class="tab-bar" @pointerdown="onTabBarPointerDown">
+    <div class="split-layout" ref="splitContainerRef">
+      <div class="chat-panel-left" :style="{ width: chatPanelWidth + 'px' }">
+        <component
+          :is="chatViewComponent"
+          v-if="chatViewComponent"
+          :active="true"
+          layout-mode="auto"
+          :default-session-panel-collapsed="false"
+          session-panel-storage-scope="left-panel"
+        />
+        <div v-else class="tab-loading-state" :class="{ 'is-error': !!chatViewError }">
+          {{ chatViewError || t("common.loading") }}
+        </div>
+      </div>
+      <div
+        class="split-divider"
+        :class="{ dragging: isSplitDragging }"
+        @mousedown="onSplitDividerMouseDown"
+      ></div>
+      <div class="main-area">
+        <div class="tab-bar" @pointerdown="onTabBarPointerDown">
         <div class="tab-drag-region" aria-hidden="true"></div>
         <span class="tab-brand">Locus</span>
         <button
@@ -949,18 +995,17 @@ watch(() => projectStore.workingDir, () => {
 
       <div class="tab-content">
         <component
-          :is="chatViewComponent"
-          v-if="chatViewComponent"
-          v-show="uiStore.activeTab === 'chat'"
-          :active="uiStore.activeTab === 'chat'"
-          layout-mode="auto"
+          :is="editorViewComponent"
+          v-if="uiStore.editorMounted && editorViewComponent"
+          v-show="uiStore.activeTab === 'editor'"
+          :working-dir="projectStore.workingDir"
         />
         <div
-          v-else-if="uiStore.activeTab === 'chat'"
+          v-else-if="uiStore.editorMounted && uiStore.activeTab === 'editor'"
           class="tab-loading-state"
-          :class="{ 'is-loading': chatViewLoading, 'is-error': !!chatViewError }"
+          :class="{ 'is-loading': editorViewLoading, 'is-error': !!editorViewError }"
         >
-          {{ chatViewError || t("common.loading") }}
+          {{ editorViewError || t("common.loading") }}
         </div>
         <component
           :is="collabViewComponent"
@@ -1077,6 +1122,7 @@ watch(() => projectStore.workingDir, () => {
           {{ settingsViewError || t("common.loading") }}
         </div>
       </div>
+    </div>
     </div>
   </div>
   <AppUpdateModal
@@ -2059,5 +2105,42 @@ body.is-dragging-select-lock * {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* -- Split layout (chat left panel resizable) -- */
+.split-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-panel-left {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  border-right: 1px solid var(--border-color);
+  background: var(--panel-bg);
+}
+
+.split-divider {
+  flex: 0 0 4px;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 10;
+  transition: background 0.15s;
+  margin: 0 -1px;
+}
+
+.split-divider:hover,
+.split-divider.dragging {
+  background: var(--accent-color);
+  opacity: 0.5;
 }
 </style>

@@ -431,6 +431,20 @@ export interface WorkspaceModelOverride {
   subagentModels: Record<string, string>;
 }
 
+export type CodeRefKind = "selection" | "line" | "function" | "class" | "file";
+
+export interface CodeRefAttachment {
+  relPath: string;
+  kind: CodeRefKind;
+  startLine: number;
+  endLine: number;
+  startColumn?: number;
+  endColumn?: number;
+  language: string;
+  excerpt: string;
+  symbolName?: string;
+}
+
 export type CodexTransportMode = "http" | "websocket";
 
 export interface CodexModelConfig {
