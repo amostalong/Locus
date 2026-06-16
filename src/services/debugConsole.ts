@@ -223,6 +223,39 @@ function installConsoleCapture() {
     captureConsole("error", [event.error ?? event.message]);
   });
 
+  // Silence the monaco-vscode-api 33.0.9 Monarch race that fires during
+  // background tokenization: `MonarchModernTokensCollector.emit` calls
+  // `this._theme.match(...)` with `this._theme` undefined for the first
+  // few lines of any freshly-opened csharp file. Monaco already has a
+  // built-in fallback path (the collector's `match` result just feeds
+  // the tokenization cache), so the throw is recoverable — but it
+  // spams the debug console every time the background tokenizer
+  // touches an unset line. We keep the event listener above so the
+  // backend log gets one entry on the very first hit, then swallow
+  // subsequent ones.
+  let monarchRaceSilenceCount = 0;
+  window.addEventListener("error", (event) => {
+    const err = event.error as Error | undefined;
+    const msg = err?.message ?? event.message ?? "";
+    if (
+      msg.includes("Cannot read properties of undefined (reading 'match')") &&
+      (err?.stack ?? "").includes("MonarchModernTokensCollector.emit")
+    ) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (monarchRaceSilenceCount === 0) {
+        originalConsole.warn(
+          "[debugConsole] silencing monaco-vscode-api 33.0.9 Monarch collector race " +
+            "(`this._theme` undefined) — see node_modules/monaco-editor/.../monarchLexer.js:225. " +
+            "Harmless: Monaco falls back to no-syntax-highlighting for those few lines. " +
+            "Proper fix is Roslyn semantic tokens once the LSP pipeline lands.",
+        );
+      }
+      monarchRaceSilenceCount++;
+      return;
+    }
+  }, true);
+
   window.addEventListener("unhandledrejection", (event) => {
     captureConsole("error", ["Unhandled promise rejection", event.reason]);
   });
