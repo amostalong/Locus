@@ -208,6 +208,23 @@ pub struct EditorFile {
     pub size: u64,
 }
 
+impl EditorFile {
+    /// Decode a raw byte buffer into a normalized `EditorFile`. Pulled
+    /// out of the command bodies so the absolute-path and
+    /// workspace-relative readers share one implementation.
+    fn from_bytes_with_size(bytes: Vec<u8>, size: u64) -> Self {
+        let (raw, had_bom) = decode_file_bytes(bytes);
+        let line_ending = detect_preferred_line_ending(&raw);
+        let content = normalize_lf(&raw);
+        Self {
+            content,
+            line_ending: line_ending.into(),
+            had_bom,
+            size,
+        }
+    }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -241,15 +258,45 @@ pub async fn editor_read_file(
     let bytes = std::fs::read(&target).map_err(|e| {
         AppError::new("editor.read_failed", "Failed to read file").detail(e.to_string())
     })?;
-    let (raw, had_bom) = decode_file_bytes(bytes);
-    let line_ending = detect_preferred_line_ending(&raw);
-    let content = normalize_lf(&raw);
-    Ok(EditorFile {
-        content,
-        line_ending: line_ending.into(),
-        had_bom,
-        size: metadata.len(),
-    })
+    Ok(EditorFile::from_bytes_with_size(bytes, metadata.len()))
+}
+
+/// Read an arbitrary absolute file path. The workspace-relative
+/// `editor_read_file` rejects paths that escape the project root, but
+/// Roslyn's decompilation cache (`%TEMP%\MetadataAsSource\…\Type.cs`)
+/// lives outside the workspace and the editor still wants to render it
+/// as a read-only peek tab. The path is taken verbatim — there is no
+/// traversal protection here, but the IPC caller is the same trusted
+/// frontend process, and the only consumer is the editor's
+/// metadata-peek feature.
+#[tauri::command]
+pub async fn editor_read_file_abs(absolute_path: String) -> Result<EditorFile, AppError> {
+    let target = std::path::PathBuf::from(&absolute_path);
+    let metadata = std::fs::metadata(&target).map_err(|e| {
+        AppError::new("editor.stat_failed", "Failed to read file metadata")
+            .detail(format!("{absolute_path}: {e}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::new(
+            "editor.not_a_file",
+            "Target is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_EDITABLE_BYTES {
+        return Err(AppError::new(
+            "editor.file_too_large",
+            format!(
+                "File exceeds editor limit ({} bytes > {} bytes)",
+                metadata.len(),
+                MAX_EDITABLE_BYTES
+            ),
+        ));
+    }
+    let bytes = std::fs::read(&target).map_err(|e| {
+        AppError::new("editor.read_failed", "Failed to read file")
+            .detail(format!("{absolute_path}: {e}"))
+    })?;
+    Ok(EditorFile::from_bytes_with_size(bytes, metadata.len()))
 }
 
 #[tauri::command]

@@ -1013,6 +1013,7 @@ pub fn run() {
             commands::search_workspace_entries,
             commands::stat_workspace_entries,
             commands::editor_read_file,
+            commands::editor_read_file_abs,
             commands::editor_write_file,
             commands::save_raw_context,
             commands::get_todos,

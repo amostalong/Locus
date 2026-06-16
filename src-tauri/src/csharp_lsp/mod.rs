@@ -79,7 +79,7 @@ enum Phase {
     Error(String),
 }
 
-struct WorkspaceServer {
+pub(crate) struct WorkspaceServer {
     workspace: PathBuf,
     phase_tx: watch::Sender<Phase>,
     phase_rx: watch::Receiver<Phase>,
@@ -724,18 +724,49 @@ pub(crate) async fn ready_client(
 pub(crate) async fn bridge_lsp_request(
     workspace: &str,
     method: &str,
-    params: serde_json::Value,
+    mut params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let (_server, lsp) = ready_client(workspace).await?;
+    let lsp = bridge_ready_client(workspace).await?;
+    // Normalize textDocument.uri: Monaco emits `file:///c%3A/Users/...`
+    // (lowercase, percent-encoded colon), but Roslyn stores documents
+    // under `file:///C:/Users/...` (uppercase drive, literal colon) —
+    // the kind of mismatch that returns "Document is null" because
+    // Roslyn's document lookup is a string compare on the URI. We
+    // re-emit the URI through `path_to_uri` so it round-trips through
+    // the same canonical form Roslyn uses internally.
     if let Some(uri) = params
         .pointer("/textDocument/uri")
         .and_then(|v| v.as_str())
     {
         if let Some(path) = client::uri_to_path(uri) {
-            let _ = lsp.sync_document(&path).await;
+            match lsp.sync_document(&path).await {
+                Ok(canonical_uri) => {
+                    if canonical_uri != uri {
+                        if let Some(text_doc) = params
+                            .get_mut("textDocument")
+                            .and_then(|t| t.as_object_mut())
+                        {
+                            text_doc.insert("uri".to_string(), serde_json::Value::String(canonical_uri));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(log_module = "csharp_lsp.bridge", "[bridgeLsp] {method} sync_document FAILED: {e}");
+                }
+            }
         }
     }
     lsp.request(method, params).await
+}
+
+/// Like `ready_client` but returns only the LSP client. Used by the
+/// bridge request path that does not need the surrounding
+/// `WorkspaceServer` (its statistics are tracked by the per-feature
+/// query functions instead). This is what lets the bridge command
+/// stay at the `pub(crate)` boundary without widening `WorkspaceServer`.
+async fn bridge_ready_client(workspace: &str) -> Result<Arc<client::LspClient>, String> {
+    let (_server, lsp) = ready_client(workspace).await?;
+    Ok(lsp)
 }
 
 /// Failure shapes that mean the server process died under the query (it has

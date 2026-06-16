@@ -67,6 +67,178 @@ function lspRangeToMonaco(r: {
   };
 }
 
+/**
+ * Lightweight peek-references widget shown when the monaco-vscode
+ * extension host hasn't published the default `vscode` API yet
+ * (`Default api is not ready yet`). Renders an HTML list of locations
+ * anchored to the cursor; clicking a row navigates the editor there.
+ */
+function showReferencesFallback(
+  _originUri: monaco.Uri,
+  originPos: monaco.Position,
+  locations: Array<{ uri: monaco.Uri; range: monaco.IRange }>,
+  sourceId: string,
+): void {
+  if (!editor) return;
+  const dom = document.createElement("div");
+  dom.className = "locus-refs-widget";
+  dom.style.cssText = [
+    "position:absolute",
+    "z-index:50",
+    "background:var(--vscode-editorWidget-background,#252526)",
+    "color:var(--vscode-editorWidget-foreground,#cccccc)",
+    "border:1px solid var(--vscode-editorWidget-border,#454545)",
+    "box-shadow:0 2px 8px rgba(0,0,0,0.4)",
+    "font-family:var(--vscode-font-family,monospace)",
+    "font-size:12px",
+    "max-height:240px",
+    "overflow-y:auto",
+    "padding:4px 0",
+    "min-width:280px",
+  ].join(";");
+  const header = document.createElement("div");
+  header.style.cssText = "padding:4px 10px;border-bottom:1px solid #454545;font-weight:600;";
+  header.textContent = `${locations.length} reference${locations.length === 1 ? "" : "s"} (${sourceId})`;
+  dom.appendChild(header);
+  for (const loc of locations) {
+    const row = document.createElement("div");
+    row.style.cssText = "padding:3px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    row.title = `${loc.uri.fsPath}:${loc.range.startLineNumber}:${loc.range.startColumn}`;
+    const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
+    row.textContent = `${fileName}  L${loc.range.startLineNumber}:${loc.range.startColumn}`;
+    row.addEventListener("click", () => {
+      // Open the file via the editor store (handles workspace-root resolution)
+      // and place the cursor at the reference range.
+      const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
+      const target = loc.uri.fsPath.replace(/\\/g, "/");
+      if (target.toLowerCase().startsWith(root.toLowerCase())) {
+        const rel = target.slice(root.length + 1);
+        editorStore.openFile(rel).then(() => {
+          editor?.setPosition({
+            lineNumber: loc.range.startLineNumber,
+            column: loc.range.startColumn,
+          });
+          editor?.revealPositionInCenter({
+            lineNumber: loc.range.startLineNumber,
+            column: loc.range.startColumn,
+          });
+          editor?.focus();
+        }).catch((e) => console.warn("[refCmd] fallback openFile failed:", e));
+      } else {
+        // Reference points outside the workspace (e.g. a metadata
+        // decompilation in %TEMP%). Open as a virtual read-only tab
+        // via the store so the user at least sees the location.
+        let m = monaco.editor.getModel(loc.uri);
+        if (!m) {
+          // Empty placeholder — the file system provider will populate
+          // it asynchronously when the editor requests its content.
+          m = monaco.editor.createModel("", "csharp", loc.uri);
+        }
+        editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
+        editor?.setPosition({
+          lineNumber: loc.range.startLineNumber,
+          column: loc.range.startColumn,
+        });
+      }
+      // Reverting editor.removeContentWidget (see below) is the canonical
+      // dispose path; the click handler doesn't need a teardown step.
+    });
+    row.addEventListener("mouseenter", () => { row.style.background = "#094771"; });
+    row.addEventListener("mouseleave", () => { row.style.background = ""; });
+    dom.appendChild(row);
+  }
+  // Build a single visible overlay div anchored to the editor host.
+  // We intentionally avoid IContentWidget here — monaco-vscode-api 33.0.9's
+  // ConfiguredStandaloneEditor wraps the widget a second time and the
+  // resulting setWidgetPosition() call hits a `_widgets[getId()]` lookup
+  // miss ("Cannot read properties of undefined (reading 'setPosition')").
+  // A plain DOM overlay avoids the whole positioning pipeline.
+  const overlay = document.createElement("div");
+  overlay.className = "locus-refs-overlay";
+  // position:fixed keeps the widget on screen regardless of editor
+  // container's stacking context, transform, or overflow settings. We
+  // anchor near the cursor when coords are available; otherwise the
+  // user gets a centered overlay they can't miss.
+  overlay.style.cssText = dom.style.cssText + ";position:fixed;z-index:9999;";
+  // Move the header + rows that were built above directly into the overlay.
+  while (dom.firstChild) {
+    overlay.appendChild(dom.firstChild);
+  }
+  // Re-wire click handlers on every row in the overlay (the click
+  // listeners were attached to the `row` objects built earlier, which
+  // are now in the overlay; their handlers still reference the right
+  // `loc` via the `locations` closure).
+  overlay.querySelectorAll("div[title]").forEach((row, i) => {
+    row.addEventListener("click", () => {
+      const loc = locations[i];
+      if (!loc) return;
+      const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
+      const target = loc.uri.fsPath.replace(/\\/g, "/");
+      if (target.toLowerCase().startsWith(root.toLowerCase())) {
+        const rel = target.slice(root.length + 1);
+        editorStore.openFile(rel).then(() => {
+          editor?.setPosition({
+            lineNumber: loc.range.startLineNumber,
+            column: loc.range.startColumn,
+          });
+          editor?.revealPositionInCenter({
+            lineNumber: loc.range.startLineNumber,
+            column: loc.range.startColumn,
+          });
+          editor?.focus();
+        }).catch((e) => console.warn("[refCmd] overlay openFile failed:", e));
+      } else {
+        let m = monaco.editor.getModel(loc.uri);
+        if (!m) m = monaco.editor.createModel("", "csharp", loc.uri);
+        const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
+        editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
+        editor?.setPosition({
+          lineNumber: loc.range.startLineNumber,
+          column: loc.range.startColumn,
+        });
+      }
+      cleanup();
+    });
+  });
+  // Anchor the overlay near the cursor position in viewport coords.
+  // `getScrolledVisiblePosition` returns coords relative to the
+  // editor's *content* area, not the page — we have to add the
+  // editor's bounding rect to translate to viewport. If anything
+  // goes wrong (e.g. editor not laid out yet), the user still gets
+  // a centered overlay.
+  let top = 80;
+  let left = 80;
+  try {
+    const editorCoords = editor.getScrolledVisiblePosition(originPos);
+    if (editorCoords) {
+      const editorRect = editor.getContainerDomNode?.()?.getBoundingClientRect();
+      if (editorRect) {
+        top = editorRect.top + editorCoords.top + editorCoords.height + 4;
+        left = editorRect.left + editorCoords.left;
+      } else {
+        top = editorCoords.top + editorCoords.height + 4;
+        left = editorCoords.left;
+      }
+    }
+  } catch {
+    // ignore — fallback top/left is fine
+  }
+  overlay.style.top = `${Math.max(top, 20)}px`;
+  overlay.style.left = `${Math.max(left, 20)}px`;
+  document.body.appendChild(overlay);
+  const cleanup = () => {
+    overlay.remove();
+    document.removeEventListener("mousedown", dismiss, true);
+  };
+  // Clicking anywhere else dismisses the widget.
+  const dismiss = (ev: MouseEvent) => {
+    if (!overlay.contains(ev.target as Node)) {
+      cleanup();
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+}
+
 function disposeAllMonacoRegistrations() {
   monacoProviderDisposables.forEach((d) => d.dispose());
   monacoProviderDisposables = [];
@@ -502,13 +674,24 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
               range: lspRangeToMonaco(r.range),
             }));
             const vscode = await import("vscode");
-            await vscode.commands.executeCommand(
-              "editor.action.showReferences",
-              effectiveResource,
-              effectivePosition,
-              locations,
-              "peek",
-            );
+            try {
+              await vscode.commands.executeCommand(
+                "editor.action.showReferences",
+                effectiveResource,
+                effectivePosition,
+                locations,
+                "peek",
+              );
+            } catch (cmdErr) {
+              // vscode API not ready in monaco-vscode-api 33.0.9's
+              // extension host (a known race: localExtensionHost worker
+              // may not have published the default API by the time the
+              // user fires Shift+F12). Fall back to navigating the
+              // current file to each reference in a hover widget so the
+              // user still gets usable feedback.
+              console.warn(`[refCmd] showReferences unavailable, falling back to references widget:`, cmdErr);
+              showReferencesFallback(effectiveResource, effectivePosition, locations, id);
+            }
           } catch (err) {
             console.warn(`[refCmd] ${id} failed:`, err);
           }

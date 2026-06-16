@@ -17,7 +17,7 @@ import {
   type IStat,
 } from "@codingame/monaco-vscode-files-service-override";
 
-import { editorReadFile } from "./editorFs";
+import { editorReadFile, editorReadFileAbs } from "./editorFs";
 
 type Listener<T> = (e: T) => unknown;
 type Disposable = { dispose(): void };
@@ -112,6 +112,25 @@ export class ModelBackedFileSystemProvider
   }
 
   private async readFromDisk(resource: monaco.Uri): Promise<Uint8Array> {
+    // Roslyn's decompilation temp lives outside the workspace
+    // (`%TEMP%\MetadataAsSource\…\SomeType.cs`). The fs root check
+    // would reject it, so read it directly from disk via a generic
+    // absolute-path backend before falling back to the workspace-
+    // relative editorReadFile path.
+    if (resource.fsPath.includes("MetadataAsSource") ||
+        resource.fsPath.includes("$metadata$")) {
+      try {
+        const file = await editorReadFileAbs(resource.fsPath);
+        console.log(`[fsProvider] readFromDisk: editorReadFileAbs OK size=${file.size}`);
+        return new TextEncoder().encode(file.content);
+      } catch (err) {
+        console.warn(`[fsProvider] readFromDisk: absolute read FAILED for ${resource.fsPath}:`, err);
+        throw FileSystemProviderError.create(
+          "failed to read external file",
+          FileSystemProviderErrorCode.FileNotFound,
+        );
+      }
+    }
     if (!this._workspaceRoot) {
       console.warn(`[fsProvider] readFromDisk: no workspace root set, resource=${resource.toString()}`);
       throw FileSystemProviderError.create(
