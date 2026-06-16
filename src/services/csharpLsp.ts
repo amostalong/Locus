@@ -49,3 +49,25 @@ export function subscribeCsharpLspStatus(
 ): Promise<RuntimeUnsubscribe> {
   return getLocusRuntime().subscribe<CsharpLspStatus>("csharp-lsp-status", handler);
 }
+
+/**
+ * Generic bridge to the active Roslyn language server. Forwards a raw LSP
+ * `method` + `params` payload to the Rust csharp_lsp backend, which
+ * routes it through `LspClient::request` and returns the JSON-RPC
+ * `result` value. Used by the Monaco editor to drive hover / definition
+ * / references / completion against the running server.
+ *
+ * Resolves with the raw server response (already parsed by the IPC
+ * transport). Rejects with a descriptive error when the feature is
+ * disabled, the workspace is empty, or the server is still warming up.
+ */
+export function csharpLspBridgeRequest(
+  method: string,
+  params: unknown,
+): Promise<unknown> {
+  return ipcInvoke<unknown>(
+    "csharp_lsp_bridge_request",
+    { method, params: params ?? null },
+    { operation: "csharpLspBridgeRequest", notify: false, throwOnError: true },
+  );
+}

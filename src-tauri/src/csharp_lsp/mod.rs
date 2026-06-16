@@ -703,12 +703,25 @@ pub struct ReferencesResult {
     pub anchor: SymbolAnchor,
 }
 
-async fn ready_client(
+pub(crate) async fn ready_client(
     workspace: &str,
 ) -> Result<(Arc<WorkspaceServer>, Arc<client::LspClient>), String> {
     let server = ensure_workspace_server(workspace).await?;
     let client = server.wait_ready(QUERY_READY_TIMEOUT).await?;
     Ok((server, client))
+}
+
+/// Forward a raw LSP request to the running Roslyn server for `workspace`.
+/// Used by the Monaco editor's generic bridge command (hover / definition /
+/// references / completion). The server is auto-started / reloaded when the
+/// workspace changes.
+pub(crate) async fn bridge_lsp_request(
+    workspace: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (_server, lsp) = ready_client(workspace).await?;
+    lsp.request(method, params).await
 }
 
 /// Failure shapes that mean the server process died under the query (it has

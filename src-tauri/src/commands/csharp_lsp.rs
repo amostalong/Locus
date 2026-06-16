@@ -2,6 +2,39 @@ use tauri::State;
 
 use crate::error::AppError;
 
+/// Generic bridge from the Monaco frontend to the active Roslyn language
+/// server. The frontend sends raw LSP `method` + `params` (the same shape
+/// Monaco language clients normally use over a JSON-RPC socket); we route
+/// it through `LspClient::request` so the editor gets hover / definition /
+/// references / completion directly from the running server instead of the
+/// dead OmniSharp stub.
+///
+/// Returns the raw JSON-RPC `result` value. Errors bubble up unchanged
+/// (`workspace_disabled` / `server_not_ready` / `server_exited`).
+#[tauri::command]
+pub async fn csharp_lsp_bridge_request(
+    method: String,
+    params: serde_json::Value,
+    workspace: State<'_, std::sync::Arc<crate::workspace::Workspace>>,
+) -> Result<serde_json::Value, AppError> {
+    if !crate::csharp_lsp::is_enabled() {
+        return Err(AppError::new(
+            "csharp_lsp.disabled",
+            "C# code analysis is disabled",
+        ));
+    }
+    let cwd = workspace.path.read().await.clone();
+    if cwd.trim().is_empty() {
+        return Err(AppError::new(
+            "csharp_lsp.no_workspace",
+            "No workspace selected",
+        ));
+    }
+    crate::csharp_lsp::bridge_lsp_request(&cwd, &method, params)
+        .await
+        .map_err(|error| AppError::new("csharp_lsp.request_failed", error))
+}
+
 #[tauri::command]
 pub async fn csharp_lsp_get_status() -> Result<crate::csharp_lsp::CsharpLspStatusPayload, AppError>
 {

@@ -10,18 +10,18 @@ import {
   fsProvider,
   setFsRoot,
 } from "../../services/monacoVscodeServices";
-import {
-  startCsharpLanguageClient,
-  type LanguageClientHandle,
-} from "../../services/lspClient";
 import { findEnclosing, type EnclosingSymbol } from "../../services/codeRefDetect";
 import { ipcInvoke } from "../../services/ipc";
 import { useOmnisharpStatus } from "../../composables/useOmnisharpStatus";
-import { StandaloneServices, ILanguageFeaturesService } from "@codingame/monaco-vscode-api/services";
-import type { CodeRefAttachment, CodeRefKind } from "../../types";
+import {
+  csharpLspBridgeRequest,
+  csharpLspGetStatus,
+  subscribeCsharpLspStatus,
+} from "../../services/csharpLsp";
 // 用于覆盖 Monaco 内部的 editor.action.findReferences 命令
 // （vscode.commands.registerCommand 走的是 VS Code API 扩展主机桥，覆盖不了）
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
+import type { CodeRefAttachment, CodeRefKind } from "../../types";
 
 const props = defineProps<{
   workingDir: string;
@@ -40,12 +40,10 @@ let themeObserver: MutationObserver | null = null;
 let hasFunctionCtx: monaco.editor.IContextKey<boolean> | null = null;
 let hasClassCtx: monaco.editor.IContextKey<boolean> | null = null;
 let cursorListener: monaco.IDisposable | null = null;
-let csharpClient: LanguageClientHandle | null = null;
+let csharpClient: { workspaceDir: string; stop: () => Promise<void> } | null = null;
 let csharpClientPending: Promise<void> | null = null;
+let csharpStatusUnlisten: (() => void) | null = null;
 const { setStatus: setOmniStatus, setName: setOmniName } = useOmnisharpStatus();
-let omniReadyUnlisten: (() => void) | null = null;
-let omniExitUnlisten: (() => void) | null = null;
-let omniReadyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ── Monaco Provider Registration Tracking ─────────────────────────────
 // Store ALL Monaco provider registration disposables so we can clean them
@@ -55,7 +53,6 @@ let omniReadyTimeout: ReturnType<typeof setTimeout> | null = null;
 // Pattern: register → store disposable → dispose on unmount.
 // See: https://github.com/microsoft/monaco-editor/issues/xxx
 let monacoProviderDisposables: monaco.IDisposable[] = [];
-let lspRequestorCleanup: (() => void) | null = null;
 
 /** Convert LSP 0-based range to Monaco 1-based range */
 function lspRangeToMonaco(r: {
@@ -71,8 +68,6 @@ function lspRangeToMonaco(r: {
 }
 
 function disposeAllMonacoRegistrations() {
-  lspRequestorCleanup?.();
-  lspRequestorCleanup = null;
   monacoProviderDisposables.forEach((d) => d.dispose());
   monacoProviderDisposables = [];
 }
@@ -246,154 +241,55 @@ function registerCodeRefActions(ed: monaco.editor.IStandaloneCodeEditor) {
 
 async function ensureCsharpClient(workspaceDir: string): Promise<void> {
   const dir = workspaceDir.trim();
-  console.log(`[ensureCsharpClient] called with dir="${dir}", csharpClient=`, !!csharpClient, 'csharpClientPending=', !!csharpClientPending);
   if (!dir) {
-    console.log(`[ensureCsharpClient] dir is empty, disabled`);
     setOmniStatus("disabled");
     return;
   }
   if (csharpClient && csharpClient.workspaceDir === dir) {
-    console.log(`[ensureCsharpClient] already have client for ${dir}, skip`);
     return;
   }
   if (csharpClientPending) {
-    console.log(`[ensureCsharpClient] awaiting existing pending...`);
     await csharpClientPending;
     if (csharpClient && csharpClient.workspaceDir === dir) {
-      console.log(`[ensureCsharpClient] after pending, already have client for ${dir}, skip`);
       return;
     }
   }
   csharpClientPending = (async () => {
-    // Clean up old custom provider registrations before starting fresh
     disposeAllMonacoRegistrations();
-
-    // Clean up previous listeners and timeouts before starting fresh
-    omniReadyUnlisten?.();
-    omniReadyUnlisten = null;
-    omniExitUnlisten?.();
-    omniExitUnlisten = null;
-    if (omniReadyTimeout) {
-      clearTimeout(omniReadyTimeout);
-      omniReadyTimeout = null;
-    }
+    csharpStatusUnlisten?.();
 
     if (csharpClient) {
       const old = csharpClient;
       csharpClient = null;
       setOmniStatus("disabled");
-      await old.stop().catch((err) => {
-        console.warn("[lsp] failed to stop previous C# client:", err);
-      });
+      await old.stop().catch(() => {});
     }
 
-    setOmniStatus("connecting", "Starting OmniSharp...");
-    setOmniName("OmniSharp");
-    try {
-      // ── Register exclusive code lens provider ────────────────────────
-      // Register BEFORE MLC starts so our `exclusive: true` provider is
-      // already in the LanguageFeatureRegistry when MLC's CodeLensFeature
-      // registers its own provider. The exclusive flag hides MLC's provider
-      // (score 0) and only ours is visible (score 1000). Monaco never sees
-      // MLC's provider — no "5 refs | 5 refs" from the very first query.
-      //
-      // The provider returns `{ lenses: [] }` while LSP isn't ready
-      // (lspRequest is null). Once the requestor is set up below, we fire
-      // onDidChange to trigger Monaco to re-query with real data.
-      let lspRequest: ((method: string, params: unknown) => Promise<unknown>) | null = null;
-      let clCallCount = 0;
+    setOmniStatus("connecting", "Starting Roslyn...");
+    setOmniName("Roslyn");
+
+    // Every Monaco provider we register below routes through this single
+    // bridge to the Rust csharp_lsp backend. The backend owns the Roslyn
+    // process; the frontend just forwards JSON-RPC `method` + `params`.
+    const lspRequest = (method: string, params: unknown): Promise<unknown> => {
+      return csharpLspBridgeRequest(method, params).catch((err) => {
+        console.warn(`[lspRequest] ${method} failed:`, err);
+        throw err;
+      });
+    };
+
+    // ── Code Lens (placeholder, exclusive) ────────────────────────────
+    // Roslyn does not emit textDocument/codeLens, but Monaco still needs a
+    // registered provider to silence the "missing provider" warning. The
+    // real "5 references" link is driven by the reference provider below.
+    {
       type _CodeLensProvider = Parameters<typeof monaco.languages.registerCodeLensProvider>[1];
       const codeLensEmitter = new monaco.Emitter<_CodeLensProvider>();
       const codeLensProvider: _CodeLensProvider = {
         onDidChange: codeLensEmitter.event,
-        provideCodeLenses: async (model, _token) => {
-          clCallCount++;
-          const uri = model.uri.toString();
-          console.log(`[codeLens] provideCodeLenses called #${clCallCount} for ${uri}, lspRequest=`, !!lspRequest);
-          // 检查 registry 状态
-          try {
-            const svc = StandaloneServices.get(ILanguageFeaturesService);
-            const raw = (svc.codeLensProvider as any);
-            if (raw._entries) {
-              console.log(`[codeLens] registry _entries=${raw._entries.length}`, raw._entries.map((e: any) => ({
-                exclusive: e.selector?.exclusive,
-                isBuiltin: e.selector?.isBuiltin,
-                score: e._score,
-                hasData: typeof e.provider?.provideCodeLenses === 'function',
-              })));
-            }
-          } catch (e) {};
-          const req = lspRequest;
-          if (!req) {
-            console.log(`[codeLens] lspRequest not ready yet, returning empty`);
-            return { lenses: [] };
-          }
-          try {
-            console.log(`[codeLens] sending textDocument/codeLens for ${uri}`);
-            const result = await req("textDocument/codeLens", {
-              textDocument: { uri },
-            });
-            console.log(`[codeLens] LSP result for ${uri}:`, JSON.stringify(result).slice(0, 500));
-            if (!Array.isArray(result)) {
-              console.log(`[codeLens] result is not array, type=${typeof result}, returning empty`);
-              return { lenses: [] };
-            }
-            console.log(`[codeLens] got ${result.length} lenses`);
-            const lenses = result.map((cl: any) => ({
-              range: lspRangeToMonaco(cl.range),
-              // Preserve LSP `data` field so resolveCodeLens can use it
-              data: cl.data,
-              command: cl.command
-                ? {
-                    id: cl.command.command,
-                    title: cl.command.title,
-                    arguments: cl.command.arguments,
-                  }
-                : undefined,
-            }));
-            console.log(`[codeLens] returning ${lenses.length} lenses, first has command=`, !!lenses[0]?.command);
-            return { lenses };
-          } catch (err) {
-            console.log(`[codeLens] LSP request failed:`, err);
-            return { lenses: [] };
-          }
-        },
-        resolveCodeLens: async (_model, codeLens, _token) => {
-          const req = lspRequest;
-          if (!req || !(codeLens as any).data) {
-            console.log(`[codeLens] resolveCodeLens: skipped (no req or no data)`);
-            return codeLens;
-          }
-          try {
-            console.log(`[codeLens] resolveCodeLens: sending codeLens/resolve`);
-            const result = await req("codeLens/resolve", {
-              range: {
-                start: { line: codeLens.range.startLineNumber - 1, character: codeLens.range.startColumn - 1 },
-                end: { line: codeLens.range.endLineNumber - 1, character: codeLens.range.endColumn - 1 },
-              },
-              data: (codeLens as any).data,
-            });
-            if (result && (result as any).command) {
-              console.log(`[codeLens] resolveCodeLens: resolved, title="${(result as any).command.title}"`);
-              return {
-                range: codeLens.range,
-                data: (result as any).data,
-                command: {
-                  id: (result as any).command.command,
-                  title: (result as any).command.title,
-                  arguments: (result as any).command.arguments,
-                },
-              };
-            }
-            console.log(`[codeLens] resolveCodeLens: no command in result`);
-            return codeLens;
-          } catch (err) {
-            console.log(`[codeLens] resolveCodeLens failed:`, err);
-            return codeLens;
-          }
-        },
+        provideCodeLenses: async () => ({ lenses: [] }),
+        resolveCodeLens: async (_model, codeLens) => codeLens,
       };
-      console.log(`[codeLens] registering exclusive provider for csharp`);
       monacoProviderDisposables.push(
         monaco.languages.registerCodeLensProvider(
           { language: "csharp", exclusive: true },
@@ -401,28 +297,23 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
         ),
         { dispose: () => codeLensEmitter.dispose() },
       );
+    }
 
-      // ── Register exclusive hover provider ──────────────────────────────
-      // Same pattern as code lens: register BEFORE MLC starts so our
-      // `exclusive: true` provider hides MLC's HoverFeature provider.
-      // Returns null while LSP isn't ready (lspRequest is null).
+    // ── Hover ──
+    {
       type _HoverProvider = Parameters<typeof monaco.languages.registerHoverProvider>[1];
       const hoverProvider: _HoverProvider = {
-        provideHover: async (model, position, _token) => {
-          const req = lspRequest;
-          if (!req) return null;
+        provideHover: async (model, position) => {
           try {
-            const result = await req("textDocument/hover", {
+            const result: any = await lspRequest("textDocument/hover", {
               textDocument: { uri: model.uri.toString() },
               position: { line: position.lineNumber - 1, character: position.column - 1 },
             });
-            if (!result) return null;
-            const h = result as { contents?: unknown; range?: { start: { line: number; character: number }; end: { line: number; character: number } } };
-            if (!h.contents) return null;
-            const contents = Array.isArray(h.contents) ? h.contents : [h.contents];
+            if (!result?.contents) return null;
+            const contents = Array.isArray(result.contents) ? result.contents : [result.contents];
             if (contents.length === 0) return null;
             return {
-              range: h.range ? lspRangeToMonaco(h.range) : undefined,
+              range: result.range ? lspRangeToMonaco(result.range) : undefined,
               contents: contents.map((c: unknown) => {
                 if (typeof c === "string") return { value: c };
                 if (typeof c === "object" && c !== null) {
@@ -443,153 +334,128 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
           hoverProvider,
         ),
       );
+    }
 
-      // ── Shared helper: register goto-style providers ─────────────────
-      // Monaco standalone 不会自动打开/切 tab，所以每个 goto provider
-      // 在返回位置后额外通过 editorStore 打开文件 + 跳转光标。
-      // 覆盖 definition / typeDefinition / implementation 三个。
-      // 每个 registerXxxProvider 要求 provider 上有对应的方法名
-      // （provideDefinition / provideTypeDefinition / provideImplementation），
-      // 通过 methodKey 参数指定。
-      function registerGotoProvider(
-        tag: string,
-        lspMethod: string,
-        methodKey: string,
-        registerFn: (selector: monaco.languages.LanguageSelector, provider: any) => monaco.IDisposable,
-      ) {
-        const handler = async (model: monaco.editor.ITextModel, position: monaco.Position, token: monaco.CancellationToken) => {
-          const req = lspRequest;
-          if (!req) return null;
+    // ── Goto-style providers (definition / typeDefinition / implementation) ──
+    // Each handler queries Roslyn, then opens the target file via the
+    // editor store and positions the cursor. $metadata$ targets are
+    // decompiled on demand.
+    function registerGotoProvider(
+      tag: string,
+      lspMethod: string,
+      methodKey: string,
+      registerFn: (selector: monaco.languages.LanguageSelector, provider: any) => monaco.IDisposable,
+    ) {
+      const handler = async (
+        model: monaco.editor.ITextModel,
+        position: monaco.Position,
+        token: monaco.CancellationToken,
+      ) => {
+        let cancelHandle: { dispose(): void } | null = null;
+        const cancelPromise = new Promise<never>((_, reject) => {
+          cancelHandle = token.onCancellationRequested(() => reject(new Error("cancelled")));
+        });
+        const cleanup = () => { cancelHandle?.dispose(); cancelHandle = null; };
 
-          // Wire Monaco's cancellation token so that moving the cursor or pressing
-          // Escape immediately aborts the pending LSP request instead of waiting
-          // for the 15 s timeout (especially important while OmniSharp is still
-          // analysing the project on startup).
-          let cancelHandle: { dispose(): void } | null = null;
-          const cancelPromise = new Promise<never>((_, reject) => {
-            cancelHandle = token.onCancellationRequested(() =>
-              reject(new Error("cancelled")),
-            );
-          });
-          const cleanup = () => { cancelHandle?.dispose(); cancelHandle = null; };
-
-          const uri = model.uri.toString();
-          try {
-            const t0 = performance.now();
-            const result = await Promise.race([
-              req(lspMethod, {
-                textDocument: { uri },
-                position: { line: position.lineNumber - 1, character: position.column - 1 },
-              }),
-              cancelPromise,
-            ]);
-            // Note: cleanup() is NOT called here. Keeping cancelHandle alive
-            // lets cancelPromise remain active for the inner race in the
-            // $metadata$ branch (decompile step), so cancellation works there too.
-            console.log(`[${tag}] ${lspMethod} in ${(performance.now() - t0).toFixed(0)}ms`);
-            if (!result) return null;
-            const items = Array.isArray(result) ? result : [result];
-            const loc = (() => {
-              for (const item of items) {
-                const rng = item.targetRange ?? item.range;
-                if (rng && (item.uri || item.targetUri)) {
-                  return { uri: item.targetUri ?? item.uri, range: rng };
-                }
-              }
-              return null;
-            })();
-            if (!loc) return null;
-            const targetUri = monaco.Uri.parse(loc.uri);
-            const targetRange = lspRangeToMonaco(loc.range);
-            console.log(`[${tag}] target: ${targetUri.fsPath} @ L${targetRange.startLineNumber}:${targetRange.startColumn}`);
-            const uriPath = targetUri.fsPath.replace(/\\/g, "/");
-            const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
-
-            // $metadata$ files: open as a read-only tab via the store so the
-            // tab bar reflects the navigation, then navigate to the definition line.
-            if (uriPath.includes("$metadata$")) {
-              if (token.isCancellationRequested) return null;
-              try {
-                let model = monaco.editor.getModel(targetUri);
-                if (!model) {
-                  // Model not cached yet — decompile now.
-                  const metaPath = targetUri.path.replace(/^\//, "");
-                  const source = await Promise.race([
-                    ipcInvoke<string>("decompile_metadata", {
-                      metadataPath: metaPath,
-                      workspaceDir: props.workingDir,
-                    }),
-                    cancelPromise,
-                  ]);
-                  model = monaco.editor.createModel(source, "csharp", targetUri);
-                }
-                if (model) {
-                  const filename = targetUri.path.split("/").pop() ?? targetUri.fsPath;
-                  editorStore.openVirtualFile(targetUri.toString(), filename, model);
-                  // syncModel() is triggered reactively but may be deferred;
-                  // call it immediately so the model switch is synchronous before
-                  // we set the cursor position below.
-                  syncModel();
-                  if (editor) {
-                    editor.setPosition({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
-                    editor.revealPositionInCenter({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
-                    editor.focus();
-                    console.log(`[${tag}] navigated to metadata: ${targetUri.fsPath}`);
-                  }
-                }
-              } catch (metaErr: any) {
-                if (metaErr?.message !== "cancelled")
-                  console.warn(`[${tag}] metadata navigation failed:`, metaErr);
-              }
-              return null; // we handled it; don't hand off to Monaco's editor service
+        const uri = model.uri.toString();
+        try {
+          const result: any = await Promise.race([
+            lspRequest(lspMethod, {
+              textDocument: { uri },
+              position: { line: position.lineNumber - 1, character: position.column - 1 },
+            }),
+            cancelPromise,
+          ]);
+          if (!result) return null;
+          const items = Array.isArray(result) ? result : [result];
+          let loc: { uri: string; range: any } | null = null;
+          for (const item of items) {
+            const rng = item.targetRange ?? item.range;
+            if (rng && (item.uri || item.targetUri)) {
+              loc = { uri: item.targetUri ?? item.uri, range: rng };
+              break;
             }
+          }
+          if (!loc) return null;
+          const targetUri = monaco.Uri.parse(loc.uri);
+          const targetRange = lspRangeToMonaco(loc.range);
+          const uriPath = targetUri.fsPath.replace(/\\/g, "/");
+          const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
 
-            if (uriPath.toLowerCase().startsWith(root.toLowerCase())) {
-              const relPath = uriPath.slice(root.length + 1);
-              try {
-                const opened = await editorStore.openFile(relPath);
-                if (editor && opened) {
-                  // readOnly is reset by syncModel() which fires on store.active change.
+          if (uriPath.includes("$metadata$")) {
+            if (token.isCancellationRequested) return null;
+            try {
+              let m = monaco.editor.getModel(targetUri);
+              if (!m) {
+                const metaPath = targetUri.path.replace(/^\//, "");
+                const source = await Promise.race([
+                  ipcInvoke<string>("decompile_metadata", {
+                    metadataPath: metaPath,
+                    workspaceDir: props.workingDir,
+                  }),
+                  cancelPromise,
+                ]);
+                m = monaco.editor.createModel(source, "csharp", targetUri);
+              }
+              if (m) {
+                const filename = targetUri.path.split("/").pop() ?? targetUri.fsPath;
+                editorStore.openVirtualFile(targetUri.toString(), filename, m);
+                syncModel();
+                if (editor) {
                   editor.setPosition({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
                   editor.revealPositionInCenter({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
                   editor.focus();
-                  console.log(`[${tag}] navigated to ${relPath}`);
                 }
-              } catch (navErr) { console.warn(`[${tag}] navigation failed:`, navErr); }
+              }
+            } catch (metaErr: any) {
+              if (metaErr?.message !== "cancelled")
+                console.warn(`[${tag}] metadata navigation failed:`, metaErr);
             }
-            return [{ uri: targetUri, range: targetRange }];
-          } catch (err: any) {
-            if (err?.message !== "cancelled") console.warn(`[${tag}] LSP request failed:`, err);
             return null;
-          } finally {
-            // Always release the cancellation listener regardless of exit path
-            // (normal return, throw, or early return from $metadata$ branch).
-            cleanup();
           }
-        };
-        monacoProviderDisposables.push(
-          registerFn({ language: "csharp", exclusive: true }, { [methodKey]: handler }),
-        );
-      }
 
-      registerGotoProvider("definition", "textDocument/definition", "provideDefinition", monaco.languages.registerDefinitionProvider);
-      registerGotoProvider("typeDefinition", "textDocument/typeDefinition", "provideTypeDefinition", monaco.languages.registerTypeDefinitionProvider);
-      registerGotoProvider("implementation", "textDocument/implementation", "provideImplementation", monaco.languages.registerImplementationProvider);
+          if (uriPath.toLowerCase().startsWith(root.toLowerCase())) {
+            const relPath = uriPath.slice(root.length + 1);
+            try {
+              const opened = await editorStore.openFile(relPath);
+              if (editor && opened) {
+                editor.setPosition({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
+                editor.revealPositionInCenter({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
+                editor.focus();
+              }
+            } catch (navErr) {
+              console.warn(`[${tag}] navigation failed:`, navErr);
+            }
+          }
+          return [{ uri: targetUri, range: targetRange }];
+        } catch (err: any) {
+          if (err?.message !== "cancelled") console.warn(`[${tag}] LSP request failed:`, err);
+          return null;
+        } finally {
+          cleanup();
+        }
+      };
+      monacoProviderDisposables.push(
+        registerFn({ language: "csharp", exclusive: true }, { [methodKey]: handler }),
+      );
+    }
+    registerGotoProvider("definition", "textDocument/definition", "provideDefinition", monaco.languages.registerDefinitionProvider);
+    registerGotoProvider("typeDefinition", "textDocument/typeDefinition", "provideTypeDefinition", monaco.languages.registerTypeDefinitionProvider);
+    registerGotoProvider("implementation", "textDocument/implementation", "provideImplementation", monaco.languages.registerImplementationProvider);
 
-      // ── Register exclusive reference provider ─────────────────────────
-      // 统一点击 code lens 和右键 Find References 两条路。
-      const refHandler = async (model: monaco.editor.ITextModel, position: monaco.Position, context: monaco.languages.ReferenceContext, _token: monaco.CancellationToken) => {
-        const req = lspRequest;
-        if (!req) return [];
-        const uri = model.uri.toString();
+    // ── References ──
+    {
+      const refHandler = async (
+        model: monaco.editor.ITextModel,
+        position: monaco.Position,
+        context: monaco.languages.ReferenceContext,
+      ) => {
         try {
-          const t0 = performance.now();
-          const result = await req("textDocument/references", {
-            textDocument: { uri },
+          const result: any = await lspRequest("textDocument/references", {
+            textDocument: { uri: model.uri.toString() },
             position: { line: position.lineNumber - 1, character: position.column - 1 },
             context: { includeDeclaration: context.includeDeclaration },
           });
-          console.log(`[refProvider] references in ${(performance.now() - t0).toFixed(0)}ms, count=${Array.isArray(result) ? result.length : 0}`);
           if (!Array.isArray(result)) return [];
           return result.map((r: any) => ({
             uri: monaco.Uri.parse(r.uri),
@@ -606,292 +472,108 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
           { provideReferences: refHandler },
         ),
       );
+    }
 
-      // ── Start MLC (CodeLensFeature / HoverFeature register their own
-      // providers during client.start(), but our exclusive ones already
-      // hide them) ──
-      csharpClient = await startCsharpLanguageClient(dir);
-
-      // ── Dump registry state for all relevant features ──────────────
-      // Check how many providers are registered per feature, their scores
-      // and exclusive flags. This helps diagnose duplicate registrations
-      // across all LSP features (definition, references, completion, etc.).
-      {
-        const svc = StandaloneServices.get(ILanguageFeaturesService);
-        for (const key of ["definitionProvider", "referenceProvider", "typeDefinitionProvider", "declarationProvider", "implementationProvider", "completionProvider", "signatureHelpProvider", "documentHighlightProvider", "documentSymbolProvider", "codeActionProvider", "renameProvider", "hoverProvider", "codeLensProvider"]) {
-          const reg = (svc as any)[key];
-          if (reg?._entries) {
-            const entries = reg._entries.map((e: any) => ({
-              lang: typeof e.selector === 'object' ? e.selector.language ?? e.selector.languageId : e.selector,
-              exclusive: !!e.selector?.exclusive,
-              isBuiltin: !!e.selector?.isBuiltin,
-              score: e._score,
-            }));
-            const nonZero = entries.filter((e: any) => e.score > 0);
-            if (nonZero.length > 1) {
-              console.log(`[registry] ${key}: ${entries.length} entries, ${nonZero.length} active:`, JSON.stringify(nonZero));
-            } else if (entries.length > 0) {
-              console.log(`[registry] ${key}: ${entries.length} entries, ${nonZero.length} active`);
-            }
-          }
-        }
-      }
-
-      // ── Set up LSP requestor for our custom provider ──
-      {
-        let nextReqId = 0;
-        const pendingReqs = new Map<
-          string,
-          {
-            resolve: (v: unknown) => void;
-            reject: (e: unknown) => void;
-            timer: ReturnType<typeof setTimeout>;
-            ts: number;
-          }
-        >();
-
-        const unlisten = await csharpClient.session.onMessage((raw) => {
-          const msg = raw as {
-            id?: string;
-            result?: unknown;
-            error?: { message: string };
-          };
-          if (msg.id && typeof msg.id === "string" && msg.id.startsWith("cl-")) {
-            const p = pendingReqs.get(msg.id);
-            if (p) {
-              pendingReqs.delete(msg.id);
-              clearTimeout(p.timer);
-              const elapsed = (performance.now() - p.ts).toFixed(0);
-              if (msg.error) {
-                console.log(`[lspReq] response error id=${msg.id} elapsed=${elapsed}ms:`, msg.error.message);
-                p.reject(new Error(msg.error.message || String(msg.error)));
-              } else {
-                const summary = JSON.stringify(msg.result).slice(0, 200);
-                console.log(`[lspReq] response id=${msg.id} elapsed=${elapsed}ms:`, summary);
-                p.resolve(msg.result);
-              }
-            } else {
-              console.log(`[lspReq] stale/unknown response id=${msg.id} (already resolved or timed out)`);
-            }
-          }
-        });
-
-        lspRequestorCleanup = () => {
-          unlisten();
-          for (const [, p] of pendingReqs) {
-            clearTimeout(p.timer);
-            p.reject(new Error("disposed"));
-          }
-          pendingReqs.clear();
-        };
-
-        lspRequest = (method: string, params: unknown): Promise<unknown> => {
-          const cs = csharpClient;
-          if (!cs) return Promise.reject(new Error("LSP client not available"));
-          return new Promise((resolve, reject) => {
-            const id = `cl-${++nextReqId}`;
-            console.log(`[lspReq] sending ${method} id=${id} params=`, JSON.stringify(params).slice(0, 300));
-            const timer = setTimeout(() => {
-              pendingReqs.delete(id);
-              console.log(`[lspReq] TIMEOUT ${method} id=${id}`);
-              reject(new Error(`LSP request timed out: ${method}`));
-            }, 15000);
-            pendingReqs.set(id, { resolve, reject, timer, ts: performance.now() });
-            cs.session.send({ jsonrpc: "2.0", id, method, params } as never).catch((err) => {
-              pendingReqs.delete(id);
-              clearTimeout(timer);
-              console.log(`[lspReq] send failed ${method} id=${id}:`, err);
-              reject(err);
-            });
-          });
-        };
-
-        // Register metadata fetcher: Go-to-Definition on Unity/framework built-in
-        // types (MonoBehaviour, Action<T>, …) decompiles the symbol via
-        // ICSharpCode.Decompiler (same library OmniSharp bundles).
-        // omnisharp/metadata is HTTP-only and not exposed in OmniSharp's LSP mode.
-        fsProvider.setMetadataFetcher(async (uriStr: string) => {
-          // The URI path gives us the $metadata$ path with forward slashes and
-          // URL-encoded chars (e.g. %60 for the backtick in generic type names).
-          const metaUri = monaco.Uri.parse(uriStr);
-          const metadataPath = metaUri.path.replace(/^\//, ""); // strip leading '/'
-          return await ipcInvoke<string>("decompile_metadata", {
-            metadataPath,
-            workspaceDir: props.workingDir,
-          });
-        });
-
-        console.log(`[codeLens] lspRequest assigned, about to fire onDidChange`);
-      }
-
-      // ── Register real omnisharp/client/findReferences ────────────────
-      // Replaces the stub in monacoVscodeServices.ts. Sends
-      // textDocument/references via LSP and shows results in Monaco's peek
-      // reference widget (editor.action.showReferences).
-      import("vscode").then((vscode) => {
-        vscode.commands.registerCommand("omnisharp/client/findReferences", async (args: unknown) => {
-          const a = args as { uri?: string; range?: { start: { line: number; character: number } } } | undefined;
-          console.log(`[findReferences] handler called, uri=${a?.uri}, range=`, JSON.stringify(a?.range));
-          if (!a?.uri || !a.range) {
-            console.log(`[findReferences] skipped: missing uri or range`);
-            return [];
-          }
-          const req = lspRequest;
-          if (!req) {
-            console.log(`[findReferences] skipped: lspRequest not ready`);
-            return [];
-          }
-          const t0 = performance.now();
+    // ── Override Monaco's built-in reference commands (Shift+F12 / right-click) ──
+    // Monaco's CommandsRegistry handles these before vscode.commands fires;
+    // we replace the registered commands so peek references go through Roslyn.
+    for (const id of [
+      "editor.action.findReferences",
+      "editor.action.goToReferences",
+      "editor.action.referenceSearch.trigger",
+    ]) {
+      CommandsRegistry.registerCommand(id, (_accessor: any, resource?: monaco.Uri, position?: monaco.Position) => {
+        (async () => {
+          const effectiveResource = resource ?? editor?.getModel()?.uri;
+          const effectivePosition = position ?? editor?.getPosition() ?? undefined;
+          if (!effectiveResource || !effectivePosition) return;
           try {
-            const refs = await req("textDocument/references", {
-              textDocument: { uri: a.uri },
-              position: { line: a.range.start.line, character: a.range.start.character },
+            const refs: any = await lspRequest("textDocument/references", {
+              textDocument: { uri: effectiveResource.toString() },
+              position: {
+                line: effectivePosition.lineNumber - 1,
+                character: effectivePosition.column - 1,
+              },
               context: { includeDeclaration: false },
             });
-            const elapsed = (performance.now() - t0).toFixed(0);
-            console.log(`[findReferences] LSP response in ${elapsed}ms, type=${typeof refs}, isArray=${Array.isArray(refs)}`);
-            if (!Array.isArray(refs)) {
-              console.log(`[findReferences] not an array, raw=`, JSON.stringify(refs).slice(0, 200));
-              return [];
-            }
-            console.log(`[findReferences] got ${refs.length} results`);
+            if (!Array.isArray(refs) || refs.length === 0) return;
             const locations = refs.map((r: any) => ({
               uri: monaco.Uri.parse(r.uri),
               range: lspRangeToMonaco(r.range),
             }));
-            if (locations.length === 0) {
-              console.log(`[findReferences] no locations to show`);
-              return [];
-            }
-            if (!editor) {
-              console.log(`[findReferences] no editor instance, skipping showReferences`);
-              return locations;
-            }
-            const pos = new monaco.Position(
-              a.range.start.line + 1,
-              a.range.start.character + 1,
+            const vscode = await import("vscode");
+            await vscode.commands.executeCommand(
+              "editor.action.showReferences",
+              effectiveResource,
+              effectivePosition,
+              locations,
+              "peek",
             );
-            try {
-              await vscode.commands.executeCommand(
-                "editor.action.showReferences",
-                monaco.Uri.parse(a.uri),
-                pos,
-                locations,
-                "peek",
-              );
-              console.log(`[findReferences] showReferences completed (${locations.length} refs)`);
-            } catch (cmdErr) {
-              console.warn(`[findReferences] showReferences command failed:`, cmdErr);
-            }
-            return locations;
           } catch (err) {
-            const elapsed = (performance.now() - t0).toFixed(0);
-            console.warn(`[findReferences] LSP request failed after ${elapsed}ms:`, err);
-            return [];
+            console.warn(`[refCmd] ${id} failed:`, err);
           }
-        });
-        console.log(`[findReferences] registered real handler`);
-      }).catch((e) => {
-        console.warn("[findReferences] failed to import vscode:", e);
+        })();
       });
-
-      // ── 覆盖 Monaco 内置的 references 相关命令 ─────────────────────
-      // 右键/快捷键 Find All References 走的是 Monaco 内部的 CommandsRegistry，
-      // vscode.commands.registerCommand 覆盖不了。
-      // 右键触发的是 goToReferences / referenceSearch.trigger，Shift+F12 是 findReferences。
-      // 全部替换成我们自己的 handler：拿数据 → showReferences。
-      for (const id of ["editor.action.findReferences", "editor.action.goToReferences", "editor.action.referenceSearch.trigger"]) {
-        CommandsRegistry.registerCommand(id, (_accessor: any, resource: monaco.Uri, position: monaco.Position) => {
-          console.log(`[refCmd] override fired for ${id}`);
-          (async () => {
-            const req = lspRequest;
-            // When triggered via right-click context menu, resource/position are not passed —
-            // fall back to the current editor's model URI and cursor position.
-            const effectiveResource = resource ?? editor?.getModel()?.uri;
-            const effectivePosition = position ?? (editor?.getPosition() ?? undefined);
-            if (!req || !effectiveResource || !effectivePosition) return;
-            try {
-              const refs = await req("textDocument/references", {
-                textDocument: { uri: effectiveResource.toString() },
-                position: { line: effectivePosition.lineNumber - 1, character: effectivePosition.column - 1 },
-                context: { includeDeclaration: false },
-              });
-              if (!Array.isArray(refs) || refs.length === 0) return;
-              const locations = refs.map((r: any) => ({
-                uri: monaco.Uri.parse(r.uri),
-                range: lspRangeToMonaco(r.range),
-              }));
-              const vscode = await import("vscode");
-              await vscode.commands.executeCommand(
-                "editor.action.showReferences", effectiveResource, effectivePosition, locations, "peek",
-              );
-              console.log(`[refCmd] shown ${locations.length} refs (${id})`);
-            } catch (err) {
-              console.warn(`[refCmd] ${id} failed:`, err);
-            }
-          })();
-        });
-      }
-
-      // LSP requestor is ready — fire onDidChange so Monaco re-queries our
-      // provider and gets real LSP results instead of the empty placeholder.
-      console.log(`[codeLens] firing onDidChange to trigger re-query`);
-      codeLensEmitter.fire(codeLensProvider);
-      console.log(`[codeLens] onDidChange fired`);
-
-      // LSP handshake complete, but OmniSharp may still be loading projects
-      setOmniStatus("initializing", "Loading projects...");
-
-      // Listen for OmniSharp notifications to detect project-load completion.
-      // The first textDocument/publishDiagnostics batch signals that project
-      // analysis is done. Also listen for process exit so we can show errors.
-      const [readyRelease, exitRelease] = await Promise.all([
-        csharpClient.session.onMessage((raw) => {
-          const msg = raw as {
-            method?: string;
-            params?: Record<string, unknown>;
-          };
-          if (msg.method === "textDocument/publishDiagnostics") {
-            if (omniReadyTimeout) {
-              clearTimeout(omniReadyTimeout);
-              omniReadyTimeout = null;
-            }
-            setOmniStatus("ready", "Ready");
-            omniReadyUnlisten?.();
-            omniReadyUnlisten = null;
-          }
-        }),
-        csharpClient.session.onExit((info) => {
-          if (info.error || (info.code != null && info.code !== 0)) {
-            setOmniStatus(
-              "error",
-              info.error ?? `Exited with code ${info.code}`,
-            );
-          } else {
-            setOmniStatus("disabled", "Process exited");
-          }
-        }),
-      ]);
-      omniReadyUnlisten = readyRelease;
-      omniExitUnlisten = exitRelease;
-
-      // Timeout fallback: if OmniSharp doesn't send diagnostics within 15 s,
-      // consider it ready anyway — better to show a false positive than to
-      // leave the user wondering why the dot is still yellow forever.
-      omniReadyTimeout = setTimeout(() => {
-        if (csharpClient) {
-          setOmniStatus("ready", "Ready (estimated)");
-        }
-        omniReadyUnlisten?.();
-        omniReadyUnlisten = null;
-        omniReadyTimeout = null;
-      }, 15000);
-    } catch (err) {
-      setOmniStatus(
-        "error",
-        err instanceof Error ? err.message : String(err),
-      );
     }
+
+    // ── Metadata fetcher for $metadata$ files (Unity/framework types) ──
+    fsProvider.setMetadataFetcher(async (uriStr: string) => {
+      const metaUri = monaco.Uri.parse(uriStr);
+      const metadataPath = metaUri.path.replace(/^\//, "");
+      return await ipcInvoke<string>("decompile_metadata", {
+        metadataPath,
+        workspaceDir: props.workingDir,
+      });
+    });
+
+    // ── Subscribe to Roslyn status events (phase / projectCount / serverVersion) ──
+    // The backend pushes these whenever the csharp_lsp module transitions
+    // phases (preparing → starting → loading → ready → error). We mirror
+    // them into the status composable that drives the status bar dot.
+    csharpStatusUnlisten = await subscribeCsharpLspStatus((status: any) => {
+      const phase = status?.phase;
+      const projectCount = status?.projectCount ?? 0;
+      const serverVersion = status?.serverVersion ?? "";
+      const projectFile = status?.projectFile ?? "";
+      const error = status?.error;
+      if (phase === "ready") {
+        const detail = projectFile
+          ? `${projectFile} · ${projectCount}p · ${serverVersion || "roslyn"}`
+          : "Ready";
+        setOmniStatus("ready", detail);
+      } else if (phase === "starting" || phase === "loading" || phase === "preparing") {
+        setOmniStatus("connecting", `Loading (${projectCount} projects)`);
+      } else if (phase === "error" || error) {
+        setOmniStatus("error", error ?? "Roslyn error");
+      } else {
+        setOmniStatus("initializing", phase ?? "Initializing");
+      }
+    });
+
+    // Seed initial status so the dot reflects reality even if no event
+    // has fired yet (e.g. backend started before the editor mounted).
+    try {
+      const initial = await csharpLspGetStatus();
+      if (initial?.phase === "ready") {
+        const detail = initial.projectFile
+          ? `${initial.projectFile} · ${initial.projectCount}p · ${initial.serverVersion || "roslyn"}`
+          : "Ready";
+        setOmniStatus("ready", detail);
+      } else if (initial?.phase) {
+        setOmniStatus("initializing", initial.phase);
+      }
+    } catch (e) {
+      console.warn("[csharpLsp] getStatus failed:", e);
+    }
+
+    // Sentinel: re-entry guard for the next ensureCsharpClient call. There
+    // is no frontend-owned Roslyn process; the Rust backend owns it.
+    csharpClient = {
+      workspaceDir: dir,
+      stop: async () => {
+        csharpClient = null;
+      },
+    };
   })();
   try {
     await csharpClientPending;
@@ -903,16 +585,8 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
 async function disposeCsharpClient(): Promise<void> {
   // Clean up custom provider registrations first
   disposeAllMonacoRegistrations();
-
-  // Clean up listeners and timeouts first
-  omniReadyUnlisten?.();
-  omniReadyUnlisten = null;
-  omniExitUnlisten?.();
-  omniExitUnlisten = null;
-  if (omniReadyTimeout) {
-    clearTimeout(omniReadyTimeout);
-    omniReadyTimeout = null;
-  }
+  csharpStatusUnlisten?.();
+  csharpStatusUnlisten = null;
 
   if (csharpClientPending) {
     await csharpClientPending.catch(() => {});
@@ -921,9 +595,7 @@ async function disposeCsharpClient(): Promise<void> {
   if (csharpClient) {
     const c = csharpClient;
     csharpClient = null;
-    await c.stop().catch((err) => {
-      console.warn("[lsp] failed to stop C# client on teardown:", err);
-    });
+    await c.stop().catch(() => {});
   }
   setOmniStatus("disabled");
 }
