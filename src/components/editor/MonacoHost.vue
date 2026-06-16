@@ -81,132 +81,220 @@ function showReferencesFallback(
   sourceId: string,
 ): void {
   if (!editor) return;
-  const dom = document.createElement("div");
-  dom.className = "locus-refs-widget";
-  dom.style.cssText = [
-    "position:absolute",
-    "z-index:50",
+  if (locations.length === 0) return;
+
+  // Group locations by file path so a project with 30 refs across 5
+  // files shows as 5 file headers + 30 line rows (vscode-style peek
+  // view). Empty `locations` short-circuits above — there's nothing
+  // useful to render and an empty overlay would just look broken.
+  const groups = new Map<string, Array<{ uri: monaco.Uri; range: monaco.IRange }>>();
+  for (const loc of locations) {
+    const key = loc.uri.fsPath;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(loc);
+  }
+  // Sort groups by file path so the order is stable across renders
+  // (Roslyn doesn't promise an order on the wire).
+  const sortedGroups = Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+
+  const overlay = document.createElement("div");
+  overlay.className = "locus-refs-overlay";
+  // position:fixed with a high z-index keeps the widget on top of the
+  // editor's stacking context (we deliberately avoid IContentWidget
+  // here — monaco-vscode-api 33.0.9's ConfiguredStandaloneEditor
+  // hits a `_widgets[getId()]` lookup miss in setWidgetPosition
+  // that throws `Cannot read properties of undefined (reading
+  // 'setPosition')`).
+  overlay.style.cssText = [
+    "position:fixed",
+    "z-index:9999",
+    "min-width:380px",
+    "max-width:560px",
+    "max-height:340px",
+    "overflow:hidden",
+    "display:flex",
+    "flex-direction:column",
     "background:var(--vscode-editorWidget-background,#252526)",
     "color:var(--vscode-editorWidget-foreground,#cccccc)",
     "border:1px solid var(--vscode-editorWidget-border,#454545)",
-    "box-shadow:0 2px 8px rgba(0,0,0,0.4)",
-    "font-family:var(--vscode-font-family,monospace)",
+    "border-radius:4px",
+    "box-shadow:0 4px 16px rgba(0,0,0,0.5)",
+    "font-family:var(--vscode-font-family,'Segoe UI',Tahoma,sans-serif)",
     "font-size:12px",
-    "max-height:240px",
-    "overflow-y:auto",
-    "padding:4px 0",
-    "min-width:280px",
+    "line-height:1.5",
   ].join(";");
+
+  // ── Header: title + close button + count badge ──────────────────
   const header = document.createElement("div");
-  header.style.cssText = "padding:4px 10px;border-bottom:1px solid #454545;font-weight:600;";
-  header.textContent = `${locations.length} reference${locations.length === 1 ? "" : "s"} (${sourceId})`;
-  dom.appendChild(header);
-  for (const loc of locations) {
-    const row = document.createElement("div");
-    row.style.cssText = "padding:3px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-    row.title = `${loc.uri.fsPath}:${loc.range.startLineNumber}:${loc.range.startColumn}`;
-    const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
-    row.textContent = `${fileName}  L${loc.range.startLineNumber}:${loc.range.startColumn}`;
-    row.addEventListener("click", () => {
-      // Open the file via the editor store (handles workspace-root resolution)
-      // and place the cursor at the reference range.
-      const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
-      const target = loc.uri.fsPath.replace(/\\/g, "/");
-      if (target.toLowerCase().startsWith(root.toLowerCase())) {
-        const rel = target.slice(root.length + 1);
-        editorStore.openFile(rel).then(() => {
-          editor?.setPosition({
-            lineNumber: loc.range.startLineNumber,
-            column: loc.range.startColumn,
-          });
-          editor?.revealPositionInCenter({
-            lineNumber: loc.range.startLineNumber,
-            column: loc.range.startColumn,
-          });
-          editor?.focus();
-        }).catch((e) => console.warn("[refCmd] fallback openFile failed:", e));
-      } else {
-        // Reference points outside the workspace (e.g. a metadata
-        // decompilation in %TEMP%). Open as a virtual read-only tab
-        // via the store so the user at least sees the location.
-        let m = monaco.editor.getModel(loc.uri);
-        if (!m) {
-          // Empty placeholder — the file system provider will populate
-          // it asynchronously when the editor requests its content.
-          m = monaco.editor.createModel("", "csharp", loc.uri);
-        }
-        editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
+  header.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "justify-content:space-between",
+    "padding:6px 10px",
+    "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
+    "border-bottom:1px solid var(--vscode-editorWidget-border,#454545)",
+    "flex-shrink:0",
+  ].join(";");
+  const title = document.createElement("span");
+  title.textContent = `${locations.length} reference${locations.length === 1 ? "" : "s"} · ${sourceId}`;
+  title.style.cssText = "font-weight:600;color:var(--vscode-editorWidget-foreground,#cccccc);";
+  header.appendChild(title);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "×";
+  closeBtn.title = "Close (Esc)";
+  closeBtn.setAttribute("aria-label", "Close references");
+  closeBtn.style.cssText = [
+    "background:transparent",
+    "border:0",
+    "color:var(--vscode-icon-foreground,#cccccc)",
+    "font-size:18px",
+    "line-height:1",
+    "cursor:pointer",
+    "padding:0 4px",
+    "border-radius:2px",
+  ].join(";");
+  closeBtn.addEventListener("click", cleanup);
+  header.appendChild(closeBtn);
+  overlay.appendChild(header);
+
+  // ── Body: scrollable list of file groups + line rows ─────────────
+  const body = document.createElement("div");
+  body.style.cssText = "overflow-y:auto;flex:1 1 auto;";
+  overlay.appendChild(body);
+
+  const navigateTo = (loc: { uri: monaco.Uri; range: monaco.IRange }) => {
+    const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
+    const target = loc.uri.fsPath.replace(/\\/g, "/");
+    if (target.toLowerCase().startsWith(root.toLowerCase())) {
+      const rel = target.slice(root.length + 1);
+      editorStore.openFile(rel).then(() => {
         editor?.setPosition({
           lineNumber: loc.range.startLineNumber,
           column: loc.range.startColumn,
         });
-      }
-      // Reverting editor.removeContentWidget (see below) is the canonical
-      // dispose path; the click handler doesn't need a teardown step.
-    });
-    row.addEventListener("mouseenter", () => { row.style.background = "#094771"; });
-    row.addEventListener("mouseleave", () => { row.style.background = ""; });
-    dom.appendChild(row);
-  }
-  // Build a single visible overlay div anchored to the editor host.
-  // We intentionally avoid IContentWidget here — monaco-vscode-api 33.0.9's
-  // ConfiguredStandaloneEditor wraps the widget a second time and the
-  // resulting setWidgetPosition() call hits a `_widgets[getId()]` lookup
-  // miss ("Cannot read properties of undefined (reading 'setPosition')").
-  // A plain DOM overlay avoids the whole positioning pipeline.
-  const overlay = document.createElement("div");
-  overlay.className = "locus-refs-overlay";
-  // position:fixed keeps the widget on screen regardless of editor
-  // container's stacking context, transform, or overflow settings. We
-  // anchor near the cursor when coords are available; otherwise the
-  // user gets a centered overlay they can't miss.
-  overlay.style.cssText = dom.style.cssText + ";position:fixed;z-index:9999;";
-  // Move the header + rows that were built above directly into the overlay.
-  while (dom.firstChild) {
-    overlay.appendChild(dom.firstChild);
-  }
-  // Re-wire click handlers on every row in the overlay (the click
-  // listeners were attached to the `row` objects built earlier, which
-  // are now in the overlay; their handlers still reference the right
-  // `loc` via the `locations` closure).
-  overlay.querySelectorAll("div[title]").forEach((row, i) => {
-    row.addEventListener("click", () => {
-      const loc = locations[i];
-      if (!loc) return;
-      const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
-      const target = loc.uri.fsPath.replace(/\\/g, "/");
-      if (target.toLowerCase().startsWith(root.toLowerCase())) {
-        const rel = target.slice(root.length + 1);
-        editorStore.openFile(rel).then(() => {
-          editor?.setPosition({
-            lineNumber: loc.range.startLineNumber,
-            column: loc.range.startColumn,
-          });
-          editor?.revealPositionInCenter({
-            lineNumber: loc.range.startLineNumber,
-            column: loc.range.startColumn,
-          });
-          editor?.focus();
-        }).catch((e) => console.warn("[refCmd] overlay openFile failed:", e));
-      } else {
-        let m = monaco.editor.getModel(loc.uri);
-        if (!m) m = monaco.editor.createModel("", "csharp", loc.uri);
-        const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
-        editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
-        editor?.setPosition({
+        editor?.revealPositionInCenter({
           lineNumber: loc.range.startLineNumber,
           column: loc.range.startColumn,
         });
-      }
-      cleanup();
-    });
-  });
-  // Anchor the overlay near the cursor position in viewport coords.
-  // `getScrolledVisiblePosition` returns coords relative to the
-  // editor's *content* area, not the page — we have to add the
-  // editor's bounding rect to translate to viewport. If anything
-  // goes wrong (e.g. editor not laid out yet), the user still gets
-  // a centered overlay.
+        editor?.focus();
+      }).catch((e) => console.warn("[refCmd] openFile failed:", e));
+    } else {
+      // Reference points outside the workspace (e.g. a Roslyn
+      // decompilation in %TEMP%). Open as a read-only virtual tab.
+      let m = monaco.editor.getModel(loc.uri);
+      if (!m) m = monaco.editor.createModel("", "csharp", loc.uri);
+      const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
+      editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
+      editor?.setPosition({
+        lineNumber: loc.range.startLineNumber,
+        column: loc.range.startColumn,
+      });
+    }
+  };
+
+  for (const [path, locs] of sortedGroups) {
+    const group = document.createElement("div");
+    group.className = "locus-refs-group";
+    group.style.cssText = "padding:4px 0 2px 0;";
+
+    // File header row — non-clickable but visually anchors the group.
+    const fileHeader = document.createElement("div");
+    fileHeader.title = path;
+    fileHeader.style.cssText = [
+      "padding:2px 10px",
+      "color:var(--vscode-editorWidget-foreground,#cccccc)",
+      "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
+      "font-weight:600",
+      "white-space:nowrap",
+      "overflow:hidden",
+      "text-overflow:ellipsis",
+      "display:flex",
+      "align-items:center",
+      "gap:6px",
+    ].join(";");
+    const fileName = path.split(/[\\/]/).pop() ?? path;
+    const fileLabel = document.createElement("span");
+    fileLabel.textContent = fileName;
+    fileHeader.appendChild(fileLabel);
+    const fileRel = document.createElement("span");
+    const rel = path
+      .replace(/\\/g, "/")
+      .replace(rootPath(), "")
+      .replace(/^\/+/, "");
+    fileRel.textContent = rel && rel !== fileName ? rel : "";
+    fileRel.style.cssText = "color:var(--vscode-descriptionForeground,#888);font-weight:400;font-size:11px;";
+    fileHeader.appendChild(fileRel);
+    const count = document.createElement("span");
+    count.textContent = `${locs.length}`;
+    count.style.cssText = [
+      "margin-left:auto",
+      "background:var(--vscode-badge-background,#4d4d4d)",
+      "color:var(--vscode-badge-foreground,#ffffff)",
+      "border-radius:8px",
+      "padding:1px 7px",
+      "font-size:10px",
+      "font-weight:600",
+    ].join(";");
+    fileHeader.appendChild(count);
+    group.appendChild(fileHeader);
+
+    for (const loc of locs) {
+      const row = document.createElement("div");
+      row.className = "locus-refs-row";
+      row.title = `${path}:${loc.range.startLineNumber}:${loc.range.startColumn}`;
+      row.style.cssText = [
+        "padding:2px 10px 2px 28px",
+        "cursor:pointer",
+        "color:var(--vscode-editorWidget-foreground,#cccccc)",
+        "display:flex",
+        "align-items:baseline",
+        "gap:8px",
+        "user-select:none",
+      ].join(";");
+      const lineLabel = document.createElement("span");
+      lineLabel.textContent = `L${loc.range.startLineNumber}:${loc.range.startColumn}`;
+      lineLabel.style.cssText = [
+        "color:var(--vscode-editorLineNumber-foreground,#858585)",
+        "font-variant-numeric:tabular-nums",
+        "min-width:48px",
+        "text-align:right",
+        "flex-shrink:0",
+      ].join(";");
+      row.appendChild(lineLabel);
+      const preview = document.createElement("span");
+      preview.textContent = previewLineFor(loc);
+      preview.style.cssText = [
+        "overflow:hidden",
+        "text-overflow:ellipsis",
+        "white-space:nowrap",
+        "flex:1 1 auto",
+        "color:var(--vscode-editorWidget-foreground,#cccccc)",
+      ].join(";");
+      row.appendChild(preview);
+      const onHover = () => { row.style.background = "var(--vscode-list-hoverBackground,#2a2d2e)"; };
+      const onLeave = () => { row.style.background = ""; };
+      row.addEventListener("mouseenter", onHover);
+      row.addEventListener("mouseleave", onLeave);
+      row.addEventListener("click", () => { navigateTo(loc); cleanup(); });
+      group.appendChild(row);
+    }
+    body.appendChild(group);
+  }
+
+  // ── Footer: hint about keyboard nav (small, dim) ─────────────
+  const footer = document.createElement("div");
+  footer.style.cssText = [
+    "padding:4px 10px",
+    "border-top:1px solid var(--vscode-editorWidget-border,#454545)",
+    "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
+    "color:var(--vscode-descriptionForeground,#888)",
+    "font-size:11px",
+    "flex-shrink:0",
+  ].join(";");
+  footer.textContent = "Click to navigate · Esc to dismiss";
+  overlay.appendChild(footer);
+
+  // ── Position: cursor-line, viewport coords ─────────────────────
   let top = 80;
   let left = 80;
   try {
@@ -216,28 +304,63 @@ function showReferencesFallback(
       if (editorRect) {
         top = editorRect.top + editorCoords.top + editorCoords.height + 4;
         left = editorRect.left + editorCoords.left;
-      } else {
-        top = editorCoords.top + editorCoords.height + 4;
-        left = editorCoords.left;
       }
     }
   } catch {
-    // ignore — fallback top/left is fine
+    // fallback top/left is fine
   }
-  overlay.style.top = `${Math.max(top, 20)}px`;
-  overlay.style.left = `${Math.max(left, 20)}px`;
+  // Keep the overlay inside the viewport — anchor right side if it
+  // would overflow, and never let it clip out the top edge.
+  const overlayWidth = 460;
+  const maxLeft = window.innerWidth - overlayWidth - 16;
+  if (left > maxLeft) left = Math.max(16, maxLeft);
+  overlay.style.top = `${Math.max(top, 16)}px`;
+  overlay.style.left = `${Math.max(left, 16)}px`;
   document.body.appendChild(overlay);
-  const cleanup = () => {
+
+  // ── Esc + outside-click dismiss ────────────────────────────────
+  function cleanup() {
     overlay.remove();
     document.removeEventListener("mousedown", dismiss, true);
-  };
-  // Clicking anywhere else dismisses the widget.
-  const dismiss = (ev: MouseEvent) => {
-    if (!overlay.contains(ev.target as Node)) {
+    document.removeEventListener("keydown", onKey, true);
+  }
+  function dismiss(ev: MouseEvent) {
+    if (!overlay.contains(ev.target as Node)) cleanup();
+  }
+  function onKey(ev: KeyboardEvent) {
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
       cleanup();
     }
-  };
-  setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+  }
+  setTimeout(() => {
+    document.addEventListener("mousedown", dismiss, true);
+    document.addEventListener("keydown", onKey, true);
+  }, 0);
+
+  // Pulls a single-line preview from the editor model that owns the
+  // reference's URI. We try the in-memory model first (cheap, no
+  // IPC) and fall back to a disk read if the file isn't open. The
+  // preview is best-effort: a missing file just shows the location.
+  function previewLineFor(loc: { uri: monaco.Uri; range: monaco.IRange }): string {
+    try {
+      const m = monaco.editor.getModel(loc.uri);
+      if (m) {
+        const text = m.getLineContent(loc.range.startLineNumber).trim();
+        if (text) return truncate(text, 60);
+      }
+    } catch {
+      // ignore
+    }
+    // Fallback: a static stub so the row still shows something useful.
+    return truncate(loc.uri.fsPath.replace(/.*[\\/]/, ""), 60);
+  }
+  function rootPath(): string {
+    return props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  }
+  function truncate(s: string, n: number): string {
+    return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  }
 }
 
 function disposeAllMonacoRegistrations() {
