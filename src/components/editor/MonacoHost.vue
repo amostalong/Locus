@@ -7,6 +7,7 @@ import { createAnimationFrameResizeObserver } from "../../composables/resizeObse
 import {
   applyVscodeColorTheme,
   ensureMonacoVscodeServices,
+  ensureVisualTheme,
   fsProvider,
   setFsRoot,
 } from "../../services/monacoVscodeServices";
@@ -384,20 +385,15 @@ function syncModel() {
 }
 
 function applyTheme() {
-  // The vscode-side color theme + customizations drive the workbench
-  // widgets (status bar, peek view, breadcrumbs, file tree). The
-  // monaco editor instance itself picks up the active theme via
-  // monaco.editor.setTheme, but the IStandaloneThemeService in
-  // monaco-vscode-api 33.0.9 implements only setTheme — defineTheme
-  // is declared on the interface but throws "is not a function" at
-  // runtime, so registering a custom Monaco theme here would crash.
-  // The default "vs-dark" / "vs" themes cover what Locus needs; the
-  // exact editor-background color is set via the inline `theme`
-  // option on the editor instance below (so we don't depend on
-  // either the broken defineTheme path or the vscode theme service
-  // propagating back to the standalone editor).
-  const isDark = document.documentElement.getAttribute("data-theme") !== "light";
-  monaco.editor.setTheme(isDark ? "vs-dark" : "vs");
+  // Drive BOTH theme services in lockstep — see the long comment on
+  // `ensureVisualTheme` in monacoVscodeServices.ts for why neither path
+  // alone is enough in monaco-vscode-api 33.0.9. The visual editor
+  // background follows the workbench's `.monaco-workbench` CSS variables,
+  // which only update when the workbench theme service applies a theme by
+  // its workbench id (e.g. "Default Dark Modern"). `monaco.editor.setTheme`
+  // on its own just binds the standalone TokenTheme and does NOT repaint
+  // the editor background.
+  ensureVisualTheme();
   void applyVscodeColorTheme();
 }
 
