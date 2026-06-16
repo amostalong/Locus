@@ -150,6 +150,17 @@ export function ensureMonacoVscodeServices(): Promise<void> {
     // references needs to re-open a model. Priority 1000 puts us in
     // front of the default provider.
     registerFileSystemOverlay(1000, fsProvider);
+    // Activate a built-in Monaco theme BEFORE the Monarch grammars
+    // below register. Monaco's Monarch token collector captures a
+    // reference to the active theme at construction; if no theme is
+    // active (we haven't called setTheme yet at this point in
+    // init), the collector's `_theme` field stays undefined and
+    // every tokenize() call throws "Cannot read properties of
+    // undefined (reading 'match')". The actual visual theme is
+    // still applied later in `applyTheme` from MonacoHost.vue —
+    // this is just a defensive early `setTheme` so the token
+    // collector has a real TokenTheme to work with.
+    monaco.editor.setTheme("vs-dark");
     registerUnityLanguages(monaco);
     await applyVscodeColorTheme();
   })();
