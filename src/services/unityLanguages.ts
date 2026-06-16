@@ -396,6 +396,22 @@ function registerShaderLab(monacoNs: typeof monaco): void {
   // semantic tokens (class vs method vs field vs property) is a
   // separate concern handled via `textDocument/semanticTokens/full`
   // once diagnostics work is in place.
+  //
+  // The whole csharp block is wrapped in try/catch because the
+  // background tokenization path in monaco-vscode-api 33.0.9 throws
+  // "Cannot read properties of undefined (reading 'match')" from
+  // MonarchModernTokensCollector.emit when its captured `_theme`
+  // reference is undefined. The cause is timing — the Monarch
+  // collector captures the active theme at construction, and
+  // even with a defensive early setTheme call above, the
+  // background tokenizer in DefaultBackgroundTokenizer still
+  // races against theme propagation. If anything in here throws
+  // (tokenizer setup, language configuration attach, etc.) we
+  // log and continue — the editor still works, it just renders
+  // csharp as white-on-black (the previous state before this
+  // grammar was added). A proper fix is to drive tokenization
+  // through Roslyn's semantic tokens once that pipeline lands.
+  try {
   monacoNs.languages.setMonarchTokensProvider("csharp", {
     defaultToken: "",
     tokenPostfix: ".cs",
@@ -484,5 +500,13 @@ function registerShaderLab(monacoNs: typeof monaco): void {
     });
   } catch (err) {
     console.warn("[unityLanguages] setLanguageConfiguration for csharp failed (continuing without bracket config):", err);
+  }
+  } catch (err) {
+    // Outer catch — see the long comment above (line ~400). The actual
+    // Monarch collector race fires from a background tokenize callback,
+    // not synchronously, so this catch is a defensive placeholder for any
+    // synchronous failure during grammar registration itself. A proper
+    // fix is Roslyn semantic tokens once the LSP pipeline lands.
+    console.warn("[unityLanguages] csharp Monarch grammar setup failed (continuing with no csharp syntax highlighting):", err);
   }
 }
