@@ -377,6 +377,20 @@ function registerShaderLab(monacoNs: typeof monaco): void {
   // Registering a Monarch grammar here bypasses the vscode API entirely
   // — Monaco tokenizes the file itself.
   //
+  // The csharp language id also needs to be registered with Monaco
+  // core; the vscode-side extension would normally do this through
+  // its languages contribution, but when that path is broken the
+  // `setLanguageConfiguration` call below throws "Cannot set
+  // configuration for unknown language csharp". Registering the
+  // id here (a no-op if the extension already did) makes the
+  // language known to Monaco core so the configuration + token
+  // provider can attach.
+  monacoNs.languages.register({
+    id: "csharp",
+    extensions: [".cs", ".csx", ".cake"],
+    aliases: ["C#", "csharp"],
+  });
+  //
   // This is intentionally a simplified grammar (keywords, comments,
   // strings, numbers, attributes, identifiers). The full Roslyn
   // semantic tokens (class vs method vs field vs property) is a
@@ -437,28 +451,38 @@ function registerShaderLab(monacoNs: typeof monaco): void {
     },
   } satisfies monaco.languages.IMonarchLanguage);
   // Configure bracket auto-closing/pairing for csharp so typing `<` in
-  // a generic doesn't fight the editor.
-  monacoNs.languages.setLanguageConfiguration("csharp", {
-    comments: { lineComment: "//", blockComment: ["/*", "*/"] },
-    brackets: [
-      ["{", "}"], ["[", "]"], ["(", ")"],
-      ["<", ">"],
-    ],
-    autoClosingPairs: [
-      { open: "{", close: "}" },
-      { open: "[", close: "]" },
-      { open: "(", close: ")" },
-      { open: "<", close: ">", notIn: ["strings"] },
-      { open: "'", close: "'", notIn: ["strings", "comments"] },
-      { open: '"', close: '"', notIn: ["strings", "comments"] },
-    ],
-    surroundingPairs: [
-      { open: "{", close: "}" },
-      { open: "[", close: "]" },
-      { open: "(", close: ")" },
-      { open: "<", close: ">" },
-      { open: "'", close: "'" },
-      { open: '"', close: '"' },
-    ],
-  });
+  // a generic doesn't fight the editor. Wrapped in try/catch because
+  // monaco-vscode-api 33.0.9's `setLanguageConfiguration` throws
+  // "Cannot set configuration for unknown language csharp" if the
+  // csharp-default-extension failed to register the language id
+  // (the `monacoNs.languages.register({id: "csharp", ...})` call
+  // above is the local fallback; the try/catch here is the last
+  // line of defense in case register also raced).
+  try {
+    monacoNs.languages.setLanguageConfiguration("csharp", {
+      comments: { lineComment: "//", blockComment: ["/*", "*/"] },
+      brackets: [
+        ["{", "}"], ["[", "]"], ["(", ")"],
+        ["<", ">"],
+      ],
+      autoClosingPairs: [
+        { open: "{", close: "}" },
+        { open: "[", close: "]" },
+        { open: "(", close: ")" },
+        { open: "<", close: ">", notIn: ["strings"] },
+        { open: "'", close: "'", notIn: ["strings", "comments"] },
+        { open: '"', close: '"', notIn: ["strings", "comments"] },
+      ],
+      surroundingPairs: [
+        { open: "{", close: "}" },
+        { open: "[", close: "]" },
+        { open: "(", close: ")" },
+        { open: "<", close: ">" },
+        { open: "'", close: "'" },
+        { open: '"', close: '"' },
+      ],
+    });
+  } catch (err) {
+    console.warn("[unityLanguages] setLanguageConfiguration for csharp failed (continuing without bracket config):", err);
+  }
 }
