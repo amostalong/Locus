@@ -366,4 +366,99 @@ function registerShaderLab(monacoNs: typeof monaco): void {
       ],
     },
   } satisfies monaco.languages.IMonarchLanguage);
+
+  // ── C# (standalone grammar, not from monaco-vscode-csharp-default-extension) ──
+  //
+  // The csharp-default-extension's tokenization contribution registers
+  // through `vscode.languages.registerTokensProvider` in the local
+  // extension host. In monaco-vscode-api 33.0.9 that worker regularly
+  // throws "Default api is not ready yet" before the contribution lands,
+  // which is why the editor renders as white-on-black for .cs files.
+  // Registering a Monarch grammar here bypasses the vscode API entirely
+  // — Monaco tokenizes the file itself.
+  //
+  // This is intentionally a simplified grammar (keywords, comments,
+  // strings, numbers, attributes, identifiers). The full Roslyn
+  // semantic tokens (class vs method vs field vs property) is a
+  // separate concern handled via `textDocument/semanticTokens/full`
+  // once diagnostics work is in place.
+  monacoNs.languages.setMonarchTokensProvider("csharp", {
+    defaultToken: "",
+    tokenPostfix: ".cs",
+    keywords: [
+      "abstract", "as", "base", "bool", "break", "byte", "case", "catch",
+      "char", "checked", "class", "const", "continue", "decimal", "default",
+      "delegate", "do", "double", "else", "enum", "event", "explicit",
+      "extern", "false", "finally", "fixed", "float", "for", "foreach",
+      "goto", "if", "implicit", "in", "int", "interface", "internal", "is",
+      "lock", "long", "namespace", "new", "null", "object", "operator",
+      "out", "override", "params", "private", "protected", "public",
+      "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof",
+      "stackalloc", "static", "string", "struct", "switch", "this", "throw",
+      "true", "try", "typeof", "uint", "ulong", "unchecked", "unsafe",
+      "ushort", "using", "var", "virtual", "void", "volatile", "while",
+    ],
+    typeKeywords: [
+      "bool", "byte", "char", "decimal", "double", "float", "int", "long",
+      "object", "sbyte", "short", "string", "uint", "ulong", "ushort",
+      "void",
+    ],
+    // Tokenizer rules run in order. Comments / strings / numbers / identifiers
+    // match before the generic "word" rule would. The `preprocessor` rule
+    // catches #if / #region / #pragma directives.
+    tokenizer: {
+      root: [
+        [/\/\/.*$/, "comment"],
+        [/\/\*/, "comment", "@comment"],
+        [/@"(?:[^"\\]|\\.)*"/, "string"],
+        [/\$"(?:[^"\\]|\\.|{\([^}]*\))*"/, "string"],
+        [/(?:\$@|@\$)"(?:[^"\\]|\\.)*"/, "string"],
+        [/"(?:\\.|[^"\\])*"/, "string"],
+        [/'[^\\']'/, "string"],
+        [/'\\.'/, "string"],
+        [/0[xX][0-9a-fA-F]+[Ll]?/, "number.hex"],
+        [/0[bB][01]+[Ll]?/, "number.bin"],
+        [/[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?[fFdDmM]?/, "number.float"],
+        [/[0-9]+[LlFfDdMm]?/, "number"],
+        [/\#\s*(if|else|elif|endif|define|undef|warning|error|line|region|endregion|pragma|nullable)\b/, "keyword.preprocessor"],
+        [/\b(?:this|base|null|true|false|var)\b/, "keyword"],
+        [/[a-zA-Z_][\w]*(?=\s*\()/, { cases: { "@typeKeywords": "type", "@keywords": "keyword", "@default": "identifier.function" } }],
+        [/[A-Z][\w]*/, "type"],
+        [/[a-z_][\w]*/, { cases: { "@typeKeywords": "type", "@keywords": "keyword", "@default": "identifier" } }],
+        [/[{}()[\];,.]/, "delimiter"],
+        [/[+\-*/%&|^!~?:=<>]+/, "operator"],
+        [/\s+/, ""],
+      ],
+      comment: [
+        [/[^/*]+/, "comment"],
+        [/\*\//, "comment", "@pop"],
+        [/[/*]/, "comment"],
+      ],
+    },
+  } satisfies monaco.languages.IMonarchLanguage);
+  // Configure bracket auto-closing/pairing for csharp so typing `<` in
+  // a generic doesn't fight the editor.
+  monacoNs.languages.setLanguageConfiguration("csharp", {
+    comments: { lineComment: "//", blockComment: ["/*", "*/"] },
+    brackets: [
+      ["{", "}"], ["[", "]"], ["(", ")"],
+      ["<", ">"],
+    ],
+    autoClosingPairs: [
+      { open: "{", close: "}" },
+      { open: "[", close: "]" },
+      { open: "(", close: ")" },
+      { open: "<", close: ">", notIn: ["strings"] },
+      { open: "'", close: "'", notIn: ["strings", "comments"] },
+      { open: '"', close: '"', notIn: ["strings", "comments"] },
+    ],
+    surroundingPairs: [
+      { open: "{", close: "}" },
+      { open: "[", close: "]" },
+      { open: "(", close: ")" },
+      { open: "<", close: ">" },
+      { open: "'", close: "'" },
+      { open: '"', close: '"' },
+    ],
+  });
 }
