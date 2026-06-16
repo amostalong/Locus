@@ -1249,6 +1249,8 @@ pub fn run() {
             commands::csharp_lsp_set_enabled,
             commands::csharp_lsp_restart,
             commands::csharp_lsp_bridge_request,
+            commands::csharp_lsp_did_change,
+            commands::csharp_lsp_did_close,
             commands::code_analysis_tools_get_config,
             commands::code_analysis_tools_set_config,
             commands::get_view_windows_above_main,

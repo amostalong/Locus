@@ -12,7 +12,7 @@
 //! downloaded on demand (see `assets`).
 
 mod assets;
-mod client;
+pub(crate) mod client;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -764,7 +764,7 @@ pub(crate) async fn bridge_lsp_request(
 /// `WorkspaceServer` (its statistics are tracked by the per-feature
 /// query functions instead). This is what lets the bridge command
 /// stay at the `pub(crate)` boundary without widening `WorkspaceServer`.
-async fn bridge_ready_client(workspace: &str) -> Result<Arc<client::LspClient>, String> {
+pub(crate) async fn bridge_ready_client(workspace: &str) -> Result<Arc<client::LspClient>, String> {
     let (_server, lsp) = ready_client(workspace).await?;
     Ok(lsp)
 }

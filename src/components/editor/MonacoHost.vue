@@ -18,6 +18,7 @@ import {
   csharpLspGetStatus,
   subscribeCsharpLspStatus,
 } from "../../services/csharpLsp";
+import { trackAllCurrentModels, reset as resetEditorSync, trackModel } from "../../services/editorSync";
 // 用于覆盖 Monaco 内部的 editor.action.findReferences 命令
 // （vscode.commands.registerCommand 走的是 VS Code API 扩展主机桥，覆盖不了）
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
@@ -808,6 +809,14 @@ onMounted(async () => {
   registerCodeRefActions(editor);
   cursorListener = editor.onDidChangeCursorPosition(() => refreshEnclosingContext());
 
+  // Wire up the Roslyn textDocument/didOpen / didChange / didClose
+  // bridge for any csharp model that already exists or that gets
+  // created later (e.g. via editorStore.openFile). The EditorSync
+  // service attaches the onDidChangeContent and onWillDispose
+  // listeners itself.
+  monaco.editor.onDidCreateModel((model) => trackModel(model));
+  trackAllCurrentModels(() => monaco.editor.getModels());
+
   syncModel();
 
   resizeHandle = createAnimationFrameResizeObserver(() => {
@@ -858,6 +867,7 @@ onBeforeUnmount(() => {
   // Dispose all Monaco provider registrations (hover, codeLens, completion, etc.)
   // to prevent accumulation across LSP client restarts.
   disposeAllMonacoRegistrations();
+  resetEditorSync();
   void disposeCsharpClient();
 });
 

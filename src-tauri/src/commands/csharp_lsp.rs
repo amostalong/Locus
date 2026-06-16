@@ -35,6 +35,68 @@ pub async fn csharp_lsp_bridge_request(
         .map_err(|error| AppError::new("csharp_lsp.request_failed", error))
 }
 
+/// Notify the Roslyn server that `path`'s on-disk content has changed
+/// since the last sync. Drives `LspClient::sync_document` which decides
+/// between a full didOpen (first time) and a didClose + didOpen
+/// reopen (subsequent edits — Roslyn's incremental sync handler dies
+/// on a rangeless full-text didChange, so we reopen). The same
+/// `bridge_lsp_request` URI canonicalization we use for hover/definition
+/// runs here too, so a Monaco-side `file:///c%3A/...` URI is
+/// converted to the Roslyn-canonical `file:///C:/...` form before the
+/// path is resolved. Called by the frontend EditorSync on every
+/// debounced model change.
+#[tauri::command]
+pub async fn csharp_lsp_did_change(
+    path: String,
+    workspace: State<'_, std::sync::Arc<crate::workspace::Workspace>>,
+) -> Result<(), AppError> {
+    let cwd = workspace.path.read().await.clone();
+    if cwd.trim().is_empty() {
+        return Err(AppError::new(
+            "csharp_lsp.no_workspace",
+            "No workspace selected",
+        ));
+    }
+    let lsp = crate::csharp_lsp::bridge_ready_client(&cwd)
+        .await
+        .map_err(|error| AppError::new("csharp_lsp.sync_failed", error))?;
+    let target = std::path::PathBuf::from(&path);
+    lsp.sync_document(&target)
+        .await
+        .map(|_| ())
+        .map_err(|error| AppError::new("csharp_lsp.sync_failed", error))
+}
+
+/// Notify the Roslyn server that `path` is no longer open in the
+/// editor. We use the workspace-relative `sub_path` (forward-slash)
+/// shape here because Monaco will pass a workspace-relative path on
+/// dispose; the LspClient normalizes it to a `file://` URI for the
+/// wire.
+#[tauri::command]
+pub async fn csharp_lsp_did_close(
+    path: String,
+    workspace: State<'_, std::sync::Arc<crate::workspace::Workspace>>,
+) -> Result<(), AppError> {
+    let cwd = workspace.path.read().await.clone();
+    if cwd.trim().is_empty() {
+        return Err(AppError::new(
+            "csharp_lsp.no_workspace",
+            "No workspace selected",
+        ));
+    }
+    let lsp = crate::csharp_lsp::bridge_ready_client(&cwd)
+        .await
+        .map_err(|error| AppError::new("csharp_lsp.close_failed", error))?;
+    let uri = crate::csharp_lsp::client::path_to_uri(std::path::Path::new(&path))
+        .map_err(|error| AppError::new("csharp_lsp.close_failed", error))?;
+    lsp.notify(
+        "textDocument/didClose",
+        serde_json::json!({ "textDocument": { "uri": uri } }),
+    )
+    .await
+    .map_err(|error| AppError::new("csharp_lsp.close_failed", error))
+}
+
 #[tauri::command]
 pub async fn csharp_lsp_get_status() -> Result<crate::csharp_lsp::CsharpLspStatusPayload, AppError>
 {

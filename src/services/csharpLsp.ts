@@ -71,3 +71,34 @@ export function csharpLspBridgeRequest(
     { operation: "csharpLspBridgeRequest", notify: false, throwOnError: true },
   );
 }
+
+/**
+ * Push the current on-disk content of `path` to the Roslyn server.
+ * The backend's `LspClient::sync_document` decides between didOpen
+ * (first time) and didClose + didOpen (subsequent edits — Roslyn's
+ * incremental sync handler is fragile on rangeless full-text
+ * didChange, so the LspClient reopens the document each time).
+ * Caller (EditorSync) should debounce so we don't fire on every
+ * keystroke.
+ */
+export function csharpLspNotifyChange(path: string): Promise<void> {
+  return ipcInvoke<void>("csharp_lsp_did_change", { path }, {
+    operation: "csharpLspNotifyChange",
+    notify: false,
+    throwOnError: true,
+  });
+}
+
+/**
+ * Tell the Roslyn server that `path` is no longer open in the editor
+ * (tab closed, model disposed). Mirrors the workspace-relative path
+ * shape used by `csharpLspNotifyChange` — the backend normalizes it
+ * to a `file://` URI on the wire.
+ */
+export function csharpLspNotifyClose(path: string): Promise<void> {
+  return ipcInvoke<void>("csharp_lsp_did_close", { path }, {
+    operation: "csharpLspNotifyClose",
+    notify: false,
+    throwOnError: true,
+  });
+}
