@@ -384,6 +384,40 @@ function syncModel() {
 }
 
 function applyTheme() {
+  // Drive both sides of the theme bridge:
+  //   1. `applyVscodeColorTheme` updates the workbench.colorTheme
+  //      config and color customizations on the vscode side
+  //      (peek view / status bar / widget colors).
+  //   2. `monaco.editor.setTheme(name)` actually repaints the
+  //      monaco editor instance with the registered Monaco theme.
+  //      Without the second call the editor falls back to the
+  //      default `vs` theme (white background) because the vscode
+  //      theme service in monaco-vscode-api 33.0.9 doesn't
+  //      automatically propagate the active theme to standalone
+  //      editor instances — only to workbench-launched ones.
+  // We define a dark + light Monaco theme mirroring the vscode
+  // theme names so the editor's token colors are coherent with
+  // the rest of the Locus chrome.
+  monaco.editor.defineTheme("locus-dark", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#1d1d1d",
+      "editorGutter.background": "#1d1d1d",
+    },
+  });
+  monaco.editor.defineTheme("locus-light", {
+    base: "vs",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#fafafa",
+      "editorGutter.background": "#fafafa",
+    },
+  });
+  const isDark = document.documentElement.getAttribute("data-theme") !== "light";
+  monaco.editor.setTheme(isDark ? "locus-dark" : "locus-light");
   void applyVscodeColorTheme();
 }
 
