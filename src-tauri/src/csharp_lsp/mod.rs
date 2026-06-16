@@ -715,12 +715,26 @@ pub(crate) async fn ready_client(
 /// Used by the Monaco editor's generic bridge command (hover / definition /
 /// references / completion). The server is auto-started / reloaded when the
 /// workspace changes.
+///
+/// When `params` carries a `textDocument.uri` (the common case for any
+/// `textDocument/*` method), the file is opened (or re-synced) on the
+/// server side first so the request never hits "Document is null" on a
+/// fresh buffer. The editor model owns the live text; the LSP document
+/// mirror is refreshed lazily on every query.
 pub(crate) async fn bridge_lsp_request(
     workspace: &str,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let (_server, lsp) = ready_client(workspace).await?;
+    if let Some(uri) = params
+        .pointer("/textDocument/uri")
+        .and_then(|v| v.as_str())
+    {
+        if let Some(path) = client::uri_to_path(uri) {
+            let _ = lsp.sync_document(&path).await;
+        }
+    }
     lsp.request(method, params).await
 }
 

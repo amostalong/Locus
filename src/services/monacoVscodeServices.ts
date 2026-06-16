@@ -15,7 +15,9 @@ import getConfigurationServiceOverride, {
 } from "@codingame/monaco-vscode-configuration-service-override";
 import getEditorServiceOverride from "@codingame/monaco-vscode-editor-service-override";
 import getExtensionsServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
-import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
+import getFilesServiceOverride, {
+  registerFileSystemOverlay,
+} from "@codingame/monaco-vscode-files-service-override";
 import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
 import getMonarchServiceOverride from "@codingame/monaco-vscode-monarch-service-override";
@@ -111,9 +113,7 @@ function installWorkerEnvironment(): void {
 export function ensureMonacoVscodeServices(): Promise<void> {
   if (readyPromise) return readyPromise;
   readyPromise = (async () => {
-    console.log("[DIAG-MV-0] ensureMonacoVscodeServices START, t=" + Date.now());
     installWorkerEnvironment();
-    console.log("[DIAG-MV-1] installWorkerEnvironment done, about to call initVscodeServices");
     try {
       await initVscodeServices({
       ...getConfigurationServiceOverride(),
@@ -131,32 +131,27 @@ export function ensureMonacoVscodeServices(): Promise<void> {
       // that throws "Services are already initialized" on the second call.
       // The first call already completed, so services are usable — just
       // continue and let the rest of the init proceed.
-      if (String(e?.message ?? e).includes("already initialized")) {
-        console.log("[DIAG-MV-1.5] initVscodeServices threw 'already initialized' — HMR re-entry, continuing");
-      } else {
+      if (!String(e?.message ?? e).includes("already initialized")) {
         throw e;
       }
     }
-    console.log("[DIAG-MV-2] initVscodeServices RESOLVED, about to await themeDefaultsReady+csharpDefaultReady");
-    console.log("[DIAG-MV-2.1] about to call themeDefaultsReady()");
     // theme-defaults-default-extension 33.0.9's whenReady() can hang silently
     // in this Tauri+Vite 6 environment (extension host internal Promise never
     // settles). Letting that block editor init means the rest of Locus is
-    // unusable, so we treat the theme extension as fire-and-forget and
-    // let the rest of the editor proceed. If the promise does resolve later
-    // its then() handler will log success for diagnostics.
-    const themeP = themeDefaultsReady();
-    themeP.then(() => console.log("[DIAG-MV-2.2] themeDefaultsReady RESOLVED OK")).catch((e) => console.log("[DIAG-MV-2.2] themeDefaultsReady REJECTED", e?.message ?? e));
-    console.log("[DIAG-MV-2.3] about to call csharpDefaultReady()");
-    const csharpP = csharpDefaultReady();
-    csharpP.then(() => console.log("[DIAG-MV-2.4] csharpDefaultReady RESOLVED OK")).catch((e) => console.log("[DIAG-MV-2.4] csharpDefaultReady REJECTED", e?.message ?? e));
-    console.log("[DIAG-MV-2.5] awaiting csharpDefaultReady (theme is fire-and-forget)");
-    await csharpP;
-    console.log("[DIAG-MV-3] csharp extension READY (theme is background)");
+    // unusable, so we treat the theme extension as fire-and-forget and let
+    // the rest of the editor proceed.
+    themeDefaultsReady().catch(() => {});
+    await csharpDefaultReady();
+    // Register our workspace-backed file:// provider as an overlay in front
+    // of the default BrowserFileSystemProvider. Without this, Monaco's
+    // TextModelResolverService falls back to fetching `file://` URIs via
+    // XHR — which CORS-blocks under Tauri+Vite — and the editor ends up
+    // with "Unable to resolve nonexistent file" the moment a goto / peek
+    // references needs to re-open a model. Priority 1000 puts us in
+    // front of the default provider.
+    registerFileSystemOverlay(1000, fsProvider);
     registerUnityLanguages(monaco);
-    console.log("[DIAG-MV-4] registerUnityLanguages done, about to applyVscodeColorTheme");
     await applyVscodeColorTheme();
-    console.log("[DIAG-MV-5] applyVscodeColorTheme RESOLVED, ensureMonacoVscodeServices DONE");
   })();
   return readyPromise;
 }
