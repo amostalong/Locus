@@ -1,0 +1,20 @@
+/**
+ * Preprocessor inactive-range dimming for Monaco Editor.
+ *
+ * Applied via Monaco Decorations API as className: "preprocessor-inactive"
+ * on whole lines inside inactive #if / #elif / #else blocks.
+ *
+ * Using opacity + italic so the code remains readable but visually recedes.
+ * The background colour is intentionally left transparent so the editor's
+ * own line-background (e.g. current-line highlight) still shows through.
+ */
+
+.preprocessor-inactive {
+  opacity: 0.45;
+  font-style: italic;
+}
+
+/* Inline text inside an inactive block (not whole-line, e.g. glyph margin) */
+.preprocessor-inactive-inline {
+  opacity: 0.45;
+}

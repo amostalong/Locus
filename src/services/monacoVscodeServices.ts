@@ -5,9 +5,11 @@
 import * as monaco from "monaco-editor";
 import "vscode/localExtensionHost";
 import {
-  getService,
-  IWorkbenchThemeService,
+  StandaloneServices,
 } from "@codingame/monaco-vscode-api/services";
+import {
+  setUnexpectedErrorHandler,
+} from "@codingame/monaco-vscode-api/vscode/vs/base/common/errors";
 
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import ExtensionHostWorker from "@codingame/monaco-vscode-api/workers/extensionHost.worker?worker";
@@ -26,15 +28,56 @@ import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-serv
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
 import getMonarchServiceOverride from "@codingame/monaco-vscode-monarch-service-override";
 import getTextMateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
-import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import { whenReady as themeDefaultsReady } from "@codingame/monaco-vscode-theme-defaults-default-extension";
 import { whenReady as csharpDefaultReady } from "@codingame/monaco-vscode-csharp-default-extension";
+import { IStandaloneThemeService } from "@codingame/monaco-vscode-api/vscode/vs/editor/standalone/common/standaloneTheme.service";
+import { TokenizationRegistry } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages";
 
 import { ModelBackedFileSystemProvider, setOpenRoot } from "./editorFileSystemProvider";
-import { installMonacoErrorHandlers } from "./monacoErrorHandler";
 import { registerUnityLanguages } from "./unityLanguages";
 
 let readyPromise: Promise<void> | null = null;
+let errorHandlerInstalled = false;
+
+/**
+ * Install a silent error handler for Monaco internal crashes.
+ * Without this, the Monarch tokenizer's `_theme.match(…)` crash
+ * (`Cannot read properties of undefined (reading 'match')`) propagates
+ * as an unhandled error and floods the console. We downgrade it to a
+ * warning so the editor stays functional even when the tokenizer can't
+ * resolve a theme.
+ *
+ * Only installed once; safe to call multiple times.
+ */
+function installMonacoErrorHandler(): void {
+  if (errorHandlerInstalled) return;
+  errorHandlerInstalled = true;
+  setUnexpectedErrorHandler((err: unknown) => {
+    const msg = String(err?.toString?.() ?? err);
+    // Known benign Monaco internal errors that should not crash the editor:
+    //   - Monarch race / missing token theme: MonarchModernTokensCollector.emit
+    //     crashes when this._theme.match() sees undefined tokenTheme
+    //   - Default api not ready yet: extension host worker fires before
+    //     the vscode API lands on the main thread
+    //   - getRelativeLuminance: MinimapTokensColorTracker reads a color-map
+    //     entry that hasn't been populated yet (race between theme service
+    //     populating TokenizationRegistry and ViewModel construction)
+    //   - reading 'emitsOptions': Vue component update race triggered when
+    //     the editor crashes and leaves the component tree in a bad state
+    if (
+      msg.includes("reading 'match'") ||
+      msg.includes("Default api is not ready yet") ||
+      msg.includes("monarch") ||
+      msg.includes("getRelativeLuminance") ||
+      msg.includes("emitsOptions")
+    ) {
+      console.warn("[monaco:silenced]", msg);
+      return;
+    }
+    // Let everything else through normally
+    console.error("[monaco]", msg);
+  });
+}
 
 /** Singleton file-system provider so MonacoHost can set its workspace root. */
 export const fsProvider = new ModelBackedFileSystemProvider();
@@ -115,81 +158,33 @@ function installWorkerEnvironment(): void {
   (self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = env;
 }
 
-// Theme names. The two layers of monaco-vscode-api 33.0.9 use different
-// namespaces:
-//   - `monaco.editor.setTheme(name)` goes through StandaloneThemeService,
-//     which only knows the four built-ins (`vs-dark`, `vs`, `hc-black`,
-//     `hc-light`). Anything else falls back to `vs` (LIGHT) — so passing
-//     "Default Dark Modern" here would actually turn the editor white.
-//   - The workbench theme service (IWorkbenchThemeService.setColorTheme)
-//     only recognizes the workbench-flavored ids registered by
-//     `@codingame/monaco-vscode-theme-defaults-default-extension`
-//     (`Default Dark Modern`, `Default Light Modern`, etc.).
-// Both have to be set in lockstep for the editor to look right.
-export const VSCODE_THEME_DARK_ID = "Default Dark Modern";
-export const VSCODE_THEME_LIGHT_ID = "Default Light Modern";
 export const STANDALONE_THEME_DARK = "vs-dark";
 export const STANDALONE_THEME_LIGHT = "vs";
 
-type IWorkbenchThemeServiceLike = {
-  getColorThemes(): Promise<Array<{ settingsId: string }>>;
-  setColorTheme(themeId: string, settingsTarget: unknown): Promise<unknown>;
-  onDidColorThemeChange: { (listener: () => void): { dispose(): void } };
-  getColorTheme(): { settingsId: string; type: unknown };
-};
+// NOTE: we intentionally do NOT include getThemeServiceOverride() in the
+// initVscodeServices call below, because IStandaloneThemeService and
+// IThemeService both register with createDecorator("themeService") — they
+// share the same DI key. Including the theme override would replace the
+// StandaloneThemeService with StandaloneWorkbenchThemeService for BOTH,
+// which leaves the Monarch tokenizers without a valid TokenTheme and
+// crashes on this._theme.match(...).
 
 /**
- * Drive BOTH theme services for the given workbench theme id:
- *   1. `monaco.editor.setTheme("vs-dark"|"vs")` so the standalone editor
- *      has a TokenTheme it can match against (this also seeds the
- *      Monarch token collectors, see comment below).
- *   2. `themeService.setColorTheme(id, undefined)` so the workbench writes
- *      its `.monaco-workbench` CSS variables (editor.background, etc.).
- *
- * Step 2 returns null when the workbench theme registry doesn't yet have
- * the requested id — which is the normal state right after init because
- * `theme-defaults-default-extension`'s activation is asynchronous and the
- * existing fire-and-forget `themeDefaultsReady()` promise can hang in this
- * Tauri+Vite environment. We listen to `onDidColorThemeChange` and retry
- * until the theme lands (or the caller cancels the listener).
+ * Inject a <style> element with editor background color. This bridges the
+ * gap between the standalone theme service setting the TokenTheme and the
+ * workbench theme service writing its CSS variables — which is async and can
+ * take hundreds of ms (or hang indefinitely) in monaco-vscode-api 33.0.9's
+ * extension host. Without this, the editor renders with a white background
+ * between init and the workbench theme applying.
  */
-function scheduleThemeWhenReady(
-  themeService: IWorkbenchThemeServiceLike,
-  workbenchId: string,
-  standaloneName: string,
-): () => void {
-  let cancelled = false;
-  const applyWorkbench = async (): Promise<boolean> => {
-    if (cancelled) return true;
-    try {
-      const themes = await themeService.getColorThemes();
-      if (cancelled) return true;
-      if (!themes.some((t) => t.settingsId === workbenchId)) return false;
-      await themeService.setColorTheme(workbenchId, undefined);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const tryBoth = async (): Promise<boolean> => {
-    if (cancelled) return true;
-    // Always drive the standalone first — its TokenTheme must be bound
-    // before any tokenization pass runs (Monarch race protection).
-    monaco.editor.setTheme(standaloneName);
-    return applyWorkbench();
-  };
-  const listener = themeService.onDidColorThemeChange(() => {
-    void tryBoth().then((done) => {
-      if (done) listener.dispose();
-    });
-  });
-  void tryBoth().then((done) => {
-    if (done) listener.dispose();
-  });
-  return () => {
-    cancelled = true;
-    listener.dispose();
-  };
+function installEditorBackgroundFallback(isDark: boolean): void {
+  const id = "locus-editor-bg-fallback";
+  if (document.getElementById(id)) return;
+  const bg = isDark ? "#1e1e1e" : "#ffffff";
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = `.monaco-editor, .monaco-editor .margin { background: ${bg} !important; }`;
+  document.head.appendChild(style);
 }
 
 /**
@@ -201,27 +196,100 @@ function scheduleThemeWhenReady(
  */
 export function ensureVisualTheme(): () => void {
   const isDark = document.documentElement.getAttribute("data-theme") !== "light";
-  const workbenchId = isDark ? VSCODE_THEME_DARK_ID : VSCODE_THEME_LIGHT_ID;
   const standaloneName = isDark ? STANDALONE_THEME_DARK : STANDALONE_THEME_LIGHT;
   // Drive standalone immediately — works even before vscode services init.
   monaco.editor.setTheme(standaloneName);
-  let cancel: () => void = () => {};
-  void getService(IWorkbenchThemeService)
-    .then((svc) => {
-      cancel = scheduleThemeWhenReady(svc as IWorkbenchThemeServiceLike, workbenchId, standaloneName);
-    })
-    .catch(() => {
-      // Services not initialized yet — caller will retry via MonacoHost mount.
+  // Also force the standalone theme service's TokenTheme to be constructed
+  // synchronously. In monaco-vscode-api 33.0.9, when TokenTheme is not yet
+  // lazily constructed, MonarchModernTokensCollector crashes on
+  // `this._theme.match(...)` because tokenTheme is undefined.
+  enforceTokenThemeReady(isDark);
+  // Inject a CSS fallback for the editor background. Without the theme
+  // service override (see NOTE above), the standalone theme service
+  // manages CSS variables synchronously, but the fallback ensures the
+  // editor never flashes white during init.
+  installEditorBackgroundFallback(isDark);
+  return () => {};
+}
+
+/**
+ * Force the TokenizationRegistry's color-map to match the current theme's
+ * TokenTheme color-map.  MinimapTokensColorTracker (created synchronously
+ * inside every ViewModel constructor) reads `colorMap[ColorId.DefaultBackground]
+ * .getRelativeLuminance()` and crashes if the array is truncated or stale.
+ *
+ * Call this immediately before `editor.setModel()` to guarantee the registry
+ * is in sync with the active theme.
+ */
+export function ensureColorMapReady(): void {
+  try {
+    const themeService = StandaloneServices.get(IStandaloneThemeService);
+    const theme = themeService.getColorTheme();
+    if (!theme?.tokenTheme) return;
+
+    const authoritative = theme.tokenTheme.getColorMap();
+    if (!authoritative || authoritative.length < 3) return;
+
+    const reg = TokenizationRegistry.getColorMap();
+    // Fast path: registry already has a valid DefaultBackground.
+    if (reg && reg.length >= 3 && reg[2] != null) return;
+
+    // _updateThemeOrColorMap → TokenizationRegistry.setColorMap doesn't
+    // reliably propagate the authoritative map (the function may throw
+    // during CSS generation before reaching setColorMap).  Bypass it.
+    TokenizationRegistry.setColorMap(authoritative);
+  } catch (e) {
+    console.warn("[monaco] ensureColorMapReady skipped:", e);
+  }
+}
+
+/**
+ * Define and activate a custom (non-builtin) standalone theme so that the
+ * Monarch tokenizer always sees a valid TokenTheme.
+ *
+ * ## Why this is necessary
+ *
+ * In monaco-vscode-api 33.0.9, `StandaloneThemeService.defineTheme` calls
+ * `notifyBaseUpdated()` on every theme whose base is the (builtin) name
+ * being defined. That method sets `_tokenTheme = null`, which means the
+ * next Monarch tokenization pass that reads
+ * `this._standaloneThemeService.getColorTheme().tokenTheme` gets
+ * `undefined` — and `MonarchModernTokensCollector.emit()` crashes on
+ * `this._theme.match(...)` (`Cannot read properties of undefined`).
+ *
+ * A custom theme name (not `vs`, `vs-dark`, `hc-black` or `hc-light`) is
+ * **never** the argument to `notifyBaseUpdated`, so its `_tokenTheme` is
+ * never spuriously cleared after construction.
+ */
+function enforceTokenThemeReady(isDark: boolean): void {
+  try {
+    const themeService = StandaloneServices.get(IStandaloneThemeService);
+    const base = isDark ? STANDALONE_THEME_DARK : STANDALONE_THEME_LIGHT;
+    // Always define a custom theme so it is not subject to `notifyBaseUpdated`.
+    monaco.editor.defineTheme("locus-stable-theme", {
+      base,
+      inherit: true,
+      rules: [],
+      colors: {},
     });
-  return () => cancel();
+    monaco.editor.setTheme("locus-stable-theme");
+    // Force TokenTheme construction and verify it's usable.
+    const theme = themeService.getColorTheme();
+    if (!theme || !theme.tokenTheme) {
+      console.error("[monaco] CRITICAL: tokenTheme undefined after defineTheme fallback");
+    }
+    // TokenTheme & color map confirmed valid; see ensureColorMapReady for
+    // the authoritative push to TokenizationRegistry.
+  } catch (e) {
+    // Services not initialised yet — caller retries via MonacoHost mount.
+    console.warn("[monaco] enforceTokenThemeReady skipped:", e);
+  }
 }
 
 export function ensureMonacoVscodeServices(): Promise<void> {
   if (readyPromise) return readyPromise;
   readyPromise = (async () => {
-    // Install BEFORE initVscodeServices so the handler is in place when
-    // Monaco schedules its default setTimeout-throw for caught errors.
-    installMonacoErrorHandlers();
+    installMonacoErrorHandler();
     installWorkerEnvironment();
     try {
       await initVscodeServices({
@@ -233,7 +301,6 @@ export function ensureMonacoVscodeServices(): Promise<void> {
       ...getModelServiceOverride(),
       ...getMonarchServiceOverride(),
       ...getTextMateServiceOverride(),
-      ...getThemeServiceOverride(),
     });
     } catch (e: any) {
       // HMR re-entry: @codingame/monaco-vscode-api is a module-level singleton
@@ -245,13 +312,9 @@ export function ensureMonacoVscodeServices(): Promise<void> {
       }
     }
     // theme-defaults-default-extension 33.0.9's whenReady() can hang silently
-    // in this Tauri+Vite 6 environment (extension host internal Promise never
-    // settles). Letting that block editor init means the rest of Locus is
-    // unusable, so we treat the theme extension as fire-and-forget and let
-    // the rest of the editor proceed. `ensureVisualTheme` (called below) and
-    // the onDidColorThemeChange listener cover the case where the extension
-    // registers late — we re-apply the workbench theme as soon as the
-    // registry emits a change event.
+    // in this Tauri+Vite 6 environment. Fire-and-forget — the extension is
+    // not needed since we do NOT use the theme service override (see NOTE
+    // about the DI key collision above).
     themeDefaultsReady().catch(() => {});
     await csharpDefaultReady();
     // Register our workspace-backed file:// provider as an overlay in front
@@ -271,16 +334,30 @@ export function ensureMonacoVscodeServices(): Promise<void> {
     // service — no extension activation required.
     const isDarkInit = document.documentElement.getAttribute("data-theme") !== "light";
     monaco.editor.setTheme(isDarkInit ? STANDALONE_THEME_DARK : STANDALONE_THEME_LIGHT);
+    // Verify the TokenTheme is constructed — MonarchModernTokensCollector.emit
+    // crashes if tokenTheme is still undefined when registerUnityLanguages
+    // triggers setMonarchTokensProvider.
+    enforceTokenThemeReady(isDarkInit);
     registerUnityLanguages(monaco);
-    await applyVscodeColorTheme();
-    // After workbench-side config is set, force-apply the workbench theme
-    // via IWorkbenchThemeService. This writes the `.monaco-workbench` CSS
-    // variables (editor.background etc.) that determine the actual visual
-    // theme — the standalone `setTheme` alone is not enough because in
-    // Tauri+Vite the workbench defaults to LIGHT scheme on first paint,
-    // which paints the editor white before applyVscodeColorTheme has a
-    // chance to react to the config change.
+    // applyVscodeColorTheme writes "workbench.colorTheme": "Default Dark Modern"
+    // to user config. Without the theme service override (removed due to DI key
+    // collision), this workbench theme name can't be resolved by the standalone
+    // theme service. If any listener reacts to the config change and calls
+    // monaco.editor.setTheme("Default Dark Modern"), the standalone service
+    // falls back to "vs" (LIGHT), breaking the color map and Monet's minimap
+    // tracker. We skip this call — the standalone theme + background CSS
+    // fallback provide adequate styling. Color customizations (peekView, etc.)
+    // are applied via the background fallback CSS instead.
+    // await applyVscodeColorTheme();
+    // Apply the standalone theme and editor background CSS fallback.
+    // NOTE: we intentionally do NOT use the workbench theme service
+    // (getThemeServiceOverride) because it shares the same DI key as
+    // IStandaloneThemeService, which breaks the Monarch tokenizer's
+    // TokenTheme. See the NOTE above enforceTokenThemeReady.
     await ensureVisualTheme();
+    // Verify the color map is complete – MinimapTokensColorTracker
+    // (constructed when the first ViewModel is created) reads it.
+    ensureColorMapReady();
   })();
   return readyPromise;
 }

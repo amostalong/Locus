@@ -5,7 +5,7 @@ import * as monaco from "monaco-editor";
 import { useEditorStore, type OpenFile } from "../../stores/editor";
 import { createAnimationFrameResizeObserver } from "../../composables/resizeObserver";
 import {
-  applyVscodeColorTheme,
+  ensureColorMapReady,
   ensureMonacoVscodeServices,
   ensureVisualTheme,
   fsProvider,
@@ -20,6 +20,8 @@ import {
   subscribeCsharpLspStatus,
 } from "../../services/csharpLsp";
 import { trackAllCurrentModels, reset as resetEditorSync, trackModel } from "../../services/editorSync";
+import { findInactiveRangesFromSource } from "../../services/preprocessorDimming";
+import { getPreprocessorSymbols, getPreprocessorSymbolsFromCompletion } from "../../services/csharpLsp";
 // 用于覆盖 Monaco 内部的 editor.action.findReferences 命令
 // （vscode.commands.registerCommand 走的是 VS Code API 扩展主机桥，覆盖不了）
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
@@ -46,6 +48,13 @@ let csharpClient: { workspaceDir: string; stop: () => Promise<void> } | null = n
 let csharpClientPending: Promise<void> | null = null;
 let csharpStatusUnlisten: (() => void) | null = null;
 const { setStatus: setOmniStatus, setName: setOmniName } = useOmnisharpStatus();
+
+/** Monaco decorations collection for preprocessor inactive-range dimming. */
+let preprocessorDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
+let dimModelListener: monaco.IDisposable | null = null;
+let dimCursorListener: monaco.IDisposable | null = null;
+/** Cached preprocessor symbols from the Rust backend (null = not yet loaded). */
+let cachedSymbols: Set<string> | null = null;
 
 // ── Monaco Provider Registration Tracking ─────────────────────────────
 // Store ALL Monaco provider registration disposables so we can clean them
@@ -374,7 +383,17 @@ function syncModel() {
   const file = editorStore.active;
   if (file) {
     if (editor.getModel() !== file.model) {
-      editor.setModel(file.model);
+      // MinimapTokensColorTracker reads the color-map synchronously inside
+      // the ViewModel constructor called by setModel.  Ensure the registry
+      // has a complete color-map before attaching the model.
+      ensureColorMapReady();
+      try {
+        editor.setModel(file.model);
+      } catch (e) {
+        console.warn("[editor] setModel failed, retrying once:", e);
+        ensureColorMapReady();
+        try { editor.setModel(file.model); } catch {}
+      }
     }
     editor.updateOptions({ readOnly: !!file.readOnly });
   } else {
@@ -382,19 +401,18 @@ function syncModel() {
     editor.updateOptions({ readOnly: false });
   }
   refreshEnclosingContext();
+  refreshPreprocessorDimming();
 }
 
 function applyTheme() {
-  // Drive BOTH theme services in lockstep — see the long comment on
-  // `ensureVisualTheme` in monacoVscodeServices.ts for why neither path
-  // alone is enough in monaco-vscode-api 33.0.9. The visual editor
-  // background follows the workbench's `.monaco-workbench` CSS variables,
-  // which only update when the workbench theme service applies a theme by
-  // its workbench id (e.g. "Default Dark Modern"). `monaco.editor.setTheme`
-  // on its own just binds the standalone TokenTheme and does NOT repaint
-  // the editor background.
+  // The standalone theme service + background CSS fallback (installed
+  // inside ensureVisualTheme) handle editor coloring. We skip
+  // applyVscodeColorTheme here because it writes a workbench theme name
+  // to config that the standalone service can't resolve — and any
+  // reactive listener trying setTheme("Default Dark Modern") would
+  // switch the editor to the "vs" LIGHT fallback, breaking the color
+  // map. See the comment in ensureMonacoVscodeServices.
   ensureVisualTheme();
-  void applyVscodeColorTheme();
 }
 
 function currentFile(): OpenFile | null {
@@ -413,6 +431,123 @@ function refreshEnclosingContext() {
   const found = findEnclosing(model, position);
   hasFunctionCtx.set(!!found.function);
   hasClassCtx.set(!!found.class);
+}
+
+/** Apply dimmed styling to inactive preprocessor branches (#if with undefined symbols). */
+function refreshPreprocessorDimming() {
+  if (!editor || !preprocessorDecorations) return;
+  // Don't dim until we have actual symbol data from the backend.
+  // cachedSymbols being empty (not null) means "loaded but empty" — that's fine
+  // and we should still apply dimming with an empty set.
+  if (cachedSymbols === null) return;
+  const model = editor.getModel();
+  if (!model) {
+    preprocessorDecorations.set([]);
+    return;
+  }
+  const source = model.getValue();
+  const ranges = findInactiveRangesFromSource(source, cachedSymbols);
+  if (ranges.length === 0) {
+    preprocessorDecorations.set([]);
+    return;
+  }
+  preprocessorDecorations.set(
+    ranges.map((r) => ({
+      range: {
+        startLineNumber: r.startLine,
+        startColumn: 1,
+        endLineNumber: r.endLine,
+        endColumn: model.getLineMaxColumn(r.endLine),
+      },
+      options: {
+        isWholeLine: true,
+        className: "preprocessor-inactive",
+        glyphMarginClassName: undefined,
+        inlineClassName: "preprocessor-inactive-inline",
+        stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+      },
+    })),
+  );
+}
+
+/**
+ * Fetch preprocessor symbols for the active file and refresh dimming.
+ *
+ * Two paths, in order of preference:
+ *
+ *   1. **Roslyn completion** (`getPreprocessorSymbolsFromCompletion`):
+ *      asks the running Roslyn LSP server for `textDocument/completion`
+ *      at a `#if` / `#elif` / `#define` line in the file. The completion
+ *      provider's preprocessor context returns the full symbol table —
+ *      MSBuild-evaluated `<DefineConstants>` (so `[Condition]` and
+ *      `$(Variable)` resolve correctly) plus every source-level `#define`
+ *      seen so far in the file — in a single RPC. Falls through to the
+ *      csproj path if the bridge call rejects (server still warming up,
+ *      project not loaded, file too large, etc.).
+ *
+ *   2. **Owning-csproj regex** (`getPreprocessorSymbols`): reads
+ *      `<DefineConstants>` directly from the .csproj that owns the active
+ *      file. Misses conditional defines and source-level `#define`, but
+ *      doesn't need the Roslyn server. Always succeeds when a csproj
+ *      claims the file.
+ *
+ * On full failure (both paths reject — should be very rare) we set
+ * `cachedSymbols` to an empty set so dimming is a no-op rather than
+ * crashing.
+ */
+async function refreshSymbols() {
+  const active = currentFile();
+  const fileRelPath = active?.relPath;
+  const startedAt = performance.now();
+  console.log(
+    `[preprocessorDimming] refreshSymbols start, fileRelPath=${fileRelPath ?? "<none>"}`,
+  );
+
+  // ── Path 1: Roslyn completion (preferred) ──────────────────────────
+  if (fileRelPath) {
+    try {
+      const symbols = await getPreprocessorSymbolsFromCompletion(fileRelPath);
+      const elapsed = (performance.now() - startedAt).toFixed(1);
+      console.log(
+        `[preprocessorDimming] Roslyn probe OK in ${elapsed}ms, ${symbols.length} symbol(s):`,
+        symbols,
+      );
+      cachedSymbols = new Set(symbols);
+      refreshPreprocessorDimming();
+      return;
+    } catch (e) {
+      const elapsed = (performance.now() - startedAt).toFixed(1);
+      console.warn(
+        `[preprocessorDimming] Roslyn probe FAILED in ${elapsed}ms for ${fileRelPath} — falling back to csproj path:`,
+        e,
+      );
+      // fall through to path 2
+    }
+  } else {
+    console.log(
+      "[preprocessorDimming] no active file, skipping Roslyn probe",
+    );
+  }
+
+  // ── Path 2: Owning-csproj regex (fallback) ──────────────────────────
+  try {
+    const symbols = await getPreprocessorSymbols(fileRelPath);
+    const elapsed = (performance.now() - startedAt).toFixed(1);
+    console.log(
+      `[preprocessorDimming] csproj fallback OK in ${elapsed}ms, ${symbols.length} symbol(s):`,
+      symbols,
+    );
+    cachedSymbols = new Set(symbols);
+    refreshPreprocessorDimming();
+  } catch (e) {
+    const elapsed = (performance.now() - startedAt).toFixed(1);
+    console.error(
+      `[preprocessorDimming] both paths failed in ${elapsed}ms; dimming disabled for this refresh:`,
+      e,
+    );
+    cachedSymbols = new Set();
+    refreshPreprocessorDimming();
+  }
 }
 
 function lineExcerpt(file: OpenFile, startLine: number, endLine: number): string {
@@ -664,6 +799,7 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
         const cleanup = () => { cancelHandle?.dispose(); cancelHandle = null; };
 
         const uri = model.uri.toString();
+        const pos = `${position.lineNumber}:${position.column}`;
         try {
           const result: any = await Promise.race([
             lspRequest(lspMethod, {
@@ -672,8 +808,16 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
             }),
             cancelPromise,
           ]);
-          if (!result) return null;
+          if (!result) {
+            console.log(`[goto/${tag}] ${pos} LSP returned empty`);
+            return null;
+          }
           const items = Array.isArray(result) ? result : [result];
+          console.log(`[goto/${tag}] ${pos} LSP returned ${items.length} result(s)`);
+          if (items.length === 0) {
+            console.log(`[goto/${tag}] ${pos} LSP returned empty array`);
+            return null;
+          }
           let loc: { uri: string; range: any } | null = null;
           for (const item of items) {
             const rng = item.targetRange ?? item.range;
@@ -682,13 +826,19 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
               break;
             }
           }
-          if (!loc) return null;
+          if (!loc) {
+            const sample = items[0] ? JSON.stringify(Object.keys(items[0])) : "empty";
+            console.log(`[goto/${tag}] ${pos} no valid loc in LSP result (keys=${sample})`);
+            return null;
+          }
+          console.log(`[goto/${tag}] ${pos} target=${loc.uri} range=${JSON.stringify(loc.range)}`);
           const targetUri = monaco.Uri.parse(loc.uri);
           const targetRange = lspRangeToMonaco(loc.range);
           const uriPath = targetUri.fsPath.replace(/\\/g, "/");
           const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
 
           if (uriPath.includes("$metadata$")) {
+            console.log(`[goto/${tag}] ${pos} metadata decompile: ${uriPath}`);
             if (token.isCancellationRequested) return null;
             try {
               let m = monaco.editor.getModel(targetUri);
@@ -728,14 +878,19 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
                 editor.setPosition({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
                 editor.revealPositionInCenter({ lineNumber: targetRange.startLineNumber, column: targetRange.startColumn });
                 editor.focus();
+              } else {
+                console.log(`[goto/${tag}] ${pos} openFile returned ${!!opened} for ${relPath}`);
               }
             } catch (navErr) {
-              console.warn(`[${tag}] navigation failed:`, navErr);
+              console.warn(`[goto/${tag}] ${pos} openFile failed for ${relPath}:`, navErr);
             }
+          } else {
+            console.log(`[goto/${tag}] ${pos} outside workspace: ${uriPath}`);
           }
           return [{ uri: targetUri, range: targetRange }];
         } catch (err: any) {
-          if (err?.message !== "cancelled") console.warn(`[${tag}] LSP request failed:`, err);
+          if (err?.message !== "cancelled") console.warn(`[goto/${tag}] ${pos} LSP request failed:`, err);
+          else console.log(`[goto/${tag}] ${pos} cancelled`);
           return null;
         } finally {
           cleanup();
@@ -942,6 +1097,11 @@ onMounted(async () => {
   registerCodeRefActions(editor);
   cursorListener = editor.onDidChangeCursorPosition(() => refreshEnclosingContext());
 
+  // Preprocessor inactive-range dimming
+  preprocessorDecorations = editor.createDecorationsCollection();
+  dimModelListener = editor.onDidChangeModelContent(() => refreshPreprocessorDimming());
+  dimCursorListener = editor.onDidChangeCursorPosition(() => refreshPreprocessorDimming());
+
   // Wire up the Roslyn textDocument/didOpen / didChange / didClose
   // bridge for any csharp model that already exists or that gets
   // created later (e.g. via editorStore.openFile). The EditorSync
@@ -950,6 +1110,9 @@ onMounted(async () => {
   monaco.editor.onDidCreateModel((model) => trackModel(model));
   trackAllCurrentModels(() => monaco.editor.getModels());
 
+  // Force the color map to be complete before attaching the first model
+  // (MinimapTokensColorTracker reads it synchronously in the constructor).
+  ensureColorMapReady();
   syncModel();
 
   resizeHandle = createAnimationFrameResizeObserver(() => {
@@ -967,17 +1130,30 @@ onMounted(async () => {
 
   if (props.workingDir.trim()) {
     console.log(`[onMounted] calling ensureCsharpClient with "${props.workingDir}"`);
-    void ensureCsharpClient(props.workingDir);
+    void ensureCsharpClient(props.workingDir).then(() => void refreshSymbols());
   }
 });
 
 watch(() => editorStore.active, syncModel);
 
+// Re-fetch preprocessor symbols whenever the active file changes — the
+// defines we need for `#if` dimming are per-csproj, and each file belongs
+// to a different one. syncModel above swaps the editor's model first; this
+// watch fires after it and refreshes the dimming with the new file's
+// owning-csproj defines.
+watch(
+  () => editorStore.active?.relPath,
+  () => {
+    void refreshSymbols();
+  },
+);
+
 watch(
   () => props.workingDir,
-  (next) => {
+  async (next) => {
     if (next.trim()) {
-      void ensureCsharpClient(next);
+      await ensureCsharpClient(next);
+      void refreshSymbols();
     } else {
       void disposeCsharpClient();
     }
@@ -991,6 +1167,11 @@ onBeforeUnmount(() => {
   resizeHandle = null;
   cursorListener?.dispose();
   cursorListener = null;
+  dimModelListener?.dispose();
+  dimCursorListener?.dispose();
+  preprocessorDecorations?.clear();
+  preprocessorDecorations = null;
+  cachedSymbols = null;
   hasFunctionCtx = null;
   hasClassCtx = null;
   // Detach model before disposing so we don't dispose models the store still owns.

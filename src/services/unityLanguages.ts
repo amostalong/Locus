@@ -13,8 +13,16 @@ export function registerUnityLanguages(monacoNs: typeof monaco): void {
   if (registered) return;
   registered = true;
 
-  registerHlsl(monacoNs);
-  registerShaderLab(monacoNs);
+  // Each registration is wrapped in try-catch as a defensive measure against
+  // monaco-vscode-api 33.0.9 edge cases (Monarch `_theme.match` race, service
+  // not yet ready, etc.). If something throws we log and continue — the editor
+  // still works, it just falls back to plain text rendering for that language.
+  try { registerHlsl(monacoNs); } catch (e) {
+    console.warn("[unityLanguages] HLSL registration failed (continuing):", e);
+  }
+  try { registerShaderLab(monacoNs); } catch (e) {
+    console.warn("[unityLanguages] ShaderLab registration failed (continuing):", e);
+  }
 }
 
 // ── HLSL ─────────────────────────────────────────────────────────────────────
@@ -298,9 +306,9 @@ function registerShaderLab(monacoNs: typeof monaco): void {
 
     tokenizer: {
       root: [
-        // Embedded HLSL/Cg programs.
-        [/\b(CGPROGRAM|HLSLPROGRAM|GLSLPROGRAM)\b/, { token: "keyword.program", next: "@embeddedProgram" }],
-        [/\b(CGINCLUDE|HLSLINCLUDE|GLSLINCLUDE)\b/, { token: "keyword.program", next: "@embeddedInclude" }],
+        // Embedded HLSL/Cg programs — activate embedded language at entry keyword.
+        [/\b(CGPROGRAM|HLSLPROGRAM|GLSLPROGRAM)\b/, { token: "keyword.program", next: "@embeddedProgram", nextEmbedded: "hlsl" }],
+        [/\b(CGINCLUDE|HLSLINCLUDE|GLSLINCLUDE)\b/, { token: "keyword.program", next: "@embeddedInclude", nextEmbedded: "hlsl" }],
 
         // Preprocessor passthrough (rare at the ShaderLab level but valid).
         [/^\s*#\s*\w+/, "keyword.directive"],
@@ -335,17 +343,16 @@ function registerShaderLab(monacoNs: typeof monaco): void {
         [/"/, { token: "string.quote", next: "@string" }],
       ],
 
-      // Embedded HLSL until ENDCG / ENDHLSL / ENDGLSL — delegate to hlsl tokenizer.
+      // Embedded HLSL until ENDCG / ENDHLSL / ENDGLSL.
+      // nextEmbedded: "@pop" is required to deactivate the embedded language; without it
+      // the hlsl tokenizer stays active after the block ends, which causes Monaco's
+      // background tokenizer to emit undefined token types and crash.
       embeddedProgram: [
-        [/\b(ENDCG|ENDHLSL|ENDGLSL)\b/, { token: "keyword.program", next: "@pop" }],
-        [/.+?(?=\b(?:ENDCG|ENDHLSL|ENDGLSL)\b)/, { token: "@rematch", nextEmbedded: "hlsl" }],
-        [/[\s\S]/, { token: "@rematch", nextEmbedded: "hlsl" }],
+        [/\b(ENDCG|ENDHLSL|ENDGLSL)\b/, { token: "keyword.program", next: "@pop", nextEmbedded: "@pop" }],
       ],
 
       embeddedInclude: [
-        [/\b(ENDCG|ENDHLSL|ENDGLSL)\b/, { token: "keyword.program", next: "@pop" }],
-        [/.+?(?=\b(?:ENDCG|ENDHLSL|ENDGLSL)\b)/, { token: "@rematch", nextEmbedded: "hlsl" }],
-        [/[\s\S]/, { token: "@rematch", nextEmbedded: "hlsl" }],
+        [/\b(ENDCG|ENDHLSL|ENDGLSL)\b/, { token: "keyword.program", next: "@pop", nextEmbedded: "@pop" }],
       ],
 
       whitespace: [
@@ -398,15 +405,14 @@ function registerShaderLab(monacoNs: typeof monaco): void {
   // once diagnostics work is in place.
   //
   // The whole csharp block is wrapped in try/catch as a defensive
-  // measure for monaco-vscode-api 33.0.9 edge cases (the Monarch
-  // `_theme.match` race is silenced by the global error handler in
-  // `monacoErrorHandler.ts`, but anything else that might throw here
-  // — tokenizer setup, language configuration attach, etc. — should
-  // not brick the whole editor mount). If something does throw we log
-  // and continue — the editor still works, it just falls back to
-  // plain text rendering for csharp. A proper fix for Monarch race
-  // is to drive tokenization through Roslyn's semantic tokens once
-  // that pipeline lands.
+  // measure for monaco-vscode-api 33.0.9 edge cases. The global
+  // error handler in `monacoVscodeServices.installMonacoErrorHandler`
+  // silences the actual Monarch `_theme.match` race, but anything else
+  // that might throw here — tokenizer setup, language configuration
+  // attach, etc. — should not brick the whole editor mount. If
+  // something does throw we log and continue — the editor still works,
+  // it just falls back to plain text rendering for csharp.
+  //
   try {
   monacoNs.languages.setMonarchTokensProvider("csharp", {
     defaultToken: "",
