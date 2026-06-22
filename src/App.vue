@@ -117,17 +117,54 @@ const { state: displaySettings } = useDisplaySettings();
 const unityEmbedBootstrapped = ref(false);
 
 // -- Split layout (chat left panel resizable) --
+// Default ratio: chat panel takes CHAT_DEFAULT_RATIO of the split container
+// width on first render. The ratio is also enforced on every window/container
+// resize (see rebalanceChatRatio below) — without that, maximizing the Tauri
+// window would leave the chat panel at its original absolute pixel width and
+// the ratio would silently drop to ~20%.
+const CHAT_DEFAULT_RATIO = 0.45;
 const splitContainerRef = ref<HTMLElement | null>(null);
 const { size: chatPanelWidth, isDragging: isSplitDragging, onMouseDown: onSplitDividerMouseDown } =
   useResizablePanel(splitContainerRef, {
     storageKey: "locus-chat-panel-width",
-    defaultSize: Math.round(window.innerWidth * 0.45),
+    defaultSize: Math.round(window.innerWidth * CHAT_DEFAULT_RATIO),
     minSize: 280,
     maxSize: (container) => {
       return Math.min(container.clientWidth * 0.62, container.clientWidth - 420);
     },
     direction: "horizontal",
   });
+
+// When the window grows (e.g. maximize) the chat panel width stays in absolute
+// pixels, so its ratio drops below CHAT_DEFAULT_RATIO. Snap it back to
+// CHAT_DEFAULT_RATIO × current container width in that case. Respects the
+// composable's min/max bounds so very narrow windows still cap correctly.
+// Persist the recomputed size so a maximized-then-restarted session starts
+// from the new (larger) absolute width instead of the old small value.
+function rebalanceChatRatio() {
+  const container = splitContainerRef.value;
+  if (!container) return;
+  const containerWidth = container.clientWidth;
+  if (containerWidth <= 0) return;
+  if (chatPanelWidth.value < containerWidth * CHAT_DEFAULT_RATIO) {
+    const target = Math.round(containerWidth * CHAT_DEFAULT_RATIO);
+    const maxAllowed = Math.min(containerWidth * 0.62, containerWidth - 420);
+    const newSize = Math.max(280, Math.min(maxAllowed, target));
+    chatPanelWidth.value = newSize;
+    try {
+      localStorage.setItem("locus-chat-panel-width", String(newSize));
+    } catch {
+      // ignore persistence failures (private mode, quota, etc.)
+    }
+  }
+}
+onMounted(() => {
+  rebalanceChatRatio();
+  window.addEventListener("resize", rebalanceChatRatio);
+});
+onUnmounted(() => {
+  window.removeEventListener("resize", rebalanceChatRatio);
+});
 const unityEmbedBootstrapError = ref<string | null>(null);
 const KNOWLEDGE_RUNTIME_LOADING_OPERATION = "knowledgeEmbeddingRuntimeLoading";
 const KNOWLEDGE_RUNTIME_STARTUP_POLL_COUNT = 16;
