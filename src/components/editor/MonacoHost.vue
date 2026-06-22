@@ -65,6 +65,15 @@ let cachedSymbols: Set<string> | null = null;
 // See: https://github.com/microsoft/monaco-editor/issues/xxx
 let monacoProviderDisposables: monaco.IDisposable[] = [];
 
+// Tracks whether we've already hit the monaco-vscode-api 33.0.9 race where
+// `vscode.commands.executeCommand('editor.action.showReferences', ...)` throws
+// "Default api is not ready yet" because the localExtensionHost worker hasn't
+// published the default API by the time the user fires Shift+F12. The race is
+// stable on first use, the custom references widget is just as usable, and
+// we don't want to spam the console every time references are looked up —
+// warn once, debug thereafter.
+let showReferencesApiBroken = false;
+
 /** Convert LSP 0-based range to Monaco 1-based range */
 function lspRangeToMonaco(r: {
   start: { line: number; character: number };
@@ -975,10 +984,21 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
               // vscode API not ready in monaco-vscode-api 33.0.9's
               // extension host (a known race: localExtensionHost worker
               // may not have published the default API by the time the
-              // user fires Shift+F12). Fall back to navigating the
-              // current file to each reference in a hover widget so the
-              // user still gets usable feedback.
-              console.warn(`[refCmd] showReferences unavailable, falling back to references widget:`, cmdErr);
+              // user fires Shift+F12). Fall back to a custom DOM widget
+              // so the user still gets usable feedback. Warn once per
+              // session, then quietly use the fallback — see the
+              // `showReferencesApiBroken` flag above.
+              if (!showReferencesApiBroken) {
+                showReferencesApiBroken = true;
+                console.warn(
+                  `[refCmd] showReferences unavailable in monaco-vscode-api 33.0.9 ` +
+                  `(extension host race). Using the custom references widget ` +
+                  `for this and all subsequent calls in this session:`,
+                  cmdErr,
+                );
+              } else {
+                console.debug(`[refCmd] showReferences unavailable, using fallback:`, cmdErr);
+              }
               showReferencesFallback(effectiveResource, effectivePosition, locations, id);
             }
           } catch (err) {
