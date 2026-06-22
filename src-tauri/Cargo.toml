@@ -27,8 +27,17 @@ incremental = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-opener = "2"
+# Pinned to match @tauri-apps/api (npm) exactly — Tauri's runtime check requires
+# the npm package and Rust crate to share the same major.minor. Without an
+# exact pin, `^2` lets Cargo resolve to 2.10.x while npm resolves to 2.11.x (or
+# vice-versa), which trips the "version mismatched Tauri packages" panic at
+# startup. The highest 2.11.x available on BOTH registries is 2.11.1 (npm
+# @tauri-apps/api tops out at 2.11.1). Bump together with @tauri-apps/api when
+# updating.
+tauri = { version = "=2.11.1", features = ["tray-icon"] }
+# Plugin crate, must match @tauri-apps/plugin-opener (npm). Pinned to current
+# Cargo.lock resolution (2.5.3) so the two ecosystems stay in lock-step.
+tauri-plugin-opener = "=2.5.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
