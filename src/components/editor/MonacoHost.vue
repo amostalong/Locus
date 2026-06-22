@@ -69,18 +69,18 @@ let monacoProviderDisposables: monaco.IDisposable[] = [];
 // `vscode.commands.executeCommand('editor.action.showReferences', ...)` throws
 // "Default api is not ready yet" because the localExtensionHost worker hasn't
 // published the default API by the time the user fires Shift+F12. The race is
-// stable on first use, the custom references widget is just as usable, and
-// we don't want to spam the console every time references are looked up —
-// warn once, debug thereafter.
+// stable on first use; we fall back to F12-style "navigate to first reference"
+// rather than rendering a custom peek widget (which would diverge from F12's
+// UI shape — see `navigateToLocation`). Warn once, debug thereafter, so the
+// console isn't spammed.
 let showReferencesApiBroken = false;
 
-// Diagnostic flag for the references flow. Shift+F12 currently fails
-// silently in several ways (LSP returns empty, editor is null mid-flow,
-// widget rendered but invisible behind another stacking context, click
-// fires but openFile hangs). Each of these now logs at least once via
-// the [refDiag] tag so we can pinpoint which one is biting without
-// re-reading the code. Mirror of `showReferencesApiBroken` — same
-// warn-once-then-debug pattern.
+// Diagnostic flag for the references flow. Several silent-bail cases
+// are still possible (LSP returns empty array, editor is null mid-flow,
+// openFile returns falsy and cursor lands on the OLD model). Each of
+// these now logs at least once via the [refDiag] tag so we can pinpoint
+// which one is biting. Same warn-once-then-debug pattern as
+// `showReferencesApiBroken`.
 let referencesDiagWarned = false;
 function refDiag(level: "warn" | "debug", ...args: unknown[]): void {
   if (level === "warn" && !referencesDiagWarned) {
@@ -105,320 +105,50 @@ function lspRangeToMonaco(r: {
 }
 
 /**
- * Lightweight peek-references widget shown when the monaco-vscode
- * extension host hasn't published the default `vscode` API yet
- * (`Default api is not ready yet`). Renders an HTML list of locations
- * anchored to the cursor; clicking a row navigates the editor there.
+ * Navigate the editor to a single LSP location, mirroring what F12 does.
+ * In-workspace targets switch tabs via `editorStore.openFile` and place
+ * the cursor; out-of-workspace targets (e.g. `$metadata$` decompilations
+ * that live in `%TEMP%`) open a read-only virtual tab.
+ *
+ * Used by the references command as the fall-through for the
+ * monaco-vscode-api 33.0.9 "Default api is not ready" race on
+ * `editor.action.showReferences` — instead of opening a peek widget
+ * (which would be a different UI shape than F12), we go straight to
+ * the first location, matching F12's "press → cursor moves" behavior.
  */
-function showReferencesFallback(
-  _originUri: monaco.Uri,
-  originPos: monaco.Position,
-  locations: Array<{ uri: monaco.Uri; range: monaco.IRange }>,
-  sourceId: string,
-): void {
-  refDiag("debug", `enter sourceId=${sourceId} originPos=${originPos.lineNumber}:${originPos.column} locations=${locations.length}`);
+async function navigateToLocation(
+  loc: { uri: monaco.Uri; range: monaco.IRange },
+): Promise<void> {
   if (!editor) {
-    refDiag("warn", "editor is null, bailing before render — references widget will not appear", {
-      sourceId,
-      originPos: { line: originPos.lineNumber, col: originPos.column },
-      locations: locations.length,
-    });
+    refDiag("warn", "navigateToLocation called with no editor", { uri: loc.uri.fsPath });
     return;
   }
-  if (locations.length === 0) {
-    refDiag("warn", "locations is empty, bailing before render — Roslyn returned no references", {
-      sourceId,
-      originPos: { line: originPos.lineNumber, col: originPos.column },
-    });
-    return;
-  }
-
-  // Group locations by file path so a project with 30 refs across 5
-  // files shows as 5 file headers + 30 line rows (vscode-style peek
-  // view). Empty `locations` short-circuits above — there's nothing
-  // useful to render and an empty overlay would just look broken.
-  const groups = new Map<string, Array<{ uri: monaco.Uri; range: monaco.IRange }>>();
-  for (const loc of locations) {
-    const key = loc.uri.fsPath;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(loc);
-  }
-  // Sort groups by file path so the order is stable across renders
-  // (Roslyn doesn't promise an order on the wire).
-  const sortedGroups = Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-
-  const overlay = document.createElement("div");
-  overlay.className = "locus-refs-overlay";
-  // position:fixed with a high z-index keeps the widget on top of the
-  // editor's stacking context (we deliberately avoid IContentWidget
-  // here — monaco-vscode-api 33.0.9's ConfiguredStandaloneEditor
-  // hits a `_widgets[getId()]` lookup miss in setWidgetPosition
-  // that throws `Cannot read properties of undefined (reading
-  // 'setPosition')`).
-  overlay.style.cssText = [
-    "position:fixed",
-    "z-index:9999",
-    "min-width:380px",
-    "max-width:560px",
-    "max-height:340px",
-    "overflow:hidden",
-    "display:flex",
-    "flex-direction:column",
-    "background:var(--vscode-editorWidget-background,#252526)",
-    "color:var(--vscode-editorWidget-foreground,#cccccc)",
-    "border:1px solid var(--vscode-editorWidget-border,#454545)",
-    "border-radius:4px",
-    "box-shadow:0 4px 16px rgba(0,0,0,0.5)",
-    "font-family:var(--vscode-font-family,'Segoe UI',Tahoma,sans-serif)",
-    "font-size:12px",
-    "line-height:1.5",
-  ].join(";");
-
-  // ── Header: title + close button + count badge ──────────────────
-  const header = document.createElement("div");
-  header.style.cssText = [
-    "display:flex",
-    "align-items:center",
-    "justify-content:space-between",
-    "padding:6px 10px",
-    "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
-    "border-bottom:1px solid var(--vscode-editorWidget-border,#454545)",
-    "flex-shrink:0",
-  ].join(";");
-  const title = document.createElement("span");
-  title.textContent = `${locations.length} reference${locations.length === 1 ? "" : "s"} · ${sourceId}`;
-  title.style.cssText = "font-weight:600;color:var(--vscode-editorWidget-foreground,#cccccc);";
-  header.appendChild(title);
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "×";
-  closeBtn.title = "Close (Esc)";
-  closeBtn.setAttribute("aria-label", "Close references");
-  closeBtn.style.cssText = [
-    "background:transparent",
-    "border:0",
-    "color:var(--vscode-icon-foreground,#cccccc)",
-    "font-size:18px",
-    "line-height:1",
-    "cursor:pointer",
-    "padding:0 4px",
-    "border-radius:2px",
-  ].join(";");
-  closeBtn.addEventListener("click", cleanup);
-  header.appendChild(closeBtn);
-  overlay.appendChild(header);
-
-  // ── Body: scrollable list of file groups + line rows ─────────────
-  const body = document.createElement("div");
-  body.style.cssText = "overflow-y:auto;flex:1 1 auto;";
-  overlay.appendChild(body);
-
-  const navigateTo = (loc: { uri: monaco.Uri; range: monaco.IRange }) => {
-    const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
-    const target = loc.uri.fsPath.replace(/\\/g, "/");
-    refDiag("debug", `row clicked uri=${loc.uri.fsPath} range=${loc.range.startLineNumber}:${loc.range.startColumn} inWorkspace=${target.toLowerCase().startsWith(root.toLowerCase())}`);
-    if (target.toLowerCase().startsWith(root.toLowerCase())) {
-      const rel = target.slice(root.length + 1);
-      editorStore.openFile(rel).then((opened) => {
-        refDiag("debug", `openFile resolved rel=${rel} opened=${!!opened}`);
-        if (!opened) {
-          refDiag("warn", "openFile returned falsy — editor.setPosition will land on the OLD model, not the target file", {
-            rel,
-            target: { line: loc.range.startLineNumber, col: loc.range.startColumn },
-          });
-        }
-        editor?.setPosition({
-          lineNumber: loc.range.startLineNumber,
-          column: loc.range.startColumn,
-        });
-        editor?.revealPositionInCenter({
-          lineNumber: loc.range.startLineNumber,
-          column: loc.range.startColumn,
-        });
-        editor?.focus();
-      }).catch((e) => console.warn("[refCmd] openFile failed:", e));
-    } else {
-      // Reference points outside the workspace (e.g. a Roslyn
-      // decompilation in %TEMP%). Open as a read-only virtual tab.
-      let m = monaco.editor.getModel(loc.uri);
-      if (!m) m = monaco.editor.createModel("", "csharp", loc.uri);
-      const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
-      editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
-      editor?.setPosition({
-        lineNumber: loc.range.startLineNumber,
-        column: loc.range.startColumn,
-      });
-    }
-  };
-
-  for (const [path, locs] of sortedGroups) {
-    const group = document.createElement("div");
-    group.className = "locus-refs-group";
-    group.style.cssText = "padding:4px 0 2px 0;";
-
-    // File header row — non-clickable but visually anchors the group.
-    const fileHeader = document.createElement("div");
-    fileHeader.title = path;
-    fileHeader.style.cssText = [
-      "padding:2px 10px",
-      "color:var(--vscode-editorWidget-foreground,#cccccc)",
-      "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
-      "font-weight:600",
-      "white-space:nowrap",
-      "overflow:hidden",
-      "text-overflow:ellipsis",
-      "display:flex",
-      "align-items:center",
-      "gap:6px",
-    ].join(";");
-    const fileName = path.split(/[\\/]/).pop() ?? path;
-    const fileLabel = document.createElement("span");
-    fileLabel.textContent = fileName;
-    fileHeader.appendChild(fileLabel);
-    const fileRel = document.createElement("span");
-    const rel = path
-      .replace(/\\/g, "/")
-      .replace(rootPath(), "")
-      .replace(/^\/+/, "");
-    fileRel.textContent = rel && rel !== fileName ? rel : "";
-    fileRel.style.cssText = "color:var(--vscode-descriptionForeground,#888);font-weight:400;font-size:11px;";
-    fileHeader.appendChild(fileRel);
-    const count = document.createElement("span");
-    count.textContent = `${locs.length}`;
-    count.style.cssText = [
-      "margin-left:auto",
-      "background:var(--vscode-badge-background,#4d4d4d)",
-      "color:var(--vscode-badge-foreground,#ffffff)",
-      "border-radius:8px",
-      "padding:1px 7px",
-      "font-size:10px",
-      "font-weight:600",
-    ].join(";");
-    fileHeader.appendChild(count);
-    group.appendChild(fileHeader);
-
-    for (const loc of locs) {
-      const row = document.createElement("div");
-      row.className = "locus-refs-row";
-      row.title = `${path}:${loc.range.startLineNumber}:${loc.range.startColumn}`;
-      row.style.cssText = [
-        "padding:2px 10px 2px 28px",
-        "cursor:pointer",
-        "color:var(--vscode-editorWidget-foreground,#cccccc)",
-        "display:flex",
-        "align-items:baseline",
-        "gap:8px",
-        "user-select:none",
-      ].join(";");
-      const lineLabel = document.createElement("span");
-      lineLabel.textContent = `L${loc.range.startLineNumber}:${loc.range.startColumn}`;
-      lineLabel.style.cssText = [
-        "color:var(--vscode-editorLineNumber-foreground,#858585)",
-        "font-variant-numeric:tabular-nums",
-        "min-width:48px",
-        "text-align:right",
-        "flex-shrink:0",
-      ].join(";");
-      row.appendChild(lineLabel);
-      const preview = document.createElement("span");
-      preview.textContent = previewLineFor(loc);
-      preview.style.cssText = [
-        "overflow:hidden",
-        "text-overflow:ellipsis",
-        "white-space:nowrap",
-        "flex:1 1 auto",
-        "color:var(--vscode-editorWidget-foreground,#cccccc)",
-      ].join(";");
-      row.appendChild(preview);
-      const onHover = () => { row.style.background = "var(--vscode-list-hoverBackground,#2a2d2e)"; };
-      const onLeave = () => { row.style.background = ""; };
-      row.addEventListener("mouseenter", onHover);
-      row.addEventListener("mouseleave", onLeave);
-      row.addEventListener("click", () => { navigateTo(loc); cleanup(); });
-      group.appendChild(row);
-    }
-    body.appendChild(group);
-  }
-
-  // ── Footer: hint about keyboard nav (small, dim) ─────────────
-  const footer = document.createElement("div");
-  footer.style.cssText = [
-    "padding:4px 10px",
-    "border-top:1px solid var(--vscode-editorWidget-border,#454545)",
-    "background:var(--vscode-editorWidget-header-background,#2d2d2d)",
-    "color:var(--vscode-descriptionForeground,#888)",
-    "font-size:11px",
-    "flex-shrink:0",
-  ].join(";");
-  footer.textContent = "Click to navigate · Esc to dismiss";
-  overlay.appendChild(footer);
-
-  // ── Position: cursor-line, viewport coords ─────────────────────
-  let top = 80;
-  let left = 80;
-  try {
-    const editorCoords = editor.getScrolledVisiblePosition(originPos);
-    if (editorCoords) {
-      const editorRect = editor.getContainerDomNode?.()?.getBoundingClientRect();
-      if (editorRect) {
-        top = editorRect.top + editorCoords.top + editorCoords.height + 4;
-        left = editorRect.left + editorCoords.left;
-      }
-    }
-  } catch {
-    // fallback top/left is fine
-  }
-  // Keep the overlay inside the viewport — anchor right side if it
-  // would overflow, and never let it clip out the top edge.
-  const overlayWidth = 460;
-  const maxLeft = window.innerWidth - overlayWidth - 16;
-  if (left > maxLeft) left = Math.max(16, maxLeft);
-  overlay.style.top = `${Math.max(top, 16)}px`;
-  overlay.style.left = `${Math.max(left, 16)}px`;
-  document.body.appendChild(overlay);
-  refDiag("debug", `rendered overlay at top=${overlay.style.top} left=${overlay.style.left} groups=${sortedGroups.length} rows=${locations.length} sourceId=${sourceId}`);
-
-  // ── Esc + outside-click dismiss ────────────────────────────────
-  function cleanup() {
-    overlay.remove();
-    document.removeEventListener("mousedown", dismiss, true);
-    document.removeEventListener("keydown", onKey, true);
-  }
-  function dismiss(ev: MouseEvent) {
-    if (!overlay.contains(ev.target as Node)) cleanup();
-  }
-  function onKey(ev: KeyboardEvent) {
-    if (ev.key === "Escape") {
-      ev.stopPropagation();
-      cleanup();
-    }
-  }
-  setTimeout(() => {
-    document.addEventListener("mousedown", dismiss, true);
-    document.addEventListener("keydown", onKey, true);
-  }, 0);
-
-  // Pulls a single-line preview from the editor model that owns the
-  // reference's URI. We try the in-memory model first (cheap, no
-  // IPC) and fall back to a disk read if the file isn't open. The
-  // preview is best-effort: a missing file just shows the location.
-  function previewLineFor(loc: { uri: monaco.Uri; range: monaco.IRange }): string {
+  const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const target = loc.uri.fsPath.replace(/\\/g, "/");
+  if (target.toLowerCase().startsWith(root.toLowerCase())) {
+    const rel = target.slice(root.length + 1);
     try {
-      const m = monaco.editor.getModel(loc.uri);
-      if (m) {
-        const text = m.getLineContent(loc.range.startLineNumber).trim();
-        if (text) return truncate(text, 60);
+      const opened = await editorStore.openFile(rel);
+      refDiag("debug", `navigateToLocation openFile rel=${rel} opened=${!!opened}`);
+      if (!opened) {
+        refDiag("warn", "navigateToLocation openFile returned falsy — setPosition will land on the OLD model", { rel });
+        return;
       }
-    } catch {
-      // ignore
+      editor.setPosition({ lineNumber: loc.range.startLineNumber, column: loc.range.startColumn });
+      editor.revealPositionInCenter({ lineNumber: loc.range.startLineNumber, column: loc.range.startColumn });
+      editor.focus();
+    } catch (e) {
+      console.warn("[refCmd] openFile failed:", e);
     }
-    // Fallback: a static stub so the row still shows something useful.
-    return truncate(loc.uri.fsPath.replace(/.*[\\/]/, ""), 60);
-  }
-  function rootPath(): string {
-    return props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
-  }
-  function truncate(s: string, n: number): string {
-    return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  } else {
+    // Reference points outside the workspace (e.g. a Roslyn
+    // decompilation in %TEMP%). Open as a read-only virtual tab.
+    let m = monaco.editor.getModel(loc.uri);
+    if (!m) m = monaco.editor.createModel("", "csharp", loc.uri);
+    const fileName = loc.uri.path.split("/").pop() ?? loc.uri.fsPath;
+    editorStore.openVirtualFile(loc.uri.toString(), fileName, m);
+    editor.setPosition({ lineNumber: loc.range.startLineNumber, column: loc.range.startColumn });
+    editor.revealPositionInCenter({ lineNumber: loc.range.startLineNumber, column: loc.range.startColumn });
   }
 }
 
@@ -1034,22 +764,24 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
               // vscode API not ready in monaco-vscode-api 33.0.9's
               // extension host (a known race: localExtensionHost worker
               // may not have published the default API by the time the
-              // user fires Shift+F12). Fall back to a custom DOM widget
-              // so the user still gets usable feedback. Warn once per
-              // session, then quietly use the fallback — see the
-              // `showReferencesApiBroken` flag above.
+              // user fires Shift+F12). The native peek view would be the
+              // "right" rendering here, but we deliberately do not open
+              // a custom widget — that would diverge from F12's UI shape.
+              // Instead, navigate to the first reference just like F12
+              // would. Warn once per session, then quietly do this.
               if (!showReferencesApiBroken) {
                 showReferencesApiBroken = true;
                 console.warn(
                   `[refCmd] showReferences unavailable in monaco-vscode-api 33.0.9 ` +
-                  `(extension host race). Using the custom references widget ` +
-                  `for this and all subsequent calls in this session:`,
+                  `(extension host race). Navigating to the first reference ` +
+                  `as a fallback for this and all subsequent calls in this session:`,
                   cmdErr,
                 );
               } else {
-                console.debug(`[refCmd] showReferences unavailable, using fallback:`, cmdErr);
+                console.debug(`[refCmd] showReferences unavailable, navigating to first:`, cmdErr);
               }
-              showReferencesFallback(effectiveResource, effectivePosition, locations, id);
+              refDiag("debug", `fallback navigation total=${locations.length} first=${locations[0]?.uri.fsPath}:${locations[0]?.range.startLineNumber}:${locations[0]?.range.startColumn}`);
+              await navigateToLocation(locations[0]);
             }
           } catch (err) {
             console.warn(`[refCmd] ${id} failed:`, err);
