@@ -30,8 +30,12 @@ interface PendingChatPrefill extends ChatPrefillOptions {
 }
 
 export const useUiStore = defineStore("ui", () => {
+// Union of local ("editor") + upstream ("chat | collab | knowledge | asset | views | plugins | agent | settings")
+  // Local added "editor" for Monaco editor tab; upstream kept the rest unchanged.
   const activeTab = ref<"chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
-  const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
+  // Union of local (knowledge) + upstream (hotReload | unityConnection | testing).
+  // Upstream removed the standalone Knowledge tab in SettingsView; local code may still reference it.
+  const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
   const alwaysOnTop = ref(false);
   const isMaximized = ref(false);
   const isWindowResizing = ref(false);
