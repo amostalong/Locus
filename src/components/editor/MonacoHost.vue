@@ -74,6 +74,23 @@ let monacoProviderDisposables: monaco.IDisposable[] = [];
 // warn once, debug thereafter.
 let showReferencesApiBroken = false;
 
+// Diagnostic flag for the references flow. Shift+F12 currently fails
+// silently in several ways (LSP returns empty, editor is null mid-flow,
+// widget rendered but invisible behind another stacking context, click
+// fires but openFile hangs). Each of these now logs at least once via
+// the [refDiag] tag so we can pinpoint which one is biting without
+// re-reading the code. Mirror of `showReferencesApiBroken` — same
+// warn-once-then-debug pattern.
+let referencesDiagWarned = false;
+function refDiag(level: "warn" | "debug", ...args: unknown[]): void {
+  if (level === "warn" && !referencesDiagWarned) {
+    referencesDiagWarned = true;
+    console.warn("[refDiag] (further [refDiag] messages will be at debug level)", ...args);
+  } else {
+    console.debug("[refDiag]", ...args);
+  }
+}
+
 /** Convert LSP 0-based range to Monaco 1-based range */
 function lspRangeToMonaco(r: {
   start: { line: number; character: number };
@@ -99,8 +116,22 @@ function showReferencesFallback(
   locations: Array<{ uri: monaco.Uri; range: monaco.IRange }>,
   sourceId: string,
 ): void {
-  if (!editor) return;
-  if (locations.length === 0) return;
+  refDiag("debug", `enter sourceId=${sourceId} originPos=${originPos.lineNumber}:${originPos.column} locations=${locations.length}`);
+  if (!editor) {
+    refDiag("warn", "editor is null, bailing before render — references widget will not appear", {
+      sourceId,
+      originPos: { line: originPos.lineNumber, col: originPos.column },
+      locations: locations.length,
+    });
+    return;
+  }
+  if (locations.length === 0) {
+    refDiag("warn", "locations is empty, bailing before render — Roslyn returned no references", {
+      sourceId,
+      originPos: { line: originPos.lineNumber, col: originPos.column },
+    });
+    return;
+  }
 
   // Group locations by file path so a project with 30 refs across 5
   // files shows as 5 file headers + 30 line rows (vscode-style peek
@@ -184,9 +215,17 @@ function showReferencesFallback(
   const navigateTo = (loc: { uri: monaco.Uri; range: monaco.IRange }) => {
     const root = props.workingDir.replace(/\\/g, "/").replace(/\/+$/, "");
     const target = loc.uri.fsPath.replace(/\\/g, "/");
+    refDiag("debug", `row clicked uri=${loc.uri.fsPath} range=${loc.range.startLineNumber}:${loc.range.startColumn} inWorkspace=${target.toLowerCase().startsWith(root.toLowerCase())}`);
     if (target.toLowerCase().startsWith(root.toLowerCase())) {
       const rel = target.slice(root.length + 1);
-      editorStore.openFile(rel).then(() => {
+      editorStore.openFile(rel).then((opened) => {
+        refDiag("debug", `openFile resolved rel=${rel} opened=${!!opened}`);
+        if (!opened) {
+          refDiag("warn", "openFile returned falsy — editor.setPosition will land on the OLD model, not the target file", {
+            rel,
+            target: { line: loc.range.startLineNumber, col: loc.range.startColumn },
+          });
+        }
         editor?.setPosition({
           lineNumber: loc.range.startLineNumber,
           column: loc.range.startColumn,
@@ -336,6 +375,7 @@ function showReferencesFallback(
   overlay.style.top = `${Math.max(top, 16)}px`;
   overlay.style.left = `${Math.max(left, 16)}px`;
   document.body.appendChild(overlay);
+  refDiag("debug", `rendered overlay at top=${overlay.style.top} left=${overlay.style.left} groups=${sortedGroups.length} rows=${locations.length} sourceId=${sourceId}`);
 
   // ── Esc + outside-click dismiss ────────────────────────────────
   function cleanup() {
@@ -966,7 +1006,17 @@ async function ensureCsharpClient(workspaceDir: string): Promise<void> {
               },
               context: { includeDeclaration: false },
             });
-            if (!Array.isArray(refs) || refs.length === 0) return;
+            if (!Array.isArray(refs) || refs.length === 0) {
+              refDiag("warn", "LSP textDocument/references returned empty or non-array — Shift+F12 will appear to do nothing", {
+                sourceId: id,
+                isArray: Array.isArray(refs),
+                length: Array.isArray(refs) ? refs.length : "n/a",
+                sample: Array.isArray(refs) && refs[0] ? JSON.stringify(refs[0]).slice(0, 200) : "n/a",
+                uri: effectiveResource.toString(),
+                pos: `${effectivePosition.lineNumber}:${effectivePosition.column}`,
+              });
+              return;
+            }
             const locations = refs.map((r: any) => ({
               uri: monaco.Uri.parse(r.uri),
               range: lspRangeToMonaco(r.range),
