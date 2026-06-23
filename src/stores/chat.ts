@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, shallowRef, computed } from "vue";
 import { defineStore } from "pinia";
 import { useModelStore } from "./model";
 import { useAgentStore } from "./agent";
@@ -298,9 +298,12 @@ export const useChatStore = defineStore("chat", () => {
   const activeSessionId = ref<string | null>(null);
   const activeSessionType = ref<string | null>(null);
   const messages = ref<ChatMessage[]>([]);
-  const streamingText = ref("");
-  const rawStreamText = ref("");
-  const streamingThinking = ref("");
+  // Streaming text refs are primitive strings — use shallowRef to skip deep reactive
+  // proxy setup. Subscribers that want fine-grained updates (e.g. per-character) should
+  // debounce themselves; ChatView debounces to STREAMING_RENDER_THROTTLE_MS (80ms) today.
+  const streamingText = shallowRef("");
+  const rawStreamText = shallowRef("");
+  const streamingThinking = shallowRef("");
   const streamSequence = ref(0);
   const streamingTextOrder = ref(0);
   const thinkingOrder = ref(0);

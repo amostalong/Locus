@@ -1239,10 +1239,23 @@ async function refreshUnitySemanticState() {
 function scheduleUnitySemanticPoll(delayMs = UNITY_SEMANTIC_STATUS_POLL_MS) {
   clearUnitySemanticPoll();
   if (unitySemanticDisposed) return;
+  // Skip the IPC roundtrip while the tab is hidden — when the user returns, the
+  // `visibilitychange` listener mounted in onMounted will call scheduleUnitySemanticPoll()
+  // again to resume.
+  if (typeof document !== "undefined" && document.hidden) return;
   unitySemanticPollTimer = globalThis.setTimeout(() => {
     unitySemanticPollTimer = null;
     void refreshUnitySemanticState().finally(() => scheduleUnitySemanticPoll());
   }, delayMs);
+}
+
+function onVisibilityChange() {
+  if (typeof document === "undefined") return;
+  if (document.hidden) return;
+  // Tab just became visible again — resume polling if it was paused.
+  if (unitySemanticDisposed) return;
+  if (unitySemanticPollTimer !== null) return;
+  scheduleUnitySemanticPoll();
 }
 
 async function refreshCsharpLspStatus() {
@@ -1697,6 +1710,7 @@ function onDocumentKeydown(event: KeyboardEvent) {
 onMounted(() => {
   document.addEventListener("click", closePopover);
   document.addEventListener("keydown", onDocumentKeydown);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   csharpLspDisposed = false;
   hotReloadDisposed = false;
   unitySemanticDisposed = false;
@@ -1755,6 +1769,7 @@ watch(
 onUnmounted(() => {
   document.removeEventListener("click", closePopover);
   document.removeEventListener("keydown", onDocumentKeydown);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   csharpLspDisposed = true;
   hotReloadDisposed = true;
   unitySemanticDisposed = true;

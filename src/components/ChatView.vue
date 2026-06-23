@@ -71,6 +71,7 @@ import { canOpenInEditor } from "../composables/useHideMeta";
 import { useDiffProgress } from "../composables/useDiffProgress";
 import { acquireSelectionLock } from "../composables/useSelectionLock";
 import { matchesShortcut, useKeyboardShortcuts } from "../composables/useKeyboardShortcuts";
+import { buildActiveToolCallsFingerprint } from "../composables/activeToolCallsFingerprint";
 import {
   getChatSubmitModifierLabel,
   useChatInputSettings,
@@ -231,6 +232,16 @@ function hasRunningUnityRecompile(calls: ToolCallDisplay[] | undefined): boolean
 }
 
 const unityRecompileActive = computed(() => hasRunningUnityRecompile(props.activeToolCalls));
+
+// Fingerprint covering all activeToolCalls changes that can affect outer viewport layout:
+// - length (new tool added/removed)
+// - per-tool status (running → done may collapse tool block)
+// - nested tool status (parent's display height depends on nested status)
+// Excludes deep output/arguments/progress changes — those scroll inside the tool block,
+// not the outer viewport. Implementation lives in a composable so it can be unit-tested.
+const activeToolCallsFingerprint = computed(() =>
+  buildActiveToolCallsFingerprint(props.activeToolCalls),
+);
 
 const emit = defineEmits<{
   send: [text: string, images: ImageAttachment[], assetRefs: AssetRefAttachment[], overrides?: { displayText?: string; mode?: string; userIntent?: UserIntentMeta | null }];
@@ -2242,8 +2253,12 @@ watch(
   },
   { flush: "post" },
 );
-watch(() => displayedStreamingText.value, () => reconcileViewport());
-watch(() => props.activeToolCalls, () => reconcileViewport(), { deep: true });
+watch(() => displayedStreamingText.value, () => reconcileViewport(), { flush: "post" });
+// Replaces the previous `watch(() => props.activeToolCalls, ..., { deep: true })`.
+// Fingerprint subscribes only to length + per-item status + nested-tool status
+// (all shallow getters). Deep output/arguments/progress mutations no longer trigger
+// a traverse of every tool call on every tick.
+watch(activeToolCallsFingerprint, () => reconcileViewport(), { flush: "post" });
 watch(
   () => props.isStreaming,
   (nextStreaming, previousStreaming) => {

@@ -231,4 +231,28 @@ describe("chat status indicators", () => {
     expect(indicators).toContain('const hotReloadBusy = computed');
     expect(indicators).toContain('if (hotReloadBusy.value) return "accent";');
   });
+
+  it("skips the Unity semantic poll while the tab is hidden and resumes on visibilitychange", () => {
+    const indicators = read("src/components/chat/ChatStatusIndicators.vue");
+
+    // The schedule function must early-return when document.hidden is true.
+    expect(indicators).toContain("function scheduleUnitySemanticPoll");
+    expect(indicators).toContain("typeof document !== \"undefined\" && document.hidden");
+    // The early-return must be inside the poll body — verify by structure:
+    // the function clears any prior timer before consulting document.hidden.
+    expect(indicators).toMatch(
+      /function scheduleUnitySemanticPoll[\s\S]*clearUnitySemanticPoll\(\)[\s\S]*document\.hidden/,
+    );
+
+    // A visibilitychange handler reschedules when the tab becomes visible.
+    expect(indicators).toContain("function onVisibilityChange");
+    expect(indicators).toContain('document.addEventListener("visibilitychange", onVisibilityChange)');
+    expect(indicators).toContain('document.removeEventListener("visibilitychange", onVisibilityChange)');
+
+    // No setTimeout should be scheduled when document.hidden is true — the
+    // function returns before the `setTimeout` call.
+    expect(indicators).toMatch(
+      /if \(typeof document !== "undefined" && document\.hidden\) return;[\s\S]*\n\s*unitySemanticPollTimer = globalThis\.setTimeout/,
+    );
+  });
 });
