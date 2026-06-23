@@ -15,7 +15,9 @@ import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import ExtensionHostWorker from "@codingame/monaco-vscode-api/workers/extensionHost.worker?worker";
 import TextMateWorker from "@codingame/monaco-vscode-textmate-service-override/worker?worker";
 
-import { initialize as initVscodeServices } from "@codingame/monaco-vscode-api";
+import { initialize as initVscodeServices, getService } from "@codingame/monaco-vscode-api";
+import { IConfigurationService, IWorkbenchThemeService } from "@codingame/monaco-vscode-api";
+import { ConfigurationTarget } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration";
 import getConfigurationServiceOverride, {
   updateUserConfiguration,
 } from "@codingame/monaco-vscode-configuration-service-override";
@@ -137,13 +139,395 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
   };
 }
 
+/**
+ * Color overrides that make every C# type identifier stand out as pink.
+ *
+ * ## Why semantic-tokens only — no textMate rule?
+ *
+ * monaco-vscode's bundled C# TextMate grammar (from
+ * `@codingame/monaco-vscode-csharp-default-extension`) emits a single flat
+ * `type.cs` scope for EVERY C# type position, regardless of the underlying
+ * construct:
+ *
+ *   - user-declared class/struct/interface/enum/record/delegate names
+ *     (`class Player { ... }` → `Player` is `type.cs`)
+ *   - BCL class names (`String`, `Int32`, `Boolean`)
+ *   - C# built-in type-keywords (`string`, `int`, `bool`, `byte`, ...)
+ *   - generic type arguments (`List<Player>` → both `List` and `Player` are `type.cs`)
+ *   - return types (`void Foo()` → `void` is **also** `type.cs`!)
+ *
+ * The grammar doesn't distinguish `void` from `string` at the textMate layer,
+ * so a `textMateRules` entry for `type.cs` would pink `void` along with
+ * everything else — that's the bug we just fixed.
+ *
+ * Roslyn's LSP semantic tokens DO distinguish: `void` is emitted as token
+ * type `keyword`, while `string`/`Player`/`List<>` are `type` (with
+ * modifiers like `type.class`, `type.readonly`, ...). So we drive the pink
+ * purely from the semantic-token layer — `void` falls through to the
+ * default `keyword` color (kept by Monaco), and real type identifiers get
+ * the pink foreground.
+ *
+ * Trade-off: files that Roslyn hasn't analysed yet (typically <500ms after
+ * open, or very large files mid-analysis) won't show pink on types. We
+ * accept this — the previous "everything is pink" state was strictly worse.
+ *
+ * ## If you want to add textMate rules back later
+ *
+ * Use the [C2] diagnostic in applyVscodeColorTheme (monaco.editor.tokenize)
+ * to dump the actual scopes your grammar emits per token. The previous
+ * elaborate `entity.name.type.*.cs` / `keyword.other.type.cs` list was
+ * a TextMate-spec assumption (vanilla C# TextMate grammar uses those
+ * names), but monaco-vscode's bundled grammar doesn't emit them — keep
+ * them as a safety net only if your diagnostic shows them matching.
+ */
+const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
+
+function classTypeColorCustomizations(): Record<string, unknown> {
+  return {
+    "editor.semanticTokenColorCustomizations": {
+      rules: {
+        // Roslyn LSP standard semantic token types.
+        type: CLASS_TYPE_PINK,
+        // + modifier refinements (Roslyn often emits `type` + modifier,
+        // not a single `type.class` token type).
+        "type.class": CLASS_TYPE_PINK,
+        "type.struct": CLASS_TYPE_PINK,
+        "type.interface": CLASS_TYPE_PINK,
+        "type.enum": CLASS_TYPE_PINK,
+        "type.delegate": CLASS_TYPE_PINK,
+        "type.record": CLASS_TYPE_PINK,
+        "type.declaration": CLASS_TYPE_PINK,
+        "type.readonly": CLASS_TYPE_PINK,
+        // Some Roslyn/OmniSharp versions emit a bare `class` token type.
+        class: CLASS_TYPE_PINK,
+        // Typed instance variables (LSP gives `variable` + class modifier).
+        "variable.class": CLASS_TYPE_PINK,
+        "variable.declaration.class": CLASS_TYPE_PINK,
+        "variable:declaration": CLASS_TYPE_PINK,
+        "variable:readonly": CLASS_TYPE_PINK,
+        // Explicitly NOT pinking `keyword` — keeps `void` (and other C#
+        // keywords that the grammar mistakenly scopes as type at the
+        // textMate layer) at the default Monaco keyword color.
+      },
+    },
+  };
+}
+
+/**
+ * Pink-overlay Monaco themes — bypass the workbench theme service.
+ *
+ * ## Why defineTheme + setTheme (and not just configService on tokenColorCustomizations)?
+ *
+ *   monaco-vscode-api 33.0.9's workbenchThemeService.js listens on
+ *   tokenColorCustomizations changes, but the listener is installed only
+ *   AFTER extensionService.whenInstalledExtensionsRegistered() resolves.
+ *   Our configService.updateValue fires before that, so no listener picks
+ *   it up.
+ *
+ *   Even when the listener is finally installed, it only takes effect
+ *   when currentColorTheme is non-empty — and currentColorTheme only
+ *   stabilises after workbenchThemeService.initialize(), which never
+ *   happens in this branch because getThemeServiceOverride() is removed
+ *   (DI key collision with IStandaloneThemeService crashes Monarch).
+ *
+ *   Workaround: register a custom monaco theme whose rules include our
+ *   pink type rule, then setTheme() to it. This bypasses the workbench
+ *   layer entirely — the standalone theme service picks up our rules
+ *   synchronously.
+ *
+ * ## Why no `type.cs` token rule here either
+ *
+ *   Same reason as the user-config textMate rules: monaco-vscode's
+ *   bundled csharp grammar emits `type.cs` for `void` too, so a token
+ *   rule would pink `void` along with everything else. We intentionally
+ *   do NOT pink at the textMate layer here. Pink is driven exclusively
+ *   by the Roslyn semantic-token rules in classTypeColorCustomizations().
+ *
+ *   The broader TextMate-spec scopes below are no-ops against the
+ *   current grammar (per the [C2] diagnostic) but kept as a safety net
+ *   in case upstream changes the grammar or someone swaps in a richer
+ *   csharp TextMate grammar later.
+ */
+const PINK_THEME_NAME_DARK = "locus-dark-pink";
+const PINK_THEME_NAME_LIGHT = "locus-light-pink";
+
+const PINK_TOKEN_RULES = [
+  // === Broader TextMate-spec scopes (no-op against current csharp grammar,
+  //     kept as safety net for grammar swaps). DO NOT add `type.cs` or
+  //     `keyword.other.type.cs` here — those pin `void`. ===
+  { token: "entity.name.type.class.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.struct.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.interface.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.enum.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.delegate.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.record.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.cs", foreground: CLASS_TYPE_PINK },
+  { token: "entity.name.type.builtin.cs", foreground: CLASS_TYPE_PINK },
+  { token: "support.class.cs", foreground: CLASS_TYPE_PINK },
+  { token: "support.type.cs", foreground: CLASS_TYPE_PINK },
+  { token: "variable.other.object.cs", foreground: CLASS_TYPE_PINK },
+];
+
+function definePinkThemes(): void {
+  monaco.editor.defineTheme(PINK_THEME_NAME_DARK, {
+    base: "vs-dark",
+    inherit: true,
+    rules: PINK_TOKEN_RULES,
+    colors: peekViewColorCustomizations(true),
+  });
+  monaco.editor.defineTheme(PINK_THEME_NAME_LIGHT, {
+    base: "vs",
+    inherit: true,
+    rules: PINK_TOKEN_RULES,
+    colors: peekViewColorCustomizations(false),
+  });
+}
+
+function pickPinkThemeName(isDark: boolean): string {
+  return isDark ? PINK_THEME_NAME_DARK : PINK_THEME_NAME_LIGHT;
+}
+
 export async function applyVscodeColorTheme(): Promise<void> {
   const theme = resolveVscodeTheme();
   const isDark = theme === VSCODE_THEME_DARK;
-  await updateUserConfiguration(JSON.stringify({
-    "workbench.colorTheme": theme,
+
+  // === [classTypeColor] [D] Register pink-overlay Monaco themes ===
+  // 直接 monaco.editor.defineTheme + setTheme,绕开 workbenchThemeService
+  // (本分支已移除 getThemeServiceOverride,原因见下面 NOTE + enforceTokenThemeReady 注释).
+  // 这一步只是"先把粉色主题定义/激活好";最终生效由 ensureVisualTheme() 决定
+  // (那里是最后调用 monaco.editor.setTheme 的地方,顺序在 applyVscodeColorTheme 之后).
+  try {
+    definePinkThemes();
+    monaco.editor.setTheme(pickPinkThemeName(isDark));
+    console.log(
+      `[classTypeColor] [D] defined ${PINK_THEME_NAME_DARK} + ${PINK_THEME_NAME_LIGHT}, ` +
+      `activated ${pickPinkThemeName(isDark)} (workbench setting: ${theme})`,
+    );
+  } catch (err) {
+    console.error("[classTypeColor] [D] defineTheme/setTheme failed:", err);
+  }
+
+  // === [classTypeColor] [E] Hook onDidColorThemeChange (defensive) ===
+  // ⚠️ 本分支 workbenchThemeService override 已移除,getService(IWorkbenchThemeService)
+  //    通常会 throw — try/catch 兜底,失败也不影响 [D] 路径.
+  // 如果将来重新装上 getThemeServiceOverride,这段会自动生效,保住粉色覆盖不被覆盖.
+  try {
+    const wbThemeService = await getService(IWorkbenchThemeService);
+    wbThemeService.onDidColorThemeChange((activeTheme) => {
+      const activeId = activeTheme.id;
+      const wantName = pickPinkThemeName(isDark);
+      // workbench 主题 id 跟 monaco 主题名不同 (例如 "Dark Modern" vs vscode side).
+      // 我们在 [E] 检测到 activeId 是 vscode builtin 主题时, 强制 monaco.editor.setTheme 回到我们的粉色覆盖主题.
+      if (!activeId.startsWith("locus-")) {
+        // 工作区刚切到非粉色主题,马上拉回来
+        monaco.editor.setTheme(wantName);
+        console.log(
+          `[classTypeColor] [E] theme swap detected (${activeId} → ${wantName}), re-applied pink overlay`,
+        );
+      }
+    });
+  } catch (err) {
+    console.error("[classTypeColor] [E] theme change hook failed (expected when workbenchThemeService override is removed):", err);
+  }
+
+  // NOTE: main 分支 has the workbench theme service override removed (DI key
+  // collision with IStandaloneThemeService crashes the Monarch tokenizer).
+  // Pushing `workbench.colorTheme` here triggers a listener that calls
+  // monaco.editor.setTheme("Default Dark Modern") — without the workbench
+  // theme service, this falls back to "vs" (LIGHT) and breaks the color map.
+  // We therefore OMIT `workbench.colorTheme` from the config push.
+  // The other keys (workbench.colorCustomizations, editor.tokenColorCustomizations,
+  // editor.semanticTokenColorCustomizations) are safe to push and the tokenizer
+  // / semantic-token provider reads them regardless of the workbench theme service.
+  const customization = {
     "workbench.colorCustomizations": peekViewColorCustomizations(isDark),
-  }));
+    ...classTypeColorCustomizations(),
+  };
+
+  // === [classTypeColor] [A] Dump the JSON we are about to push to ConfigurationService ===
+  console.log(
+    "[classTypeColor] [A] pushing customization JSON:\n" +
+      JSON.stringify(customization, null, 2),
+  );
+
+  // [A1] Try updateUserConfiguration first (raw file write — used for persistence).
+  // This DOES NOT update the live in-memory ConfigurationService cache, so by
+  // itself it's not enough. The next call (configService.updateValue) is what
+  // actually makes the change take effect at runtime.
+  await updateUserConfiguration(JSON.stringify(customization));
+
+  // [A2] The proper way to make a configuration change visible to the live
+  // tokenizer / theme service / semantic-token provider is to call
+  // `IConfigurationService.updateValue(key, value, ConfigurationTarget.USER)`
+  // directly. This:
+  //   1. updates the in-memory configuration cache
+  //   2. persists to settings.json (same as updateUserConfiguration)
+  //   3. fires `onDidChangeConfiguration` — listeners (theme service,
+  //      tokenization registry, semantic-token provider) all re-read
+  //
+  // updateUserConfiguration ALONE is broken in monaco-vscode-api 33.0.9's
+  // browser ConfigurationService: it writes the file but never notifies
+  // the live service to re-read, so inspect() returns undefined for the
+  // pushed keys and no consumer ever sees the change.
+  try {
+    const configService = await getService(IConfigurationService);
+    for (const [key, value] of Object.entries(customization)) {
+      await configService.updateValue(key, value, ConfigurationTarget.USER);
+    }
+    console.log(
+      `[classTypeColor] [A2] configService.updateValue × ${Object.keys(customization).length} key(s) → ConfigurationTarget.USER`
+    );
+  } catch (err) {
+    console.error("[classTypeColor] [A2] configService.updateValue failed:", err);
+  }
+
+  // === [classTypeColor] [B] Inspect ConfigurationService to confirm we actually stored it ===
+  // inspect() returns a class instance with getter properties (user, userLocal,
+  // application, default, memory, ...). The getters are NON-ENUMERABLE, so
+  // `JSON.stringify(inspectResult)` returns "{}" — that's what we saw in the
+  // first diagnostic pass and it was misleading. We must explicitly invoke
+  // each getter, then stringify the resolved values.
+  //
+  // What we're looking for:
+  //   - `user` or `userLocal` non-undefined  → ConfigurationService accepted
+  //     the key (it routed our updateUserConfiguration() push through)
+  //   - both undefined                       → ConfigurationService dropped
+  //     it (schema doesn't recognize the key, override filter rejected it, ...)
+  function formatInspect(label: string, insp: unknown): string {
+    if (insp === null || insp === undefined) {
+      return `${label}=<null/undefined>`;
+    }
+    // Resolve each well-known section by direct property access — this
+    // invokes the getter, returning the current value. We do NOT rely on
+    // JSON.stringify enumerating the inspect object's own keys.
+    const obj = insp as {
+      user?: unknown;
+      userLocal?: unknown;
+      application?: unknown;
+      workspace?: unknown;
+      default?: unknown;
+      memory?: unknown;
+    };
+    const sections = ["user", "userLocal", "application", "workspace", "default", "memory"];
+    const parts: string[] = [];
+    for (const sec of sections) {
+      const v = obj[sec as keyof typeof obj];
+      if (v === undefined) {
+        parts.push(`  ${sec.padEnd(11)}=<undefined>`);
+      } else {
+        let rendered: string;
+        try {
+          rendered = JSON.stringify(v, null, 2);
+        } catch (e) {
+          rendered = `<unstringifiable: ${String(e)}>`;
+        }
+        // Indent each line of the rendered value for legibility
+        rendered = rendered.replace(/\n/g, "\n              ");
+        parts.push(`  ${sec.padEnd(11)}=${rendered}`);
+      }
+    }
+    return `${label}:\n${parts.join("\n")}`;
+  }
+  try {
+    const configService = await getService(IConfigurationService);
+    const tccInspect = configService.inspect<unknown>(
+      "editor.tokenColorCustomizations",
+    );
+    const stccInspect = configService.inspect<unknown>(
+      "editor.semanticTokenColorCustomizations",
+    );
+    console.log(`[classTypeColor] [B] ${formatInspect("editor.tokenColorCustomizations", tccInspect)}`);
+    console.log(`[classTypeColor] [B] ${formatInspect("editor.semanticTokenColorCustomizations", stccInspect)}`);
+  } catch (err) {
+    console.error("[classTypeColor] [B] ConfigurationService inspect failed:", err);
+  }
+
+  // === [classTypeColor] [C] Tokenize a sample C# program and dump:
+  //   [C2] tokenize() Token[][] → every token's monaco token type (verify grammar scope names)
+  //   [C1] colorize() HTML       → every token's actual rendered color (verify the tokenColors chain end-to-end)
+  // Key thing to look at: token `string` / `Player` / `List<Player>`'s type
+  // string + rendered color.
+  const sampleLines = [
+    "class Player { void Foo(string s, List<Player> p) { var x = 1; } }",
+    'string s = "hello";',
+    "int n = 1;",
+    "AOT_Safearea foo;",
+  ];
+
+  // [C2] tokenize: see what the grammar actually gives us for token types
+  try {
+    for (const line of sampleLines) {
+      const tokens = monaco.editor.tokenize(line, "csharp");
+      console.log(`[classTypeColor] [C2] tokenize("${line}"):`);
+      for (const lineTokens of tokens) {
+        for (const t of lineTokens) {
+          const slice = line.substring(t.offset);
+          console.log(
+            `  offset=${t.offset.toString().padStart(3, " ")} type=${(t.type ?? "?").padEnd(40, " ")} text="${slice}"`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[classTypeColor] [C2] monaco.editor.tokenize failed:", err);
+  }
+
+  // [C1] colorize: see the actual rendered color per token (the final verdict
+  // on whether the tokenColors chain works)
+  try {
+    for (const line of sampleLines) {
+      const html = await monaco.editor.colorize(line, "csharp", { tabSize: 2 });
+      console.log(`[classTypeColor] [C1] colorize("${line}"):\n${html}`);
+    }
+  } catch (err) {
+    console.error("[classTypeColor] [C1] monaco.editor.colorize failed:", err);
+  }
+
+  // [C3] THE GROUND TRUTH: actually mount a <span class="mtk22"> in the DOM
+  // and read getComputedStyle(...).color. This tells us what the user ACTUALLY
+  // sees, not what monaco's colorize() string-reports. Critical for diagnosing
+  // whether `editor.tokenColorCustomizations` textMateRules are reaching the
+  // CSS that the browser applies. If `mtk22` is not pink here, the rule
+  // never made it into the theme's stylesheet.
+  try {
+    const probe = document.createElement("div");
+    probe.id = "locus-mtk22-probe";
+    probe.style.cssText = "position:absolute;left:-99999px;top:0;visibility:hidden;";
+    probe.innerHTML = `<span class="mtk22">Player</span>`;
+    document.body.appendChild(probe);
+    const span = probe.querySelector(".mtk22") as HTMLElement;
+    const computed = window.getComputedStyle(span);
+    const fg = computed.color;
+    const fontStyle = computed.fontStyle;
+    // Also enumerate all CSS rules in the document that mention mtk22 to see
+    // if our textMateRules rule was injected with our #FF69B4 foreground.
+    const matchingRules: string[] = [];
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        for (const rule of Array.from(sheet.cssRules ?? [])) {
+          const text = (rule as CSSRule).cssText ?? "";
+          if (text.includes("mtk22")) {
+            matchingRules.push(text);
+          }
+        }
+      } catch {
+        // Cross-origin sheet — skip
+      }
+    }
+    console.log(
+      `[classTypeColor] [C3] DOM ground truth for <span class="mtk22">: ` +
+        `color=${fg} fontStyle=${fontStyle}`,
+    );
+    console.log(
+      `[classTypeColor] [C3] matching CSS rules (${matchingRules.length}):\n` +
+        matchingRules.slice(0, 20).join("\n"),
+    );
+    document.body.removeChild(probe);
+  } catch (err) {
+    console.error("[classTypeColor] [C3] DOM probe failed:", err);
+  }
+
+  console.log("[classTypeColor] diagnostic complete");
 }
 
 function installWorkerEnvironment(): void {
@@ -197,13 +581,28 @@ function installEditorBackgroundFallback(isDark: boolean): void {
 export function ensureVisualTheme(): () => void {
   const isDark = document.documentElement.getAttribute("data-theme") !== "light";
   const standaloneName = isDark ? STANDALONE_THEME_DARK : STANDALONE_THEME_LIGHT;
+  // === [classTypeColor] [D-final] Define pink-overlay themes BEFORE the safety dance ===
+  // 必须先 define,后面的 enforceTokenThemeReady 通过 getColorTheme 验证时
+  // 才会看到 pink theme (而不是先看到 locus-stable-theme).
+  try {
+    definePinkThemes();
+  } catch (e) {
+    console.warn("[monaco] definePinkThemes skipped, falling back to standalone:", e);
+    monaco.editor.setTheme(standaloneName);
+  }
   // Drive standalone immediately — works even before vscode services init.
+  // 注意:enforceTokenThemeReady 内部会 setTheme 到 locus-stable-theme;
+  // 我们在它之后会用 setTheme(pinkName) 覆盖回来 — 粉色主题才是最终生效的 active theme.
   monaco.editor.setTheme(standaloneName);
   // Also force the standalone theme service's TokenTheme to be constructed
   // synchronously. In monaco-vscode-api 33.0.9, when TokenTheme is not yet
   // lazily constructed, MonarchModernTokensCollector crashes on
   // `this._theme.match(...)` because tokenTheme is undefined.
   enforceTokenThemeReady(isDark);
+  // === [classTypeColor] [D-final] Activate pink theme as the LAST setTheme call ===
+  // enforceTokenThemeReady 内部 setTheme 到 locus-stable-theme(只是为了让
+  // getColorTheme().tokenTheme 非空);这里强制覆盖到 pink,保证编辑器看到的是粉色覆盖.
+  monaco.editor.setTheme(pickPinkThemeName(isDark));
   // Inject a CSS fallback for the editor background. Without the theme
   // service override (see NOTE above), the standalone theme service
   // manages CSS variables synchronously, but the fallback ensures the
@@ -345,10 +744,13 @@ export function ensureMonacoVscodeServices(): Promise<void> {
     // theme service. If any listener reacts to the config change and calls
     // monaco.editor.setTheme("Default Dark Modern"), the standalone service
     // falls back to "vs" (LIGHT), breaking the color map and Monet's minimap
-    // tracker. We skip this call — the standalone theme + background CSS
-    // fallback provide adequate styling. Color customizations (peekView, etc.)
-    // are applied via the background fallback CSS instead.
-    // await applyVscodeColorTheme();
+    // tracker. We therefore call applyVscodeColorTheme() but the function
+    // itself OMITS `workbench.colorTheme` from the push — only the
+    // editor.tokenColorCustomizations / editor.semanticTokenColorCustomizations
+    // (read by the tokenizer / semantic-token provider, NOT by the workbench
+    // theme service) and the peekView workbench.colorCustomizations (a no-op
+    // without the workbench theme service) are written. Safe to call.
+    await applyVscodeColorTheme();
     // Apply the standalone theme and editor background CSS fallback.
     // NOTE: we intentionally do NOT use the workbench theme service
     // (getThemeServiceOverride) because it shares the same DI key as
