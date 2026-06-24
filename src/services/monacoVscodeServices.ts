@@ -181,6 +181,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
  * them as a safety net only if your diagnostic shows them matching.
  */
 const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
+const FUNCTION_GREEN = "#4EC9B0"; // vscode dark+ C# type/interface teal-green — 亮绿，形成 pink-vs-teal 对比
 
 function classTypeColorCustomizations(): Record<string, unknown> {
   return {
@@ -252,20 +253,77 @@ const PINK_THEME_NAME_DARK = "locus-dark-pink";
 const PINK_THEME_NAME_LIGHT = "locus-light-pink";
 
 const PINK_TOKEN_RULES = [
-  // === Broader TextMate-spec scopes (no-op against current csharp grammar,
-  //     kept as safety net for grammar swaps). DO NOT add `type.cs` or
-  //     `keyword.other.type.cs` here — those pin `void`. ===
+  // === Primary hook: Locus csharp Monarch grammar's `type.cs` scope
+  //     AND monaco-vscode csharp TextMate grammar's `type.cs` scope.
+  //
+  // [C2] diagnostic in applyVscodeColorTheme shows that BOTH grammars
+  // converge on `type.cs` for type names (Player, string, int, List<>,
+  // AOT_Safearea) and BOTH correctly emit `keyword.cs` for `void`
+  // (csharp TextMate does this — see [C2] `void Foo...` line). So a
+  // single `type.cs` rule here paints type names pink regardless of
+  // which grammar is currently active, and `void` falls through to
+  // Monaco's default keyword color.
+  //
+  // This is the load-bearing rule of the whole pink-overlay scheme. The
+  // Roslyn LSP semantic-token path (classTypeColorCustomizations) is
+  // orthogonal: when it works, it re-confirms what this rule already
+  // paints. When it's broken (see `Unable to write to User Settings`
+  // ERROR in the [A] block — `editor.semanticTokenColorCustomizations`
+  // is not registered in monaco-vscode-api 33.0.9's ConfigurationService
+  // schema), this rule still gets the right color out the door.
+  { token: "type.cs", foreground: CLASS_TYPE_PINK },
+  //
+  // === Safety net: longer textMate scope chains. monaco-vscode csharp
+  //     TextMate grammar MIGHT emit these on some versions or paths
+  //     (it's been known to vary — see commit history pre-[D][E]). They
+  //     are no-ops against the current csharp grammar's actual output
+  //     (which lands in `type.cs` per the [C2] diagnostic) but kept so
+  //     a grammar swap or upstream scope-rename doesn't silently
+  //     regress the pink overlay.
+  //
+  // DO NOT add `type.cs` modifier rules here (e.g. `type.builtin.cs`)
+  // unless you verify the [C2] diagnostic shows the grammar emitting
+  // them — every additional `type.*.cs` rule that doesn't actually
+  // match anything is dead code that misleads the next reader.
   { token: "entity.name.type.class.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.struct.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.interface.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.enum.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.delegate.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.record.cs", foreground: CLASS_TYPE_PINK },
-  { token: "entity.name.type.cs", foreground: CLASS_TYPE_PINK },
   { token: "entity.name.type.builtin.cs", foreground: CLASS_TYPE_PINK },
   { token: "support.class.cs", foreground: CLASS_TYPE_PINK },
   { token: "support.type.cs", foreground: CLASS_TYPE_PINK },
-  { token: "variable.other.object.cs", foreground: CLASS_TYPE_PINK },
+  //
+  // === Method/function names — distinct from type pink. ===
+  //
+  // The Locus csharp Monarch grammar emits `identifier.function.cs`
+  // for any identifier followed by `(` (unityLanguages.ts:457, with
+  // `tokenPostfix: ".cs"`). vs-dark's default tokenTheme does not
+  // have a dedicated rule for `identifier.function`, so monaco
+  // falls back to mtk1 (the default white) — method calls read as
+  // "no syntax highlighting" against the dark background, which is
+  // the worst of the four possible states (pink types / teal-green
+  // methods / default keyword / default strings is what the user
+  // expects from a VSCode-style C# editor).
+  //
+  // csharp TextMate grammar (when its extension host worker has
+  // registered the contribution) typically emits
+  // `entity.name.function.cs` for method declarations and
+  // `variable.other.object.cs` (or similar) for call sites. We
+  // cover both.
+  //
+  // The bare `identifier.function` / `entity.name.function` rules
+  // (no `.cs` suffix) are intentional: they cover Locus's HLSL
+  // and ShaderLab Monarch grammars too (both use
+  // `identifier.function` for function calls), giving a consistent
+  // teal-green across all Locus-language editors. If a future language
+  // wants its own function color, it can override at the language
+  // level.
+  { token: "identifier.function", foreground: FUNCTION_GREEN },
+  { token: "entity.name.function", foreground: FUNCTION_GREEN },
+  { token: "identifier.function.cs", foreground: FUNCTION_GREEN },
+  { token: "entity.name.function.cs", foreground: FUNCTION_GREEN },
 ];
 
 function definePinkThemes(): void {

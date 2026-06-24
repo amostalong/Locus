@@ -431,9 +431,30 @@ function registerShaderLab(monacoNs: typeof monaco): void {
       "ushort", "using", "var", "virtual", "void", "volatile", "while",
     ],
     typeKeywords: [
+      // Aligned with Roslyn's LSP semantic token classification. The Monarch
+      // grammar is the fallback tokenization for csharp (used in the ~500ms
+      // window between file open and Roslyn's first semantic tokens/full
+      // response). Whatever this list emits MUST match Roslyn's eventual
+      // verdict, or the file will visibly flicker between these two states
+      // on every open.
+      //
+      // Roslyn classifies these C# built-in type names as `type` (pink), so
+      // we do too:
       "bool", "byte", "char", "decimal", "double", "float", "int", "long",
       "object", "sbyte", "short", "string", "uint", "ulong", "ushort",
-      "void",
+      // Roslyn classifies these as `type` as well — they were missing from
+      // the original list and would otherwise flicker from `identifier` →
+      // `type` once Roslyn arrives:
+      "dynamic", // C# 4 contextual keyword; always a type at use sites
+      "nint",    // C# 11 native int alias
+      "nuint",   // C# 11 native uint alias
+      //
+      // Intentionally absent: `void`. Roslyn classifies `void` as `keyword`
+      // (not `type`) — `void` in `void Foo()` means "no return value", not
+      // "a void-typed instance". Including it here would paint every method
+      // signature's `void` pink during the fallback window. It lives in
+      // the `keywords` list above and falls through to the `keyword` token
+      // via the case-rule order in the tokenizer.
     ],
     // Tokenizer rules run in order. Comments / strings / numbers / identifiers
     // match before the generic "word" rule would. The `preprocessor` rule
