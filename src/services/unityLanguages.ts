@@ -620,28 +620,40 @@ function registerCsharpSemanticTokensProvider(monacoNs: typeof monaco): void {
     {
       getLegend: () => ({ tokenTypes, tokenModifiers }),
       provideDocumentSemanticTokens: async (model, _lastResultId, cancelToken) => {
+        // Verbose per-call log — without this we cannot tell the difference
+        // between "Monaco didn't call the provider" (registerDocumentSemanticTokens
+        // hook never fires) and "Monaco called the provider but Roslyn returned
+        // empty data" (RPC succeeded, semantic token path is wired but
+        // Roslyn's response is uninformative). Drop this log after the wiring
+        // is confirmed working.
+        console.log(
+          `[csharpSemanticTokens] provideDocumentSemanticTokens called for ${model.uri.toString()} (lines=${model.getLineCount()})`,
+        );
         if (cancelToken?.isCancellationRequested) {
           return { data: new Uint32Array(0) };
         }
         let data: number[] = [];
+        let rawResp: unknown = null;
         try {
-          const resp = (await csharpLspBridgeRequest(
+          rawResp = await csharpLspBridgeRequest(
             "textDocument/semanticTokens/full",
             { textDocument: { uri: model.uri.toString() } },
-          )) as { data?: number[]; resultId?: string } | null;
+          );
+          const resp = rawResp as { data?: number[]; resultId?: string } | null;
           if (resp && Array.isArray(resp.data)) {
             data = resp.data;
           }
         } catch (err) {
-          // Cold-start / server-warming / network blip — Monaco falls back
-          // to the Monarch grammar output. Don't warn: this is the common
-          // case for ~500ms after file open.
-          if (!dumpState.fired) {
-            console.log(
-              `[csharpSemanticTokens] LSP semanticTokens/full returned no data for ${model.uri.toString()} (err=${(err as Error)?.message ?? err}); Monaco falls back to Monarch grammar`,
-            );
-          }
+          console.log(
+            `[csharpSemanticTokens] LSP semanticTokens/full threw for ${model.uri.toString()} (err=${(err as Error)?.message ?? err}); Monaco falls back to Monarch grammar`,
+          );
           return { data: new Uint32Array(0) };
+        }
+
+        if (!dumpState.fired) {
+          console.log(
+            `[csharpSemanticTokens] LSP semanticTokens/full responded for ${model.uri.toString()} with raw=${JSON.stringify(rawResp)?.slice(0, 200)}; dataLen=${data.length}`,
+          );
         }
 
         if (!dumpState.fired && data.length > 0) {
