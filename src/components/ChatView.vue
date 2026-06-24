@@ -67,6 +67,7 @@ import {
 } from "../composables/resizeObserver";
 import { forwardWheelToElement } from "../composables/chatWheelPassthrough";
 import { STREAMING_RENDER_THROTTLE_MS } from "../composables/streamingRenderThrottle";
+import { createCoalesceRunner } from "../composables/coalesceRunner";
 import { canOpenInEditor } from "../composables/useHideMeta";
 import { useDiffProgress } from "../composables/useDiffProgress";
 import { acquireSelectionLock } from "../composables/useSelectionLock";
@@ -1698,6 +1699,29 @@ function cancelViewportFrame(handle: number) {
   window.clearTimeout(handle);
 }
 
+// --- Coalesced viewport reconcile ---
+// Multiple reactive triggers (messages, displayedStreamingText,
+// activeToolCallsFingerprint, pendingQuestion, ...) can fire within the same
+// frame, especially during streaming where displayedStreamingText + tool-call
+// status + messages.append all land in one tick. Each direct reconcileViewport
+// call does its own DOM reads (getBoundingClientRect + getComputedStyle + chat
+// store queries). Coalescing them into a single per-frame pass keeps main-thread
+// time bounded when chat + a heavy right-tab (editor / knowledge) are both
+// competing for the rAF budget.
+const coalesceReconcile = createCoalesceRunner({
+  schedule: requestViewportFrame,
+  cancel: cancelViewportFrame,
+  onRun: (reasons) => {
+    if (reasons.length > 1) {
+      recordLayoutDiagnostic("chat.reconcile.coalesced", {
+        reasons,
+        count: reasons.length,
+      });
+    }
+    reconcileViewport();
+  },
+});
+
 function cancelSessionRestoreFrame() {
   if (!sessionRestoreFrame) return;
   cancelViewportFrame(sessionRestoreFrame);
@@ -1935,7 +1959,7 @@ watch(toolHandoffViewportQuiet, (quiet, previousQuiet) => {
     return;
   }
   if (previousQuiet) {
-    reconcileViewport();
+    coalesceReconcile.schedule("tool-handoff-end");
   }
 });
 
@@ -2125,7 +2149,15 @@ function performTranscriptResizeReconcile() {
   if (restoreToolViewportAnchor()) {
     return;
   }
-  reconcileViewport();
+  scheduleCoalescedReconcile("resize-observer");
+}
+
+function scheduleCoalescedReconcile(reason: string) {
+  coalesceReconcile.schedule(reason);
+}
+
+function cancelCoalescedReconcile() {
+  coalesceReconcile.cancel();
 }
 
 function scheduleTranscriptResizeReconcile(reason: string) {
@@ -2207,6 +2239,7 @@ watch(
     } else {
       cancelSessionRestoreLayoutStabilization();
     }
+    cancelCoalescedReconcile();
     clearToolViewportAnchor();
     scrollToBottomScheduler.cancel();
     streamEndScrollScheduler.cancel();
@@ -2242,23 +2275,31 @@ watch(
   () => props.messages,
   (messages, previous) => {
     if (messages === previous || pendingRestoreSessionId.value) return;
-    reconcileViewport();
+    scheduleCoalescedReconcile("messages");
   },
   { flush: "post" },
 );
 watch(
   () => props.messages.length,
   () => {
-    reconcileViewport();
+    scheduleCoalescedReconcile("messages-length");
   },
   { flush: "post" },
 );
-watch(() => displayedStreamingText.value, () => reconcileViewport(), { flush: "post" });
+watch(
+  () => displayedStreamingText.value,
+  () => scheduleCoalescedReconcile("streaming-text"),
+  { flush: "post" },
+);
 // Replaces the previous `watch(() => props.activeToolCalls, ..., { deep: true })`.
 // Fingerprint subscribes only to length + per-item status + nested-tool status
 // (all shallow getters). Deep output/arguments/progress mutations no longer trigger
 // a traverse of every tool call on every tick.
-watch(activeToolCallsFingerprint, () => reconcileViewport(), { flush: "post" });
+watch(
+  activeToolCallsFingerprint,
+  () => scheduleCoalescedReconcile("tool-calls"),
+  { flush: "post" },
+);
 watch(
   () => props.isStreaming,
   (nextStreaming, previousStreaming) => {
@@ -2279,12 +2320,12 @@ watch(
     }
   },
 );
-watch(isWaitingForResponse, (v) => { if (v) reconcileViewport(); });
+watch(isWaitingForResponse, (v) => { if (v) scheduleCoalescedReconcile("waiting"); });
 watch(() => props.pendingQuestion?.questionId ?? null, (q) => {
-  if (q) reconcileViewport();
+  if (q) scheduleCoalescedReconcile("pending-question");
 });
 watch(() => props.pendingToolConfirms.map((item) => item.questionId).join(":"), (value) => {
-  if (value) reconcileViewport();
+  if (value) scheduleCoalescedReconcile("pending-tool-confirm");
 });
 
 const keepBatchToolConfirmLayout = ref(false);
