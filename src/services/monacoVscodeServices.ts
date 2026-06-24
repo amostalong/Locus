@@ -20,7 +20,9 @@ import { IConfigurationService, IWorkbenchThemeService } from "@codingame/monaco
 import { ConfigurationTarget } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration";
 import getConfigurationServiceOverride, {
   updateUserConfiguration,
+  configurationRegistry,
 } from "@codingame/monaco-vscode-configuration-service-override";
+import { ConfigurationScope } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configurationRegistry";
 import getEditorServiceOverride from "@codingame/monaco-vscode-editor-service-override";
 import getExtensionsServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
 import getFilesServiceOverride, {
@@ -40,6 +42,94 @@ import { registerUnityLanguages } from "./unityLanguages";
 
 let readyPromise: Promise<void> | null = null;
 let errorHandlerInstalled = false;
+
+/**
+ * Register the workbench / editor color-customization settings that
+ * monaco-vscode-api 33.0.9 omits from its default ConfigurationService
+ * schema.
+ *
+ * ## Why we have to do this ourselves
+ *
+ * monaco-vscode-api 33.0.9's default schema does NOT include
+ * `workbench.colorCustomizations`, `editor.tokenColorCustomizations`, or
+ * `editor.semanticTokenColorCustomizations`. These were stripped from
+ * the API surface because they're VSCode-workbench concerns that don't
+ * strictly belong in a Monaco-only setup — but the downstream consumers
+ * (workbenchThemeService, TokenizationRegistry) still read them.
+ *
+ * Without registration, the chain is broken at three points:
+ *
+ *   1. `updateUserConfiguration()` (file-write path) throws
+ *      `ERROR_UNKNOWN_KEY` — see the [ERROR] "Unable to write to User
+ *      Settings because X is not a registered configuration" log line in
+ *      `applyVscodeColorTheme`. The validation is in
+ *      `configurationEditing.js:614`: `validKeys.indexOf(operation.key) < 0`.
+ *
+ *   2. `configService.updateValue(key, value, ...)` (in-memory path)
+ *      actually succeeds — the value lands in the user cache (visible via
+ *      `inspect()`, hence the populated [B] log block). But…
+ *
+ *   3. `onDidChangeConfiguration` listeners check
+ *      `e.affectsConfiguration(key)`, which returns false for any key
+ *      not in the `configurationProperties` registry. The
+ *      workbenchThemeService's listener
+ *      (`browser/workbenchThemeService.js:341`) therefore skips the
+ *      `setCustomSemanticTokenColors` / `setCustomTokenColors` /
+ *      `setCustomColors` handlers. The customization never reaches
+ *      TokenizationRegistry or the theme stylesheet.
+ *
+ * Registering the keys here populates `configurationProperties`, which
+ * makes (1) validation pass, (2) the in-memory write fire a real
+ * change event, and (3) `affectsConfiguration` return true — the
+ * listener handler runs and the editor's color rules actually take
+ * effect.
+ *
+ * Schemas are intentionally permissive (any object): the consumer
+ * (colorThemeData.js `setCustom*Colors`) does its own structural
+ * validation. We just need the keys to be *known*.
+ *
+ * Idempotent: re-registering an already-registered key is a no-op
+ * (the registry's `validateProperty` returns an error string, the loop
+ * `delete properties[key]` and `continue` — never throws). Safe to
+ * run at module top.
+ */
+function registerLocusColorCustomizations(): void {
+  configurationRegistry.registerConfiguration({
+    id: "locus.colorCustomizations",
+    order: 7,
+    title: "Locus workbench / editor color customizations",
+    type: "object",
+    properties: {
+      "workbench.colorCustomizations": {
+        type: "object",
+        description:
+          "Override workbench colors. Required by Locus's pink-overlay scheme and the peekView background tweaks.",
+        scope: ConfigurationScope.WINDOW,
+        additionalProperties: { type: "string" },
+      },
+      "editor.tokenColorCustomizations": {
+        type: "object",
+        description:
+          "Override editor token colors. Currently informational — Locus's pink/teal palette is anchored directly via monaco.editor.defineTheme().rules in PINK_TOKEN_RULES, not through this config key.",
+        scope: ConfigurationScope.WINDOW,
+        additionalProperties: true,
+      },
+      "editor.semanticTokenColorCustomizations": {
+        type: "object",
+        description:
+          "Override semantic token colors. Drives the Roslyn LSP semantic-token path (the 'orthogonal' confirmation layer over PINK_TOKEN_RULES). Registering this key is what makes the 6a1d9c0 Roslyn-pink scheme actually take effect at runtime.",
+        scope: ConfigurationScope.WINDOW,
+        additionalProperties: true,
+      },
+    },
+  });
+}
+
+// Module-top call: must run before `initVscodeServices()` constructs
+// the workbenchThemeService and its onDidChangeConfiguration listener
+// (see browser/workbenchThemeService.js:341). HMR re-evaluation
+// re-invokes this — safe because the registry skips duplicates.
+registerLocusColorCustomizations();
 
 /**
  * Install a silent error handler for Monaco internal crashes.
@@ -423,10 +513,14 @@ export async function applyVscodeColorTheme(): Promise<void> {
   //   3. fires `onDidChangeConfiguration` — listeners (theme service,
   //      tokenization registry, semantic-token provider) all re-read
   //
-  // updateUserConfiguration ALONE is broken in monaco-vscode-api 33.0.9's
-  // browser ConfigurationService: it writes the file but never notifies
-  // the live service to re-read, so inspect() returns undefined for the
-  // pushed keys and no consumer ever sees the change.
+  // updateUserConfiguration ALONE is NOT sufficient in monaco-vscode-api
+  // 33.0.9's browser ConfigurationService: it writes the file but never
+  // notifies the live service to re-read, so inspect() returns undefined
+  // for the pushed keys and no consumer ever sees the change. (The
+  // file-write ALSO used to fail with `ERROR_UNKNOWN_KEY` for
+  // `editor.semanticTokenColorCustomizations` and friends, until we
+  // started registering those keys in `registerLocusColorCustomizations`
+  // at module top — see the long comment there for the chain.)
   try {
     const configService = await getService(IConfigurationService);
     for (const [key, value] of Object.entries(customization)) {
