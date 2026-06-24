@@ -292,11 +292,23 @@ function classTypeColorCustomizations(): Record<string, unknown> {
         "type.readonly": CLASS_TYPE_PINK,
         // Some Roslyn/OmniSharp versions emit a bare `class` token type.
         class: CLASS_TYPE_PINK,
-        // Class fields (`_lastScreenHeight`, `m_count`, etc.) — Roslyn
-        // emits `variable` token type + `class` modifier for these. We
-        // paint them indigo so they read as a distinct "this is a field
-        // of the enclosing class" category, separate from the pink
-        // type-name color and the default local-variable color.
+        // Class fields (`_lastScreenHeight`, `m_count`, etc.) — these
+        // rules are CURRENTLY DEAD CODE: Locus's Roslyn bridge does not
+        // implement `textDocument/semanticTokens/full` (see
+        // unityLanguages.ts:402 — "once diagnostics work is in place"),
+        // so Roslyn semantic tokens never reach Monaco and these
+        // customize rules never fire. Field coloring today is entirely
+        // carried by the `variable.other.field.cs` token rules in
+        // PINK_TOKEN_RULES below, applied via the csharp TextMate
+        // grammar's emitted scope chain.
+        //
+        // We keep these dead-code rules around as a forward-compat
+        // marker — when the Roslyn bridge does eventually wire
+        // semanticTokens/full, these rules will start matching whatever
+        // tokenType/modifier Roslyn actually emits (likely
+        // `variable` + `declaration` and `variable` + `readonly`, but
+        // we have not verified). Remove or rewrite at that point based
+        // on what the Roslyn bridge's diagnostic dump shows.
         //
         // We DELIBERATELY do NOT include the bare `variable:declaration`
         // or `variable:readonly` rules that the previous version of this
@@ -642,6 +654,11 @@ export async function applyVscodeColorTheme(): Promise<void> {
     'string s = "hello";',
     "int n = 1;",
     "AOT_Safearea foo;",
+    // Field-coloring diagnostic — verify what scope csharp TextMate
+    // actually emits for `_lastScreenHeight` so we know whether the
+    // `variable.other.field.cs` token rule below is the right hook.
+    "private int _lastScreenHeight;",
+    "private static readonly int MaxCount = 32;",
   ];
 
   // [C2] tokenize: see what the grammar actually gives us for token types
