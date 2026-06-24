@@ -22,6 +22,7 @@ import {
 import { trackAllCurrentModels, reset as resetEditorSync, trackModel } from "../../services/editorSync";
 import { findInactiveRangesFromSource } from "../../services/preprocessorDimming";
 import { getPreprocessorSymbols, getPreprocessorSymbolsFromCompletion } from "../../services/csharpLsp";
+import { applyCsharpFieldDecorations } from "../../services/csharpFieldDecoration";
 // 用于覆盖 Monaco 内部的 editor.action.findReferences 命令
 // （vscode.commands.registerCommand 走的是 VS Code API 扩展主机桥，覆盖不了）
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
@@ -53,6 +54,9 @@ const { setStatus: setOmniStatus, setName: setOmniName } = useOmnisharpStatus();
 let preprocessorDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
 let dimModelListener: monaco.IDisposable | null = null;
 let dimCursorListener: monaco.IDisposable | null = null;
+let fieldDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
+let fieldModelListener: monaco.IDisposable | null = null;
+let fieldLanguageListener: monaco.IDisposable | null = null;
 /** Cached preprocessor symbols from the Rust backend (null = not yet loaded). */
 let cachedSymbols: Set<string> | null = null;
 
@@ -246,7 +250,29 @@ function refreshPreprocessorDimming() {
         stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
       },
     })),
-  );
+);
+}
+
+/**
+ * Apply the indigo CSS overlay to csharp class-field identifiers.
+ *
+ * Called on every model change and on every model swap. Fast path for
+ * non-csharp models: clear the collection and return — the previous
+ * decorations, if any, are released.
+ *
+ * The parser is in `services/csharpFieldDecoration.ts`. See the long
+ * comment block there for why we're not using Roslyn semantic tokens
+ * (framework bug in monaco-vscode-api 33.0.9) or Monarch state machine
+ * (regex can't reliably track class-vs-method brace nesting).
+ */
+function refreshCsharpFieldColoring() {
+  if (!editor || !fieldDecorations) return;
+  const model = editor.getModel();
+  if (!model || model.getLanguageId() !== "csharp") {
+    fieldDecorations.set([]);
+    return;
+  }
+  applyCsharpFieldDecorations(fieldDecorations, model.getValue());
 }
 
 /**
@@ -904,6 +930,15 @@ onMounted(async () => {
   dimModelListener = editor.onDidChangeModelContent(() => refreshPreprocessorDimming());
   dimCursorListener = editor.onDidChangeCursorPosition(() => refreshPreprocessorDimming());
 
+  // C# class-field coloring (indigo overlay). See
+  // `services/csharpFieldDecoration.ts` for the brace-counting parser and
+  // `styles/monaco-dimming.css` for the `.locus-csharp-field` rule.
+  // Refresh on every model content change — the parser is O(N) over the
+  // source text and runs in sub-millisecond for typical csharp files.
+  fieldDecorations = editor.createDecorationsCollection();
+  fieldModelListener = editor.onDidChangeModelContent(() => refreshCsharpFieldColoring());
+  fieldLanguageListener = editor.onDidChangeModel(() => refreshCsharpFieldColoring());
+
   // Wire up the Roslyn textDocument/didOpen / didChange / didClose
   // bridge for any csharp model that already exists or that gets
   // created later (e.g. via editorStore.openFile). The EditorSync
@@ -973,6 +1008,10 @@ onBeforeUnmount(() => {
   dimCursorListener?.dispose();
   preprocessorDecorations?.clear();
   preprocessorDecorations = null;
+  fieldModelListener?.dispose();
+  fieldLanguageListener?.dispose();
+  fieldDecorations?.clear();
+  fieldDecorations = null;
   cachedSymbols = null;
   hasFunctionCtx = null;
   hasClassCtx = null;

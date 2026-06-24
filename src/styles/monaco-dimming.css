@@ -18,3 +18,31 @@
 .preprocessor-inactive-inline {
   opacity: 0.45;
 }
+
+/**
+ * C# class-field coloring (indigo).
+ *
+ * Applied via Monaco Decorations API as `inlineClassName: "locus-csharp-field"`
+ * on identifier ranges the brace-counting parser in
+ * `services/csharpFieldDecoration.ts` marks as class fields.
+ *
+ * `!important` is needed because Monaco's tokenization CSS classes
+ * (`.mtk1`, `.mtk6`, etc.) are styled with high specificity by the
+ * `locus-dark-pink` theme, and our decoration overlay needs to win on
+ * the field identifier regardless of what token type it currently has
+ * (e.g. `identifier` → mtk1 white by default, `type.cs` → pink when
+ * Monarch classifies as type). The decoration only applies to identifier
+ * ranges the parser explicitly marked, so we don't bleed onto unrelated
+ * text.
+ *
+ * When monaco-vscode-api's `DocumentSemanticTokensFeature` bug is fixed
+ * and Roslyn semantic-tokens take over, this decoration will keep working
+ * harmlessly on top — the underlying semantic tokens give the same colour
+ * via `editor.semanticTokenColorCustomizations.rules`, so the user sees
+ * no visual change when switching from Monarch-decoration mode to
+ * Roslyn-semantic-token mode. The decoration remains as a defense-in-depth
+ * fallback.
+ */
+.locus-csharp-field {
+  color: #5B5BD6 !important;
+}
