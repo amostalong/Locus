@@ -272,6 +272,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
  */
 const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
 const FUNCTION_GREEN = "#4EC9B0"; // vscode dark+ C# type/interface teal-green — 亮绿，形成 pink-vs-teal 对比
+const FIELD_INDIGO = "#5B5BD6"; // 靛青 — class field 专用，与 pink/teal 区分清晰
 
 function classTypeColorCustomizations(): Record<string, unknown> {
   return {
@@ -291,11 +292,20 @@ function classTypeColorCustomizations(): Record<string, unknown> {
         "type.readonly": CLASS_TYPE_PINK,
         // Some Roslyn/OmniSharp versions emit a bare `class` token type.
         class: CLASS_TYPE_PINK,
-        // Typed instance variables (LSP gives `variable` + class modifier).
-        "variable.class": CLASS_TYPE_PINK,
-        "variable.declaration.class": CLASS_TYPE_PINK,
-        "variable:declaration": CLASS_TYPE_PINK,
-        "variable:readonly": CLASS_TYPE_PINK,
+        // Class fields (`_lastScreenHeight`, `m_count`, etc.) — Roslyn
+        // emits `variable` token type + `class` modifier for these. We
+        // paint them indigo so they read as a distinct "this is a field
+        // of the enclosing class" category, separate from the pink
+        // type-name color and the default local-variable color.
+        //
+        // We DELIBERATELY do NOT include the bare `variable:declaration`
+        // or `variable:readonly` rules that the previous version of this
+        // file had — those modifiers also match local variables
+        // (`var x = 1;`) and readonly locals, which we want to fall
+        // through to Monaco's default identifier color. Only the
+        // `class` modifier scopes the rule to class members.
+        "variable.class": FIELD_INDIGO,
+        "variable.declaration.class": FIELD_INDIGO,
         // Explicitly NOT pinking `keyword` — keeps `void` (and other C#
         // keywords that the grammar mistakenly scopes as type at the
         // textMate layer) at the default Monaco keyword color.
@@ -414,6 +424,34 @@ const PINK_TOKEN_RULES = [
   { token: "entity.name.function", foreground: FUNCTION_GREEN },
   { token: "identifier.function.cs", foreground: FUNCTION_GREEN },
   { token: "entity.name.function.cs", foreground: FUNCTION_GREEN },
+  //
+  // === Class fields — indigo. ===
+  //
+  // csharp TextMate grammar (the source of truth once the extension
+  // host worker has registered its contribution) emits
+  // `variable.other.field.cs` for instance fields and
+  // `variable.other.field.private.cs` for private fields (the
+  // underscore-prefixed convention `_lastScreenHeight` in this case
+  // is just a naming convention — the grammar doesn't care). We
+  // paint both indigo so that all class-member state is a single
+  // distinct color, separate from pink types and teal methods.
+  //
+  // Roslyn's semantic-token path covers the same case with the
+  // `variable.class` rule in classTypeColorCustomizations() above;
+  // the two paths converge on the same indigo.
+  //
+  // Locus csharp Monarch grammar (the fallback during the ~500ms
+  // window before csharp TextMate is ready) does NOT distinguish
+  // fields from local variables — both fall through to the
+  // `identifier` rule, so fields render as the default white in
+  // that window. This is a known Monarch limitation; we don't fix
+  // it here because fixing it requires a context-aware grammar
+  // (which Monarch regex can't express) or extending the Roslyn
+  // bridge to pre-emit field classifications into the Monarch
+  // tokenizer. See unityLanguages.ts:457-460 for the Monarch rules.
+  { token: "variable.other.field", foreground: FIELD_INDIGO },
+  { token: "variable.other.field.cs", foreground: FIELD_INDIGO },
+  { token: "variable.other.field.private.cs", foreground: FIELD_INDIGO },
 ];
 
 function definePinkThemes(): void {
