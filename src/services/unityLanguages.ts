@@ -1,5 +1,7 @@
 import type * as monaco from "monaco-editor";
 
+import { csharpLspBridgeRequest } from "./csharpLsp";
+
 let registered = false;
 
 /**
@@ -22,6 +24,16 @@ export function registerUnityLanguages(monacoNs: typeof monaco): void {
   }
   try { registerShaderLab(monacoNs); } catch (e) {
     console.warn("[unityLanguages] ShaderLab registration failed (continuing):", e);
+  }
+  // ── C# Roslyn semantic tokens provider ────────────────────────────────────
+  // The csharp Monarch grammar (below) is a 500ms-window fallback. Once Roslyn
+  // responds, the DocumentSemanticTokensProvider registered here takes over
+  // for `class vs method vs field vs property` distinction (which Monarch
+  // regex fundamentally cannot do). See `registerCsharpSemanticTokensProvider`
+  // for the implementation and the diagnostic dump that lets us verify
+  // which tokenType/modifier Roslyn actually emits for fields.
+  try { registerCsharpSemanticTokensProvider(monacoNs); } catch (e) {
+    console.warn("[unityLanguages] csharp Roslyn semantic-tokens provider registration failed (continuing):", e);
   }
 }
 
@@ -528,8 +540,171 @@ function registerShaderLab(monacoNs: typeof monaco): void {
     // Outer catch — see the long comment above (line ~400). The actual
     // Monarch collector race fires from a background tokenize callback,
     // not synchronously, so this catch is a defensive placeholder for any
-    // synchronous failure during grammar registration itself. A proper
-    // fix is Roslyn semantic tokens once the LSP pipeline lands.
+    // synchronous failure during grammar registration itself. The proper
+    // fix for "class vs method vs field vs property" distinction is
+    // Roslyn semantic tokens via `registerCsharpSemanticTokensProvider`
+    // (registered in registerUnityLanguages above), which takes over once
+    // the LSP responds (~500ms after file open). The Monarch grammar
+    // remains the fallback for that window.
     console.warn("[unityLanguages] csharp Monarch grammar setup failed (continuing with no csharp syntax highlighting):", err);
   }
+}
+
+// ── C# Roslyn semantic tokens provider ─────────────────────────────────────
+//
+// The csharp Monarch grammar (above) gives correct type/keyword/identifier
+// classification but fundamentally cannot distinguish class fields from local
+// variables — both fall through to `identifier`. That distinction is a
+// semantic question (is this identifier's declaring syntax a class member
+// or a method-local statement?) that regex-based Monarch grammars cannot
+// answer.
+//
+// Roslyn's LSP `textDocument/semanticTokens/full` response CAN — it gives us
+// each token's LSP-standard `tokenType` (namespace/type/class/variable/
+// property/...) plus a bit-set of `tokenModifiers` (declaration/static/
+// readonly/...). Once registered here, Monaco's SemanticTokensStylingService
+// takes these over the Monarch output (the two are documented to coexist;
+// see the `setMonarchTokensProvider` API doc in @codingame/monaco-vscode-api
+// for "work together with").
+//
+// What this provider does today:
+//   1. Forward the LSP request to the running Roslyn server via the generic
+//      `csharpLspBridgeRequest` IPC (which already exists for hover/
+//      definition/completion — no Rust changes needed).
+//   2. Decode the LSP delta-encoded `data: number[]` into absolute
+//      (line, startChar) + look up token text from the model.
+//   3. **Dump the first response to the console** so we can verify which
+//      tokenType/modifier Roslyn actually emits for `private int
+//      _lastScreenHeight;` — the answer determines which key to use in
+//      `editor.semanticTokenColorCustomizations.rules` for the indigo
+//      field-color hook. (See monacoVscodeServices.ts for the customize
+//      rules; the `variable.class` / `variable.declaration.class` entries
+//      there are currently dead code pending this dump.)
+//
+// What this provider does NOT do today (follow-up commit):
+//   - Hook a token-rule or customize-rule that paints fields indigo. We
+//     keep this commit minimal: wire the data path first, observe Roslyn's
+//     actual response shape, then add the rule in a follow-up that targets
+//     the verified tokenType/modifier.
+//
+// Edge cases handled:
+//   - LSP request fails (server cold start / network blip): return empty
+//     data array. Monaco falls back to the Monarch grammar (current
+//     behaviour — no regression).
+//   - Cancellation token: if the user keeps typing and Monaco cancels the
+//     previous request, return empty without logging noise.
+//   - Provider registration itself fails (monaco-vscode-api 33.0.9 "Default
+//     api is not ready yet" race): the caller's try/catch in
+//     registerUnityLanguages swallows and logs.
+function registerCsharpSemanticTokensProvider(monacoNs: typeof monaco): void {
+  // LSP RFC 14 standard token type legend. Order matters — the integer
+  // indices in Roslyn's response match this list positionally.
+  const tokenTypes = [
+    "namespace", "type", "class", "enum", "interface", "struct",
+    "typeParameter", "parameter", "variable", "property", "enumMember",
+    "event", "function", "method", "macro", "keyword", "modifier",
+    "comment", "string", "number", "regexp", "operator", "decorator",
+  ];
+  const tokenModifiers = [
+    "declaration", "static", "async", "readonly", "defaultLibrary", "abstract",
+  ];
+
+  // Track whether the first dump has fired — we don't want to spam the
+  // console on every model change. The dump is keyed on the function
+  // (not per-file) so the very first file to open Roslyn-responds for
+  // gets logged, regardless of which file.
+  const dumpState: { fired: boolean } = { fired: false };
+
+  monacoNs.languages.registerDocumentSemanticTokensProvider(
+    { language: "csharp" },
+    {
+      getLegend: () => ({ tokenTypes, tokenModifiers }),
+      provideDocumentSemanticTokens: async (model, _lastResultId, cancelToken) => {
+        if (cancelToken?.isCancellationRequested) {
+          return { data: new Uint32Array(0) };
+        }
+        let data: number[] = [];
+        try {
+          const resp = (await csharpLspBridgeRequest(
+            "textDocument/semanticTokens/full",
+            { textDocument: { uri: model.uri.toString() } },
+          )) as { data?: number[]; resultId?: string } | null;
+          if (resp && Array.isArray(resp.data)) {
+            data = resp.data;
+          }
+        } catch (err) {
+          // Cold-start / server-warming / network blip — Monaco falls back
+          // to the Monarch grammar output. Don't warn: this is the common
+          // case for ~500ms after file open.
+          if (!dumpState.fired) {
+            console.log(
+              `[csharpSemanticTokens] LSP semanticTokens/full returned no data for ${model.uri.toString()} (err=${(err as Error)?.message ?? err}); Monaco falls back to Monarch grammar`,
+            );
+          }
+          return { data: new Uint32Array(0) };
+        }
+
+        if (!dumpState.fired && data.length > 0) {
+          dumpState.fired = true;
+          const lines = model.getLinesContent();
+          const decoded: Array<{
+            line: number;
+            start: number;
+            len: number;
+            type: string;
+            modifiers: string[];
+            text: string;
+          }> = [];
+          let curLine = 0;
+          let curStart = 0;
+          for (let i = 0; i + 4 < data.length; i += 5) {
+            const dLine = data[i];
+            const dStart = data[i + 1];
+            const len = data[i + 2];
+            const tType = data[i + 3];
+            const tMods = data[i + 4];
+            curLine += dLine;
+            curStart = dLine === 0 ? curStart + dStart : dStart;
+            const lineText = lines[curLine] ?? "";
+            const text = lineText.substring(curStart, curStart + len);
+            const modList: string[] = [];
+            for (let m = 0; m < tokenModifiers.length; m++) {
+              if ((tMods & (1 << m)) !== 0) modList.push(tokenModifiers[m]);
+            }
+            decoded.push({
+              line: curLine,
+              start: curStart,
+              len,
+              type: tokenTypes[tType] ?? `unknown[${tType}]`,
+              modifiers: modList,
+              text,
+            });
+          }
+          // Count tokenType distribution so the next commit can target the
+          // right customize-rules key without scanning the full list.
+          const typeCounts = new Map<string, number>();
+          for (const t of decoded) {
+            const k = t.modifiers.length
+              ? `${t.type}.${t.modifiers.join(".")}`
+              : t.type;
+            typeCounts.set(k, (typeCounts.get(k) ?? 0) + 1);
+          }
+          const sorted = [...typeCounts.entries()].sort((a, b) => b[1] - a[1]);
+          console.log(
+            `[csharpSemanticTokens] Roslyn semanticTokens/full returned ${data.length / 5 | 0} tokens for ${model.uri.toString()} — first 200 samples (capped):`,
+            decoded.slice(0, 200),
+            `\n  tokenType+modifier distribution:`,
+            sorted,
+          );
+        }
+
+        return { data: new Uint32Array(data) };
+      },
+      releaseDocumentSemanticTokens: () => {
+        // LSP monotonic resultId: Roslyn doesn't emit one, so we always
+        // recompute on next provideDocumentSemanticTokens call.
+      },
+    } satisfies monaco.languages.DocumentSemanticTokensProvider,
+  );
+  console.log("[csharpSemanticTokens] DocumentSemanticTokensProvider registered for csharp (Roslyn LSP semanticTokens/full path active)");
 }
