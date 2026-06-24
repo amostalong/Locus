@@ -26,15 +26,43 @@ export function registerUnityLanguages(monacoNs: typeof monaco): void {
     console.warn("[unityLanguages] ShaderLab registration failed (continuing):", e);
   }
   // ── C# Roslyn semantic tokens provider ────────────────────────────────────
-  // The csharp Monarch grammar (below) is a 500ms-window fallback. Once Roslyn
-  // responds, the DocumentSemanticTokensProvider registered here takes over
-  // for `class vs method vs field vs property` distinction (which Monarch
-  // regex fundamentally cannot do). See `registerCsharpSemanticTokensProvider`
-  // for the implementation and the diagnostic dump that lets us verify
-  // which tokenType/modifier Roslyn actually emits for fields.
-  try { registerCsharpSemanticTokensProvider(monacoNs); } catch (e) {
-    console.warn("[unityLanguages] csharp Roslyn semantic-tokens provider registration failed (continuing):", e);
-  }
+  // DISABLED pending a monaco-vscode-api 33.0.9 framework-level bug fix.
+  //
+  // The intent is that Roslyn's LSP `textDocument/semanticTokens/full`
+  // response replaces the Monarch fallback for `class vs method vs field
+  // vs property` distinction (which Monarch regex fundamentally cannot do).
+  // The provider implementation (`registerCsharpSemanticTokensProvider`,
+  // file end) is preserved intact; the customize-rule dead-code in
+  // `monacoVscodeServices.ts:307-308` is preserved too. To enable:
+  //
+  //   1. Uncomment the `registerCsharpSemanticTokensProvider(monacoNs)` call
+  //      below.
+  //   2. Upgrade monaco-vscode-api to a version that includes the fix
+  //      (track https://github.com/CodinGame/monaco-vscode-api — see
+  //      codeEditorWidget.js `getEditorContributions()` for the broken
+  //      path that omits `getEditorFeatures()`).
+  //   3. Boot dev mode, open a .cs file, look for
+  //      `[csharpSemanticTokens] Roslyn semanticTokens/full returned N tokens
+  //      for ...` in locus-console-*.log. The tokenType/modifier distribution
+  //      in that dump tells you which key to use in
+  //      `editor.semanticTokenColorCustomizations.rules` for the field hook.
+  //   4. Retarget the dead-code rules in `classTypeColorCustomizations`
+  //      (variable.class / variable.declaration.class) to the actual
+  //      Roslyn tokenType/modifier combination (likely `property` +
+  //      `declaration` based on vscode-csharp historical behaviour).
+  //
+  // Until step 2 lands, field coloring falls back to the Monarch-extension
+  // approach in `registerCsharpMonarchFieldGrammar` (file end) which gives
+  // ~80% accuracy on common class-field patterns and works under any
+  // monaco-vscode-api version.
+  //
+  // try { registerCsharpSemanticTokensProvider(monacoNs); } catch (e) {
+  //   console.warn("[unityLanguages] csharp Roslyn semantic-tokens provider registration failed (continuing):", e);
+  // }
+  //
+  // Reference the function so TypeScript doesn't complain about an unused
+  // declaration while the call is parked — remove this when reactivating.
+  void registerCsharpSemanticTokensProvider;
 }
 
 // ── HLSL ─────────────────────────────────────────────────────────────────────
@@ -552,6 +580,26 @@ function registerShaderLab(monacoNs: typeof monaco): void {
 
 // ── C# Roslyn semantic tokens provider ─────────────────────────────────────
 //
+// ╭─ DISABLED ──────────────────────────────────────────────────────────────╮
+// │ monaco-vscode-api 33.0.9 has a framework-level bug:                    │
+// │ `getEditorFeatures()` (the channel `DocumentSemanticTokensFeature`      │
+// │ registers through) is never invoked by `codeEditorWidget.js:305`       │
+// │ (which only calls `getEditorContributions()`). Result: Monaco never    │
+// │ instantiates the contrib that would dispatch to the provider below,    │
+// │ so even though `monaco.languages.registerDocumentSemanticTokensProvider` │
+// │ succeeds, `provideDocumentSemanticTokens` is never called and the      │
+// │ semantic-tokens path is dead on arrival. Diagnostic confirmed in       │
+// │ locus-console-20260624-144222.log: provider registered but zero calls. │
+// ╰────────────────────────────────────────────────────────────────────────╯
+//
+// This function and the corresponding customize-rule dead code are
+// preserved intact so the Roslyn semantic-tokens bridge can be re-enabled
+// in a one-line change once the upstream bug is fixed (see the
+// registerUnityLanguages comment block above for the four-step reactivation
+// procedure).
+//
+// ── Original intent (preserved for the re-enable path) ────────────────────
+//
 // The csharp Monarch grammar (above) gives correct type/keyword/identifier
 // classification but fundamentally cannot distinguish class fields from local
 // variables — both fall through to `identifier`. That distinction is a
@@ -566,26 +614,6 @@ function registerShaderLab(monacoNs: typeof monaco): void {
 // takes these over the Monarch output (the two are documented to coexist;
 // see the `setMonarchTokensProvider` API doc in @codingame/monaco-vscode-api
 // for "work together with").
-//
-// What this provider does today:
-//   1. Forward the LSP request to the running Roslyn server via the generic
-//      `csharpLspBridgeRequest` IPC (which already exists for hover/
-//      definition/completion — no Rust changes needed).
-//   2. Decode the LSP delta-encoded `data: number[]` into absolute
-//      (line, startChar) + look up token text from the model.
-//   3. **Dump the first response to the console** so we can verify which
-//      tokenType/modifier Roslyn actually emits for `private int
-//      _lastScreenHeight;` — the answer determines which key to use in
-//      `editor.semanticTokenColorCustomizations.rules` for the indigo
-//      field-color hook. (See monacoVscodeServices.ts for the customize
-//      rules; the `variable.class` / `variable.declaration.class` entries
-//      there are currently dead code pending this dump.)
-//
-// What this provider does NOT do today (follow-up commit):
-//   - Hook a token-rule or customize-rule that paints fields indigo. We
-//     keep this commit minimal: wire the data path first, observe Roslyn's
-//     actual response shape, then add the rule in a follow-up that targets
-//     the verified tokenType/modifier.
 //
 // Edge cases handled:
 //   - LSP request fails (server cold start / network blip): return empty

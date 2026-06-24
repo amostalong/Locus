@@ -292,23 +292,36 @@ function classTypeColorCustomizations(): Record<string, unknown> {
         "type.readonly": CLASS_TYPE_PINK,
         // Some Roslyn/OmniSharp versions emit a bare `class` token type.
         class: CLASS_TYPE_PINK,
-        // Class fields (`_lastScreenHeight`, `m_count`, etc.) — these
-        // rules are CURRENTLY DEAD CODE: Locus's Roslyn bridge does not
-        // implement `textDocument/semanticTokens/full` (see
-        // unityLanguages.ts:402 — "once diagnostics work is in place"),
-        // so Roslyn semantic tokens never reach Monaco and these
-        // customize rules never fire. Field coloring today is entirely
-        // carried by the `variable.other.field.cs` token rules in
-        // PINK_TOKEN_RULES below, applied via the csharp TextMate
-        // grammar's emitted scope chain.
+        // Class fields (`_lastScreenHeight`, `m_count`, etc.) — these rules are
+        // CURRENTLY DEAD CODE for two compounding reasons:
         //
-        // We keep these dead-code rules around as a forward-compat
-        // marker — when the Roslyn bridge does eventually wire
-        // semanticTokens/full, these rules will start matching whatever
-        // tokenType/modifier Roslyn actually emits (likely
-        // `variable` + `declaration` and `variable` + `readonly`, but
-        // we have not verified). Remove or rewrite at that point based
-        // on what the Roslyn bridge's diagnostic dump shows.
+        //   (1) monaco-vscode-api 33.0.9 has a framework-level bug where
+        //       `getEditorFeatures()` (the channel `DocumentSemanticTokensFeature`
+        //       registers through) is never invoked by `codeEditorWidget.js:305`
+        //       — Monaco never instantiates the contrib that would dispatch
+        //       to the provider. So even when `monaco.languages
+        //       .registerDocumentSemanticTokensProvider` succeeds, the
+        //       provider's `provideDocumentSemanticTokens` is never called.
+        //
+        //   (2) Even if (1) were fixed, these specific keys (`variable.class`
+        //       / `variable.declaration.class`) may not match Roslyn's actual
+        //       output — Roslyn does not emit a `class` modifier (LSP RFC 14
+        //       standard modifiers are declaration/static/async/readonly/
+        //       defaultLibrary/abstract). Roslyn typically emits `property`
+        //       + `declaration` for fields (per vscode-csharp historical
+        //       behaviour), but we have not verified since the bridge is
+        //       blocked by (1).
+        //
+        // Field coloring today is entirely carried by the Monarch extension
+        // in `registerCsharpMonarchFieldGrammar` (unityLanguages.ts file end)
+        // — ~80% accuracy on common patterns, no LSP bridge dependency.
+        //
+        // When (1) is fixed: re-enable the `registerCsharpSemanticTokensProvider`
+        // call site in unityLanguages.ts (commented out, four-step procedure
+        // documented there). The first dump's tokenType/modifier distribution
+        // then tells you which key to use here — replace `variable.class` /
+        // `variable.declaration.class` with whatever Roslyn actually emits
+        // for fields (likely `property.declaration` or `property.readonly`).
         //
         // We DELIBERATELY do NOT include the bare `variable:declaration`
         // or `variable:readonly` rules that the previous version of this
