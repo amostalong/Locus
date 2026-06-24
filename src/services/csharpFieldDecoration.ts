@@ -362,6 +362,13 @@ export function applyCsharpFieldDecorations(
   source: string,
 ): void {
   const fields = findCsharpClassFields(source);
+  // Diagnostic — confirm the parser runs and what it returns. Cheap to
+  // compute (we just made the array), and invaluable for "why isn't my
+  // field colored" debugging. Drop this once the wiring is confirmed.
+  console.log(
+    `[csharpFieldDecoration] applyCsharpFieldDecorations source.length=${source.length} → fields.length=${fields.length}`,
+    fields.slice(0, 20),
+  );
   if (fields.length === 0) {
     decorationsCollection.set([]);
     return;
