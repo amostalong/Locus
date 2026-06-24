@@ -185,6 +185,7 @@ function syncModel() {
   }
   refreshEnclosingContext();
   refreshPreprocessorDimming();
+  refreshCsharpFieldColoring();
 }
 
 function applyTheme() {
