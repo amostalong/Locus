@@ -1708,6 +1708,23 @@ function cancelViewportFrame(handle: number) {
 // store queries). Coalescing them into a single per-frame pass keeps main-thread
 // time bounded when chat + a heavy right-tab (editor / knowledge) are both
 // competing for the rAF budget.
+//
+// During streaming, additionally throttle the high-frequency trigger sources
+// (token flushes, tool-call status, message appends) to one run every
+// STREAMING_RECONCILE_INTERVAL_MS. The user-visible scroll-to-bottom still
+// happens within 80ms of a token batch landing, which is below the threshold
+// of perception for a chat panel; what we avoid is running getBoundingClientRect
+// + getComputedStyle + chat-store reads 60 times per second on a panel that
+// is also competing with a heavy right-tab (editor mount, knowledge tree
+// render) for the rAF budget. One-shot user events (tool confirm, question
+// answered, transcript resize settled) still run at rAF speed.
+const STREAMING_RECONCILE_INTERVAL_MS = 80;
+const STREAMING_RECONCILE_REASONS = new Set([
+  "messages",
+  "messages-length",
+  "streaming-text",
+  "tool-calls",
+]);
 const coalesceReconcile = createCoalesceRunner({
   schedule: requestViewportFrame,
   cancel: cancelViewportFrame,
@@ -1719,6 +1736,11 @@ const coalesceReconcile = createCoalesceRunner({
       });
     }
     reconcileViewport();
+  },
+  minIntervalMs: (reason) => {
+    if (!props.isStreaming) return 0;
+    if (!STREAMING_RECONCILE_REASONS.has(reason)) return 0;
+    return STREAMING_RECONCILE_INTERVAL_MS;
   },
 });
 
