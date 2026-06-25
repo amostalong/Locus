@@ -196,6 +196,12 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
     return {
       "editor.background": "#1d1d1d",
       "editorGutter.background": "#1d1d1d",
+      // Default text foreground darkened from the vs-dark base (#D4D4D4)
+      // to a mid grey so the csharp-field steel-blue (#93b5cf) stands
+      // out — token rules (comments, strings, keywords) are higher
+      // priority than editor.foreground and are unaffected, so only
+      // uncolored identifiers shift to the dimmer grey.
+      "editor.foreground": "#9E9E9E",
       "peekView.background": "#2d2d2de0",
       "peekView.border": "#569cd673",
       "peekViewTitle.background": "#383838d9",
