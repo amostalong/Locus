@@ -91,12 +91,27 @@ export interface IFieldRange {
   endColumn: number;
   /** The field name as parsed (for diagnostics / hover). */
   name: string;
+  /**
+   * What kind of identifier this range is. "field" is the historical
+   * default (class members — instance/static fields and the
+   * `.x` / `.y` / `.width` member-access pattern). "type" is added
+   * for the class/struct/interface/enum/record declaration name,
+   * which the Monarch / TextMate grammar paths in monaco-vscode-api
+   * 33.0.9 fail to color for generic forms
+   * (`public class tagTweenerOnFinishParam<T>`).
+   */
+  kind: "field" | "type";
 }
 
 const FIELD_CSS_CLASS = "locus-csharp-field";
+const TYPE_CSS_CLASS = "locus-csharp-type";
 
 export function getCsharpFieldCssClass(): string {
   return FIELD_CSS_CLASS;
+}
+
+export function getCsharpTypeCssClass(): string {
+  return TYPE_CSS_CLASS;
 }
 
 /**
@@ -175,6 +190,12 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
   // base-type identifier in a `class X : Y {` declaration), not the
   // `class` keyword itself.
   let classKeywordPending = false;
+  // First identifier seen after a class-keyword, before the next sig
+  // token (`<`, `:`, `{`, etc). For `class tagTweenerOnFinishParam<T>`
+  // this is `tagTweenerOnFinishParam`. Recorded separately from
+  // `lastIdent` because `lastIdent` gets overwritten by generic
+  // parameter identifiers (`<T>`) before we reach the class-body `{`.
+  let pendingClassName: { text: string; range: IFieldRange } | null = null;
 
   let i = 0;
   let line = 1;
@@ -284,10 +305,22 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
         classScopeStack.length > 0 && methodDepth < 0 && prevSig === ")";
       if (isClassDecl) {
         classScopeStack.push({ classDepth: depth, fields: new Set() });
+        if (pendingClassName) {
+          // Paint the class/struct/interface/enum/record declaration
+          // name as a type — Monarch / csharp-TextMate inside
+          // monaco-vscode-api 33.0.9 fails to emit a `type.cs` /
+          // `entity.name.type.class.cs` scope for generic class names
+          // (e.g. `tagTweenerOnFinishParam<T>`), so the type-color
+          // token rule never fires and the name renders in the
+          // default foreground. Decorating the name here bypasses the
+          // grammar entirely.
+          fields.push(pendingClassName.range);
+        }
       } else if (isMethodDecl) {
         methodDepth = depth;
       }
       classKeywordPending = false;
+      pendingClassName = null;
       depth++;
       prevSig = "{";
       lastIdent = null;
@@ -340,7 +373,7 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
         lastIdent !== null &&
         (ch === ";" || ch === "=" || ch === ",")
       ) {
-        fields.push(lastIdent.range);
+        fields.push({ ...lastIdent.range, kind: "field" });
         // Record this name in the innermost class scope so method-body
         // references to the same name get colored too.
         classScopeStack[classScopeStack.length - 1].fields.add(lastIdent.text);
@@ -391,6 +424,28 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
         ident === "record"
       ) {
         classKeywordPending = true;
+        pendingClassName = null;
+      } else if (classKeywordPending && pendingClassName === null) {
+        // First ident after a class-keyword and before any sig token —
+        // record it as the class/declaration name. For
+        //   public class tagTweenerOnFinishParam<T>
+        // this is `tagTweenerOnFinishParam`; we capture it on the way
+        // through and let `{`-handling below paint it as a type.
+        // For the inheritance form `class X : Y {` and the generic
+        // form `class X<T1, T2> {`, `<` / `:` arrive before `{` and
+        // keep `pendingClassName` sticky (the subsequent ident is a
+        // base-type name or type-parameter, not the class name).
+        pendingClassName = {
+          text: ident,
+          range: {
+            startLineNumber: startLine,
+            startColumn: startCol,
+            endLineNumber: line,
+            endColumn: endCol,
+            name: ident,
+            kind: "type",
+          },
+        };
       }
       // Field *reference* inside a method body: if the ident's text
       // matches any field name registered in the current or any
@@ -431,6 +486,7 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
               endLineNumber: line,
               endColumn: endCol,
               name: ident,
+              kind: "field",
             });
             marked = true;
             break;
@@ -461,6 +517,7 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
               endLineNumber: line,
               endColumn: endCol,
               name: ident,
+              kind: "field",
             });
           }
         }
@@ -530,7 +587,9 @@ export function applyCsharpFieldDecorations(
   decorationsCollection.set(
     fields.map((range) => ({
       range,
-      options: { inlineClassName: FIELD_CSS_CLASS },
+      options: {
+        inlineClassName: range.kind === "type" ? TYPE_CSS_CLASS : FIELD_CSS_CLASS,
+      },
     })),
   );
 }

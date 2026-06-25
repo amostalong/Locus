@@ -46,3 +46,17 @@
 .locus-csharp-field {
   color: #A5CDD8 !important;
 }
+
+/**
+ * C# class/type name coloring (pink).
+ *
+ * Backup for the `entity.name.type.class.cs` / `entity.name.type.generic.cs`
+ * PINK_TOKEN_RULES path: monaco-vscode-api 33.0.9's csharp TextMate
+ * grammar fails to emit a type scope for generic class declarations
+ * (e.g. `public class tagTweenerOnFinishParam<T>`), so the parser in
+ * `services/csharpFieldDecoration.ts` paints the class/struct/interface/
+ * enum/record name itself via this className.
+ */
+.locus-csharp-type {
+  color: #FF69B4 !important;
+}
