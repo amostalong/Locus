@@ -277,7 +277,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
  * them as a safety net only if your diagnostic shows them matching.
  */
 const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
-const FUNCTION_GREEN = "#3DD66B"; // bright emerald — H=130°, L=0.55, S=0.7
+const FUNCTION_GREEN = "#31CB83"; // bright emerald — H=151° (greener), L=0.49, S=0.63
 const FIELD_INDIGO = "#5B5BD6"; // 靛青 — class field 专用，与 pink/teal 区分清晰
 
 function classTypeColorCustomizations(): Record<string, unknown> {
