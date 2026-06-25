@@ -277,7 +277,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
  * them as a safety net only if your diagnostic shows them matching.
  */
 const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
-const FUNCTION_GREEN = "#6AAF98"; // muted sage-green — H=140° (green), L=0.55 (same as #4ECB7A), S=0.3 (down from ~0.6)
+const FUNCTION_GREEN = "#8BC1AF"; // muted sage-green — H=140° (green), L=0.65 (up from 0.55), S=0.3
 const FIELD_INDIGO = "#5B5BD6"; // 靛青 — class field 专用，与 pink/teal 区分清晰
 
 function classTypeColorCustomizations(): Record<string, unknown> {
