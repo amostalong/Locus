@@ -400,14 +400,23 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       // name, the first match — innermost — fires; this matches C#
       // name-resolution semantics closely enough for coloring).
       //
-      // Also: single-character identifiers preceded by `.` are marked.
-      // This covers Unity struct public-field access patterns
-      // (`Vector2.y`, `Rect.x`, `Color.r`, `Vector3.z`) where the
-      // field belongs to an external type we don't have a symbol
-      // table for. Restricting to length 1 keeps the noise floor low:
-      // method names like `Equals` / `GetComponent`, properties like
-      // `position` / `size` / `sizeDelta`, and 2-letter framework
-      // identifiers like `WX` (WeChat SDK) are all filtered out.
+      // Field *reference* inside a method body: if the ident's text
+      // matches any field name registered in the current or any
+      // enclosing class scope, mark this range as a field. We walk the
+      // scope stack from innermost to outermost so an inner class's
+      // shadowing of the same name wins (since both sets contain the
+      // name, the first match — innermost — fires; this matches C#
+      // name-resolution semantics closely enough for coloring).
+      //
+      // Also: identifiers preceded by `.` whose *next* non-whitespace
+      // token is NOT `(` are treated as field/property accesses and
+      // marked. This covers Unity struct / class public-member
+      // patterns where the member belongs to an external type we
+      // have no symbol table for — `Vector2.y`, `Rect.width`,
+      // `transform.position`, `Color.r`, `Screen.orientation`, etc.
+      // The `(` lookahead filters out method calls
+      // (`_rectTf.GetComponent<>()`), which look syntactically the
+      // same as a member access right up to the open paren.
       if (
         inMethodBody() &&
         ident.length > 0 &&
@@ -427,14 +436,33 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
             break;
           }
         }
-        if (!marked && prevSig === "." && ident.length === 1) {
-          fields.push({
-            startLineNumber: startLine,
-            startColumn: startCol,
-            endLineNumber: line,
-            endColumn: endCol,
-            name: ident,
-          });
+        if (!marked && prevSig === ".") {
+          // Peek the next non-whitespace character. If it is `(` (with
+          // optional generic `<...>` argument list immediately before),
+          // this ident is being called as a method — skip. Otherwise
+          // treat it as a field/property access and mark it.
+          let j = i;
+          // skip optional generic type args between ident and `(`:
+          //   obj.Foo<int, string>(args)
+          if (j < len && source[j] === "<") {
+            let depth = 1;
+            j++;
+            while (j < len && depth > 0) {
+              if (source[j] === "<") depth++;
+              else if (source[j] === ">") depth--;
+              j++;
+            }
+          }
+          while (j < len && /\s/.test(source[j])) j++;
+          if (j < len && source[j] !== "(") {
+            fields.push({
+              startLineNumber: startLine,
+              startColumn: startCol,
+              endLineNumber: line,
+              endColumn: endCol,
+              name: ident,
+            });
+          }
         }
       }
       lastIdent = {
