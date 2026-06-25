@@ -109,6 +109,14 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
   // The most recent identifier (text + range). Used so we know which
   // identifier to mark when the next non-WS token confirms a field decl.
   let lastIdent: { text: string; range: IFieldRange } | null = null;
+  // True if we have seen a class-keyword (class/struct/interface/enum/
+  // record) since the last statement boundary. Set when we see such an
+  // identifier, reset by `;` / `{` / `}`. We need this — not
+  // `lastIdent.text === "class"` — because the *immediate* identifier
+  // before the opening `{` of a class body is the class name (or the
+  // base-type identifier in a `class X : Y {` declaration), not the
+  // `class` keyword itself.
+  let classKeywordPending = false;
 
   let i = 0;
   let line = 1;
@@ -201,27 +209,26 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
     // ── Braces ──────────────────────────────────────────────────────────
     if (ch === "{") {
       // Decide what kind of `{` this is.
-      //   - "class" / "struct" / "interface" / "enum" / "record" then an
-      //     identifier (or generic identifier) then `{`  → class body
+      //   - We saw a class/struct/interface/enum/record keyword since the
+      //     last statement boundary → class body
       //   - otherwise, if we're in a class body and the previous non-WS
       //     sig was `)` (method/ctor signature) and we're not already in a
       //     method body → method body
       //   - otherwise (block in a method body, object initializer, etc.)
       //     → ignored
-      const prevLower = prevSig.toLowerCase();
-      const isClassDecl =
-        prevLower === "ident" &&
-        (lastIdent?.text === "class" ||
-          lastIdent?.text === "struct" ||
-          lastIdent?.text === "interface" ||
-          lastIdent?.text === "enum" ||
-          lastIdent?.text === "record");
+      //
+      // Note: the immediate ident before `{` is the class *name* (or the
+      // base-type ident in `class X : Y {`), not the `class` keyword. We
+      // therefore track the class keyword via a separate flag set when
+      // the keyword identifier is scanned and reset by `;` / `{` / `}`.
+      const isClassDecl = classKeywordPending;
       const isMethodDecl = classDepth >= 0 && methodDepth < 0 && prevSig === ")";
       if (isClassDecl) {
         classDepth = depth;
       } else if (isMethodDecl) {
         methodDepth = depth;
       }
+      classKeywordPending = false;
       depth++;
       prevSig = "{";
       lastIdent = null;
@@ -237,6 +244,7 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       if (classDepth >= 0 && depth <= classDepth) {
         classDepth = -1;
       }
+      classKeywordPending = false;
       prevSig = "}";
       lastIdent = null;
       advance(1);
@@ -311,6 +319,19 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       // the identifier starting at startI with length `ident.length`, so
       // the range is correct.
       const endCol = startCol + ident.length;
+      // Track class-keyword occurrences so the `{` rule below can detect
+      // `class X {`, `class X : Y {`, `class X<T> {`, `record X(int Y) {`
+      // and friends. Reset on `;` / `{` / `}` via the `classKeywordPending`
+      // assignments in those branches.
+      if (
+        ident === "class" ||
+        ident === "struct" ||
+        ident === "interface" ||
+        ident === "enum" ||
+        ident === "record"
+      ) {
+        classKeywordPending = true;
+      }
       lastIdent = {
         text: ident,
         range: {
