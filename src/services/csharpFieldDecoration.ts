@@ -27,24 +27,39 @@
  *
  *   A character-level brace counter that tracks:
  *     - overall `{ }` nesting depth
- *     - whether the current depth is *inside a class body* (between the
- *       `class Foo {` opening brace and the matching closing brace)
+ *     - a stack of currently-open class bodies, each with the set of
+ *       field names declared inside it (so method-body references to
+ *       those fields can be colored too)
  *     - whether the current depth is *inside a method body* (a `{` that
  *       follows a method signature `)` within a class body)
  *
- *   In class body but NOT in method body, an identifier followed by `;`,
- *   `=`, or `,` (multi-variable declaration) and preceded by a non-`(`,
- *   non-`,`, non-`=`, non-`.` character (heuristic: looks like a
- *   declaration target rather than a parameter / member-access target) is
- *   marked as a field.
+ *   Two kinds of range are emitted:
  *
- *   **Accuracy: ~80% on common patterns.** False positives:
- *     - `string` constants in class body (`const string S = "...";`) — caught
- *     - Property expressions (`public int X => 42;`) — caught
+ *     - **Declaration** — class body, not method body, identifier
+ *       followed by `;` / `=` / `,` (multi-variable declaration) and
+ *       preceded by a non-`(`, non-`,`, non-`=`, non-`.` character
+ *       (heuristic: looks like a declaration target rather than a
+ *       parameter / member-access target). The name is also recorded
+ *       in the enclosing class scope's field set.
+ *
+ *     - **Reference** — inside any method body, any identifier whose
+ *       text matches a name in the current or any enclosing class
+ *       scope's field set.
+ *
+ *   **Accuracy on declarations: ~80%** (unchanged). Failure modes:
+ *     - `const string S = "...";` — fields like this get marked
+ *       (the parser doesn't know `const` is special).
+ *     - Property expressions (`public int X => 42;`) — get marked
+ *       as fields (a property, technically not a field).
  *     - Field-like initializers that span multiple lines via lambda
- *       (`public Action X = () => { ... };`) — the inner `{ }` looks like
- *       a method body and the `;` ends the declaration but our brace
- *       counter still gets confused. Acceptable.
+ *       (`public Action X = () => { ... };`) — the inner `{ }` looks
+ *       like a method body and the parser gets confused. Acceptable.
+ *
+ *   **Accuracy on references: high** for code following the C# naming
+ *     convention (fields prefixed with `_` or `m_` or `s_`, locals
+ *     camelCase or PascalCase). If a method declares a local whose
+ *     name happens to match a field, the local references are still
+ *     marked as fields — the parser does not track local symbols.
  *
  *   **What this parser explicitly does NOT do:**
  *     - distinguish access modifiers (private/public/...) — they're noise
@@ -86,7 +101,30 @@ export function getCsharpFieldCssClass(): string {
 
 /**
  * Parse a C# source and return the identifier ranges of class-field
- * declarations. Public for testability.
+ * declarations AND field references inside method bodies. Public for
+ * testability.
+ *
+ * Two-phase logic in a single pass:
+ *
+ *   - **Declaration** (class body, not method body, ident followed by
+ *     `;` / `=` / `,`): mark the ident's range as a field and record
+ *     the name in the enclosing class scope's field set.
+ *
+ *   - **Reference** (inside any method body, ident matches a name in
+ *     the current or any enclosing class scope's field set): mark the
+ *     ident's range.
+ *
+ *   - **Cross-scope lookup**: a method inside an inner class can see
+ *     outer-class fields; we walk the class-scope stack from inner to
+ *     outer and stop at the first match.
+ *
+ *   - **Local-variable shadowing**: if a method body declares a local
+ *     whose name happens to match a field, the local references are
+ *     still marked as fields (the parser does not track local symbols).
+ *     In practice this is rare — C# convention uses leading `_` on
+ *     fields — and the visual cost of a false positive is small (a few
+ *     extra identifiers painted indigo that may be locals). The Monaco
+ *     semantic-token bridge, when unblocked, will resolve this.
  */
 export function findCsharpClassFields(source: string): IFieldRange[] {
   const fields: IFieldRange[] = [];
@@ -94,13 +132,33 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
 
   // Brace-nesting depth. Always >= 0.
   let depth = 0;
-  // The brace depth at which the *current class body* opened (-1 if not in
-  // a class body). After `class Foo {` at depth 0, classDepth=0 and the
-  // first `}` that brings depth back to 0 closes the class body.
-  let classDepth = -1;
-  // The brace depth at which the *current method body* opened (-1 if not
-  // in a method body within a class body).
+  // Parenthesis nesting depth. Used to suppress field-declaration
+  // detection inside `(` ... `)` — method signatures (`void M(int x)`)
+  // and function-call argument lists (`Foo(a, b)`) both contain
+  // comma-separated identifiers that look like multi-variable
+  // declarations to a naive parser, but neither is a field declaration
+  // site. Anything that happens with parenDepth > 0 is therefore
+  // excluded from declaration marking AND from being added to a
+  // class's field name set.
+  let parenDepth = 0;
+  // Stack of currently-open class bodies, innermost last. Each entry
+  // remembers the brace depth at which the class body opened (so we
+  // know when its closing `}` arrives) and the set of field names
+  // declared inside it (so we can highlight references to those fields
+  // in method bodies of this class and any nested class).
+  const classScopeStack: { classDepth: number; fields: Set<string> }[] = [];
+  // The brace depth at which the *current method body* opened (-1 if
+  // not in a method body within a class body).
   let methodDepth = -1;
+  // Convenience: are we currently inside a method body that's nested
+  // inside at least one class body?
+  const inMethodBody = () => methodDepth >= 0 && classScopeStack.length > 0;
+  // Convenience: are we currently in a class body but not in any
+  // method body (i.e. the field-declaration zone)?
+  const inClassBodyNotMethod = () =>
+    classScopeStack.length > 0 &&
+    (methodDepth < 0 ||
+      methodDepth <= classScopeStack[classScopeStack.length - 1].classDepth);
 
   // The most recent non-whitespace, non-comment token we saw. Used for
   // context decisions ("is this `{` opening a class body or a method
@@ -222,9 +280,10 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       // therefore track the class keyword via a separate flag set when
       // the keyword identifier is scanned and reset by `;` / `{` / `}`.
       const isClassDecl = classKeywordPending;
-      const isMethodDecl = classDepth >= 0 && methodDepth < 0 && prevSig === ")";
+      const isMethodDecl =
+        classScopeStack.length > 0 && methodDepth < 0 && prevSig === ")";
       if (isClassDecl) {
-        classDepth = depth;
+        classScopeStack.push({ classDepth: depth, fields: new Set() });
       } else if (isMethodDecl) {
         methodDepth = depth;
       }
@@ -241,8 +300,12 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       if (methodDepth >= 0 && depth <= methodDepth) {
         methodDepth = -1;
       }
-      if (classDepth >= 0 && depth <= classDepth) {
-        classDepth = -1;
+      // Pop class scopes whose closing `}` we just walked past.
+      while (
+        classScopeStack.length > 0 &&
+        depth <= classScopeStack[classScopeStack.length - 1].classDepth
+      ) {
+        classScopeStack.pop();
       }
       classKeywordPending = false;
       prevSig = "}";
@@ -253,12 +316,16 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
 
     // ── Other sig tokens that reset / shape context ─────────────────────
     if (ch === ";" || ch === "," || ch === "(" || ch === "=" || ch === "<" || ch === ">" || ch === "?" || ch === "+" || ch === "-" || ch === "*" || ch === "/" || ch === "%" || ch === "&" || ch === "|" || ch === "^" || ch === "!" || ch === "~" || ch === ":" || ch === "[") {
+      // Track parenthesis depth so the declaration check below can
+      // exclude method signatures / call argument lists.
+      if (ch === "(") {
+        parenDepth++;
+      }
       // Field declaration: identifier followed by `;` or `=` or `,` in
-      // class body but NOT in method body, AND the previous sig is `ident`
-      // (not `(`, `,`, `.`, `=`, `?`, `<`, `>` etc which would mean the
-      // identifier is in a different syntactic slot).
-      const isClassBodyNotMethod =
-        classDepth >= 0 && methodDepth < 0;
+      // class body but NOT in method body, NOT inside any `(...)` group,
+      // AND the previous sig is `ident` (not `(`, `,`, `.`, `=`, `?`,
+      // `<`, `>` etc which would mean the identifier is in a different
+      // syntactic slot).
       const looksLikeFieldTarget =
         lastIdent !== null &&
         prevSig === "ident" &&
@@ -267,12 +334,16 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
         // these are not declaration targets.
         !lastIdent.text.startsWith("@");
       if (
-        isClassBodyNotMethod &&
+        inClassBodyNotMethod() &&
+        parenDepth === 0 &&
         looksLikeFieldTarget &&
         lastIdent !== null &&
         (ch === ";" || ch === "=" || ch === ",")
       ) {
         fields.push(lastIdent.range);
+        // Record this name in the innermost class scope so method-body
+        // references to the same name get colored too.
+        classScopeStack[classScopeStack.length - 1].fields.add(lastIdent.text);
       }
       prevSig = ch;
       lastIdent = null;
@@ -282,22 +353,11 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
 
     // ── `)` ends a method signature (used by `{` decision above) ─────────
     if (ch === ")") {
-      // Same field-mark check as above for completeness
-      const isClassBodyNotMethod = classDepth >= 0 && methodDepth < 0;
-      const looksLikeFieldTarget =
-        lastIdent !== null &&
-        prevSig === "ident" &&
-        !lastIdent.text.startsWith("@");
-      if (
-        isClassBodyNotMethod &&
-        looksLikeFieldTarget &&
-        lastIdent !== null &&
-        // `var x)` doesn't happen in normal C#; conservatively not marking
-        // here — the `;` / `=` / `,` paths handle the common cases.
-        false
-      ) {
-        fields.push(lastIdent!.range);
-      }
+      // Decrement paren depth — keeps the in-paren exclusion for the
+      // declaration check in sync with the matching `(`.
+      parenDepth = Math.max(0, parenDepth - 1);
+      // `var x)` doesn't happen in normal C#; conservatively not marking
+      // here — the `;` / `=` / `,` paths handle the common cases.
       prevSig = ")";
       lastIdent = null;
       advance(1);
@@ -331,6 +391,31 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
         ident === "record"
       ) {
         classKeywordPending = true;
+      }
+      // Field *reference* inside a method body: if the ident's text
+      // matches any field name registered in the current or any
+      // enclosing class scope, mark this range as a field. We walk the
+      // scope stack from innermost to outermost so an inner class's
+      // shadowing of the same name wins (since both sets contain the
+      // name, the first match — innermost — fires; this matches C#
+      // name-resolution semantics closely enough for coloring).
+      if (
+        inMethodBody() &&
+        ident.length > 0 &&
+        !ident.startsWith("@")
+      ) {
+        for (let s = classScopeStack.length - 1; s >= 0; s--) {
+          if (classScopeStack[s].fields.has(ident)) {
+            fields.push({
+              startLineNumber: startLine,
+              startColumn: startCol,
+              endLineNumber: line,
+              endColumn: endCol,
+              name: ident,
+            });
+            break;
+          }
+        }
       }
       lastIdent = {
         text: ident,
