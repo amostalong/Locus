@@ -201,7 +201,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
       // out — token rules (comments, strings, keywords) are higher
       // priority than editor.foreground and are unaffected, so only
       // uncolored identifiers shift to the dimmer grey.
-      "editor.foreground": "#9E9E9E",
+      "editor.foreground": "#B5B5B5",
       "peekView.background": "#2d2d2de0",
       "peekView.border": "#569cd673",
       "peekViewTitle.background": "#383838d9",
