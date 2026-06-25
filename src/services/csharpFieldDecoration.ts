@@ -399,11 +399,21 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
       // shadowing of the same name wins (since both sets contain the
       // name, the first match — innermost — fires; this matches C#
       // name-resolution semantics closely enough for coloring).
+      //
+      // Also: single-character identifiers preceded by `.` are marked.
+      // This covers Unity struct public-field access patterns
+      // (`Vector2.y`, `Rect.x`, `Color.r`, `Vector3.z`) where the
+      // field belongs to an external type we don't have a symbol
+      // table for. Restricting to length 1 keeps the noise floor low:
+      // method names like `Equals` / `GetComponent`, properties like
+      // `position` / `size` / `sizeDelta`, and 2-letter framework
+      // identifiers like `WX` (WeChat SDK) are all filtered out.
       if (
         inMethodBody() &&
         ident.length > 0 &&
         !ident.startsWith("@")
       ) {
+        let marked = false;
         for (let s = classScopeStack.length - 1; s >= 0; s--) {
           if (classScopeStack[s].fields.has(ident)) {
             fields.push({
@@ -413,8 +423,18 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
               endColumn: endCol,
               name: ident,
             });
+            marked = true;
             break;
           }
+        }
+        if (!marked && prevSig === "." && ident.length === 1) {
+          fields.push({
+            startLineNumber: startLine,
+            startColumn: startCol,
+            endLineNumber: line,
+            endColumn: endCol,
+            name: ident,
+          });
         }
       }
       lastIdent = {
