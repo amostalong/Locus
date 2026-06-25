@@ -277,7 +277,7 @@ function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
  * them as a safety net only if your diagnostic shows them matching.
  */
 const CLASS_TYPE_PINK = "#FF69B4"; // hot pink — 在 dark/light 主题上对比度都 OK
-const FUNCTION_GREEN = "#4EC9B0"; // vscode dark+ C# type/interface teal-green — 亮绿，形成 pink-vs-teal 对比
+const FUNCTION_GREEN = "#4ECB7A"; // emerald-green — shifted from vs-dark+ default #4EC9B0 toward more G, less B
 const FIELD_INDIGO = "#5B5BD6"; // 靛青 — class field 专用，与 pink/teal 区分清晰
 
 function classTypeColorCustomizations(): Record<string, unknown> {
