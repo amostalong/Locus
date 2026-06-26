@@ -41,6 +41,7 @@ import { useChatChangesStore } from "../stores/chatChanges";
 import { useChatStore } from "../stores/chat";
 import { useUiStore } from "../stores/ui";
 import { useNotificationStore } from "../stores/notification";
+import { useEditorStore } from "../stores/editor";
 import {
   captureScrollAnchor,
   captureLiveScrollAnchor,
@@ -98,6 +99,7 @@ const chatChangesStore = useChatChangesStore();
 const chatStore = useChatStore();
 const uiStore = useUiStore();
 const notificationStore = useNotificationStore();
+const editorStore = useEditorStore();
 const { state: shortcutState } = useKeyboardShortcuts();
 const { state: chatInputSettings } = useChatInputSettings();
 const { state: displaySettings } = useDisplaySettings();
@@ -383,6 +385,20 @@ const assetRefContextCanOpenLocusInspector = computed(() => {
     return shouldUseUnitySceneObjectRef(target.scenePath, target.objectPath);
   }
   return target.kind === "asset";
+});
+
+// Editor View is the in-app Monaco-backed editor added in this fork. It can
+// only open text-editable files, so we mirror `canOpenInEditor` here for the
+// context menu gate.
+const assetRefContextCanOpenInEditorView = computed(() => {
+  const target = assetRefCtxMenu.value?.target;
+  if (!target) return false;
+  const candidate = (() => {
+    if (target.kind === "asset") return target.assetPath;
+    if (target.kind === "file" && target.entryKind === "file") return target.filePath;
+    return null;
+  })();
+  return candidate !== null && canOpenInEditor(candidate);
 });
 
 const assetRefContextSupportsUnity = computed(() => {
@@ -810,10 +826,41 @@ function openAssetRefInUnityInspector(target: AssetRefClickTarget) {
   });
 }
 
+/**
+ * Open an asset ref in the in-app Editor View (Monaco-backed editor added in
+ * this fork). Falls back to legacy behavior (open externally / select in
+ * Unity) for targets that can't be loaded into Monaco — scene objects,
+ * folders, and binary/serialized Unity assets.
+ */
+async function openAssetRefInEditorView(target: AssetRefClickTarget) {
+  const filePath = target.kind === "asset" ? target.assetPath : null;
+  // Scene objects, folders, and binary/serialized files can't be opened in
+  // Monaco; mirror legacy behavior for those.
+  if (!filePath || target.kind === "sceneObject"
+    || (target.kind === "asset" && target.entryKind === "folder")
+    || !canOpenInEditor(filePath)) {
+    legacyAssetRefClick(target);
+    return;
+  }
+  try {
+    await editorStore.openFile(filePath);
+    uiStore.setTab("editor");
+  } catch (error) {
+    console.warn("editorStore.openFile failed for", filePath, error);
+    // Last resort: try the OS-default editor so the user still gets to see
+    // the file rather than a silent no-op.
+    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
+  }
+}
+
 function runAssetRefClickAction(target: AssetRefClickTarget) {
   const action = isUnityEmbeddedWindow()
     ? displaySettings.unityEmbedAssetRefClickAction
     : displaySettings.assetRefClickAction;
+  if (action === "editor") {
+    void openAssetRefInEditorView(target);
+    return;
+  }
   if (action === "unityInspector") {
     openAssetRefInUnityInspector(target);
     return;
@@ -894,6 +941,24 @@ async function doAssetRefOpenInEditor() {
   } catch (error) {
     console.warn("openFileExternal failed:", error);
     notifyAssetRefContextMenuError(error, "assetRefOpenInEditor", "Failed to open file");
+  }
+}
+
+// Context-menu variant of openAssetRefInEditorView — opens the in-app Editor
+// View directly instead of routing through `runAssetRefClickAction`. We pull
+// the path off the context-menu target (which carries both `assetPath` for
+// Unity assets and `filePath` for plain file refs) and reuse the same gate.
+async function doAssetRefOpenInEditorView() {
+  const target = assetRefCtxMenu.value?.target;
+  if (!target || !assetRefContextCanOpenInEditorView.value) return;
+  closeAssetRefContextMenu();
+  const filePath = target.kind === "asset" ? target.assetPath : target.filePath;
+  try {
+    await editorStore.openFile(filePath);
+    uiStore.setTab("editor");
+  } catch (error) {
+    console.warn("editorStore.openFile failed for", filePath, error);
+    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
   }
 }
 
@@ -3077,6 +3142,14 @@ onUnmounted(() => {
             @click="doAssetRefOpenInEditor"
           >
             {{ t("common.openInEditor") }}
+          </button>
+          <button
+            v-if="assetRefContextCanOpenInEditorView"
+            type="button"
+            class="asset-ref-ctx-item"
+            @click="doAssetRefOpenInEditorView"
+          >
+            {{ t("common.openInEditorView") }}
           </button>
           <button type="button" class="asset-ref-ctx-item" @click="doAssetRefShowInFolder">
             {{ t("common.openInFileExplorer") }}

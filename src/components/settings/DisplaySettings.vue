@@ -46,6 +46,11 @@ const diffReviewTargetOptions = computed(() => [
 
 const assetRefClickActionOptions = computed(() => [
   {
+    value: "editor",
+    label: t("settings.display.assetRefClickEditor"),
+    hint: t("settings.display.assetRefClickEditorDesc"),
+  },
+  {
     value: "locusInspectorAuto",
     label: t("settings.display.assetRefClickInspectorAuto"),
     hint: t("settings.display.assetRefClickInspectorAutoDesc"),

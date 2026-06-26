@@ -9,6 +9,7 @@ export type DiffReviewTarget = "inline" | "window";
 export type ChatDiffReviewTarget = DiffReviewTarget;
 export type GitDiffReviewTarget = DiffReviewTarget;
 export type AssetRefClickAction =
+  | "editor"
   | "unitySelect"
   | "fileBrowser"
   | "unityInspector"
@@ -119,7 +120,12 @@ const defaults: DisplaySettings = {
   fileChangePopoverEnabled: true,
   chatDiffReviewTarget: "window",
   gitDiffReviewTarget: "window",
-  assetRefClickAction: "locusInspectorAuto",
+  // Fork default: route asset ref clicks to the in-app Editor View when the
+  // file is text-editable. This fork ships its own Monaco-backed Editor View
+  // (see components/editor/EditorView.vue) so users get a code editor instead
+  // of the Locus Inspector. The Locus Inspector modes are still available
+  // from the Display settings picker for users who want them.
+  assetRefClickAction: "editor",
   // Inside the Unity embed window the editor's own Inspector is one click
   // away, so asset/GameObject refs open there by default.
   unityEmbedAssetRefClickAction: "unityInspector",

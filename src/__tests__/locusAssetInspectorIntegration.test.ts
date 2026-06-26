@@ -153,9 +153,12 @@ describe("Locus asset inspector integration", () => {
 
     expect(displaySettings).toContain("export type AssetRefClickAction =");
     expect(displaySettings).toContain("assetRefClickAction: AssetRefClickAction;");
-    // Adaptive is the default: embed when the window fits, otherwise window.
+    // Fork default: route asset ref clicks to the in-app Editor View.
+    // The Locus Inspector modes are still selectable from the Display settings
+    // picker for users who want them.
+    expect(displaySettings).toContain('| "editor"');
     expect(displaySettings).toContain('| "locusInspectorAuto"');
-    expect(displaySettings).toContain('assetRefClickAction: "locusInspectorAuto",');
+    expect(displaySettings).toContain('assetRefClickAction: "editor",');
     // The Unity embed window has its own click action, defaulting to the
     // editor's native Inspector.
     expect(displaySettings).toContain('| "unityInspector"');
@@ -166,6 +169,13 @@ describe("Locus asset inspector integration", () => {
     expect(chat).toContain("displaySettings.assetRefClickAction");
     expect(chat).toContain("displaySettings.unityEmbedAssetRefClickAction");
     expect(chat).toContain("isUnityEmbeddedWindow()");
+    // Fork: route through the in-app Editor View when that action is set.
+    expect(chat).toContain('action === "editor"');
+    expect(chat).toContain("openAssetRefInEditorView");
+    expect(chat).toContain("assetRefContextCanOpenInEditorView");
+    expect(chat).toContain("doAssetRefOpenInEditorView");
+    expect(chat).toContain("editorStore.openFile");
+    expect(chat).toContain('uiStore.setTab("editor")');
     expect(chat).toContain('action === "unityInspector"');
     expect(chat).toContain("openAssetRefInUnityInspector");
     expect(chat).toContain("legacyAssetRefClick");
@@ -178,6 +188,8 @@ describe("Locus asset inspector integration", () => {
     expect(displayPanel).toContain("unityEmbedAssetRefClickActionOptions");
     // Both pickers are dropdowns with a per-option description (hint).
     expect(displayPanel).toContain('import BaseDropdown from "../ui/BaseDropdown.vue";');
+    expect(displayPanel).toContain('value: "editor"');
+    expect(displayPanel).toContain('hint: t("settings.display.assetRefClickEditorDesc")');
     expect(displayPanel).toContain('value: "locusInspectorAuto"');
     expect(displayPanel).toContain('hint: t("settings.display.assetRefClickInspectorAutoDesc")');
     expect(displayPanel).toContain('value: "unityInspector"');
@@ -195,17 +207,20 @@ describe("Locus asset inspector integration", () => {
       expect(lang).toContain('"settings.display.assetRefClickTitle"');
       expect(lang).toContain('"settings.display.assetRefClickUnityEmbedTarget"');
       expect(lang).toContain('"settings.display.assetRefClickUnityInspector"');
+      expect(lang).toContain('"settings.display.assetRefClickEditor"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorAuto"');
       expect(lang).toContain('"settings.display.assetRefClickUnitySelect"');
       expect(lang).toContain('"settings.display.assetRefClickFileBrowser"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorEmbedded"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorWindow"');
       expect(lang).toContain('"settings.display.assetRefClickUnityInspectorDesc"');
+      expect(lang).toContain('"settings.display.assetRefClickEditorDesc"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorAutoDesc"');
       expect(lang).toContain('"settings.display.assetRefClickUnitySelectDesc"');
       expect(lang).toContain('"settings.display.assetRefClickFileBrowserDesc"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorEmbeddedDesc"');
       expect(lang).toContain('"settings.display.assetRefClickInspectorWindowDesc"');
+      expect(lang).toContain('"common.openInEditorView"');
     }
   });
 });
