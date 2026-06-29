@@ -44,7 +44,7 @@ export interface CoalesceRunnerOptions<THandle extends CoalesceScheduleHandle | 
    * construction (or after cancel()) is always immediate. Default: no limit.
    *
    * A function form lets callers pick the interval per reason — useful when
-   * high-frequency streaming triggers want an 80ms throttle while one-shot
+   * high-frequency streaming triggers want a 120ms throttle while one-shot
    * user events (tool confirm, question answered) should still run at rAF
    * speed. The function is called once per schedule() that arms a new run.
    */

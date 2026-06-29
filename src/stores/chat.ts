@@ -300,7 +300,7 @@ export const useChatStore = defineStore("chat", () => {
   const messages = ref<ChatMessage[]>([]);
   // Streaming text refs are primitive strings — use shallowRef to skip deep reactive
   // proxy setup. Subscribers that want fine-grained updates (e.g. per-character) should
-  // debounce themselves; ChatView debounces to STREAMING_RENDER_THROTTLE_MS (80ms) today.
+  // debounce themselves; ChatView debounces to STREAMING_RENDER_THROTTLE_MS (120ms) today.
   const streamingText = shallowRef("");
   const rawStreamText = shallowRef("");
   const streamingThinking = shallowRef("");

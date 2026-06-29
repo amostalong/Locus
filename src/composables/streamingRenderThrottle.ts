@@ -7,7 +7,7 @@ import type { AssistantRenderPart } from "../types";
  * ChatView applies to `displayedStreamingText` so all streaming surfaces
  * repaint in the same rhythm instead of once per delta event.
  */
-export const STREAMING_RENDER_THROTTLE_MS = 80;
+export const STREAMING_RENDER_THROTTLE_MS = 120;
 
 export interface ThrottledStreamingText {
   text: Readonly<Ref<string>>;
