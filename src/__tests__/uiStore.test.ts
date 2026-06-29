@@ -163,7 +163,7 @@ describe("ui store window resize sync", () => {
 
     await store.init();
 
-    expect(store.activeTab).toBe("chat");
+    expect(store.activeTab).toBe("home");
     expect(store.knowledgeMounted).toBe(false);
   });
 
@@ -233,7 +233,7 @@ describe("ui store window resize sync", () => {
 
     expect(tauriWindowMocks.getCurrentWindow).not.toHaveBeenCalled();
     expect(store.isMaximized).toBe(false);
-    expect(store.activeTab).toBe("chat");
+    expect(store.activeTab).toBe("home");
     expect(store.knowledgeMounted).toBe(false);
   });
 

@@ -152,7 +152,7 @@ describe("useAppBootstrap onboarding completion", () => {
     resetSystemNotificationStateMock = vi.fn();
 
     uiStoreMock = reactive({
-      activeTab: "chat",
+      activeTab: "home",
       completeOnboarding: vi.fn(),
       init: vi.fn().mockResolvedValue(undefined),
       setTab: vi.fn(),

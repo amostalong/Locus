@@ -382,7 +382,7 @@ watch(() => uiStore.editorMounted, (mounted) => {
 
 watch([() => uiStore.activeTab, visibleTopTabs], () => {
   if (isTopTabVisible(uiStore.activeTab)) return;
-  uiStore.setTab("editor");
+  uiStore.setTab("home");
 }, { immediate: true });
 
 // -- Workspace dropdown (local UI) --
@@ -902,29 +902,15 @@ watch(() => projectStore.workingDir, () => {
     @dragover.capture="handleMainUnityAssetDrag"
     @drop.capture="handleMainUnityAssetDrop"
   >
-    <div class="split-layout" ref="splitContainerRef">
-      <div class="chat-panel-left" :style="{ width: chatPanelWidth + 'px' }">
-        <component
-          :is="chatViewComponent"
-          v-if="chatViewComponent"
-          :active="true"
-          layout-mode="auto"
-          :default-session-panel-collapsed="false"
-          session-panel-storage-scope="left-panel"
-        />
-        <div v-else class="tab-loading-state" :class="{ 'is-error': !!chatViewError }">
-          {{ chatViewError || t("common.loading") }}
-        </div>
-      </div>
-      <div
-        class="split-divider"
-        :class="{ dragging: isSplitDragging }"
-        @mousedown="onSplitDividerMouseDown"
-      ></div>
-      <div class="main-area">
-        <div class="tab-bar" @pointerdown="onTabBarPointerDown">
+    <div class="split-layout" ref="splitContainerRef" :class="{ 'is-home-mode': uiStore.activeTab === 'home' }">
+      <div class="tab-bar" @pointerdown="onTabBarPointerDown">
         <div class="tab-drag-region" aria-hidden="true"></div>
-        <span class="tab-brand">Locus</span>
+        <button
+          type="button"
+          class="tab-brand"
+          :class="{ active: uiStore.activeTab === 'home' }"
+          @click="uiStore.setTab('home')"
+        >Locus</button>
         <button
           v-for="tab in visibleTopTabs"
           :key="tab.id"
@@ -1033,6 +1019,26 @@ watch(() => projectStore.workingDir, () => {
           </button>
         </div>
       </div>
+      <div class="split-body">
+      <div class="chat-panel-left" :style="uiStore.activeTab === 'home' ? { width: '100%' } : { width: chatPanelWidth + 'px' }">
+        <component
+          :is="chatViewComponent"
+          v-if="chatViewComponent"
+          :active="true"
+          layout-mode="auto"
+          :default-session-panel-collapsed="false"
+          session-panel-storage-scope="left-panel"
+        />
+        <div v-else class="tab-loading-state" :class="{ 'is-error': !!chatViewError }">
+          {{ chatViewError || t("common.loading") }}
+        </div>
+      </div>
+      <div
+        class="split-divider"
+        :class="{ dragging: isSplitDragging }"
+        @mousedown="onSplitDividerMouseDown"
+      ></div>
+      <div class="main-area">
       <TopBannerHost />
 
       <div class="tab-content">
@@ -1163,7 +1169,8 @@ watch(() => projectStore.workingDir, () => {
           {{ settingsViewError || t("common.loading") }}
         </div>
       </div>
-    </div>
+      </div>
+      </div>
     </div>
   </div>
   <AppUpdateModal
@@ -1653,12 +1660,35 @@ body.is-dragging-select-lock * {
 .tab-brand {
   -webkit-app-region: no-drag;
   flex: 0 0 auto;
+  position: relative;
+  padding: 0 14px;
+  height: 100%;
+  border: none;
+  background: none;
   font-size: 14px;
   font-weight: 650;
   letter-spacing: -0.2px;
   margin-right: 10px;
   color: var(--text-color);
   white-space: nowrap;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.tab-brand:hover {
+  color: var(--accent-color);
+}
+
+.tab-brand.active::after {
+  content: "";
+  position: absolute;
+  bottom: 1px;
+  left: 14px;
+  right: 14px;
+  height: 1px;
+  background: var(--accent-color);
+  border-radius: 999px;
+  opacity: 0.85;
 }
 
 .tab-spacer {
@@ -2152,6 +2182,15 @@ body.is-dragging-select-lock * {
 .split-layout {
   flex: 1;
   display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.split-body {
+  flex: 1;
+  display: flex;
   flex-direction: row;
   min-width: 0;
   min-height: 0;
@@ -2183,5 +2222,18 @@ body.is-dragging-select-lock * {
 .split-divider.dragging {
   background: var(--accent-color);
   opacity: 0.5;
+}
+
+/* Home mode: hide the right pane, chat fills the body.
+   Tab-bar stays visible (now lives outside .main-area) so users can still
+   click another tab to leave home mode. */
+.split-layout.is-home-mode .split-divider,
+.split-layout.is-home-mode .main-area {
+  display: none;
+}
+
+.split-layout.is-home-mode .chat-panel-left {
+  flex: 1 1 100%;
+  border-right: none;
 }
 </style>

@@ -184,7 +184,7 @@ export function useAppBootstrap() {
   watch(
     () => uiStore.activeTab,
     (tab) => {
-      if (tab === "chat" && !skillsLoaded) {
+      if (tab === "home" && !skillsLoaded) {
         loadSkills();
         skillsLoaded = true;
       }

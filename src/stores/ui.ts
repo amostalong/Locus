@@ -32,7 +32,7 @@ interface PendingChatPrefill extends ChatPrefillOptions {
 export const useUiStore = defineStore("ui", () => {
 // Union of local ("editor") + upstream ("chat | collab | knowledge | asset | views | plugins | agent | settings")
   // Local added "editor" for Monaco editor tab; upstream kept the rest unchanged.
-  const activeTab = ref<"chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
+  const activeTab = ref<"home" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("home");
   // Union of local (knowledge) + upstream (hotReload | unityConnection | testing).
   // Upstream removed the standalone Knowledge tab in SettingsView; local code may still reference it.
   const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
@@ -193,10 +193,10 @@ export const useUiStore = defineStore("ui", () => {
       }
     }
     try {
-      setTab("chat");
+      setTab("home");
       showOnboarding.value = !localStorage.getItem("locus-onboarding-completed");
     } catch (error) {
-      setTab("chat");
+      setTab("home");
       console.error("Failed to read onboarding completion state:", error);
       showOnboarding.value = false;
     }
