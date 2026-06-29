@@ -6,6 +6,7 @@ import { languageFromPath } from "../../services/editorLanguage";
 import { useUiStore } from "../../stores/ui";
 import type { CodeRefAttachment } from "../../types";
 import FileTreeNode from "./FileTreeNode.vue";
+import FileTypeIcon from "./FileTypeIcon.vue";
 
 const props = withDefaults(defineProps<{
   entry: DirEntry;
@@ -74,6 +75,8 @@ const unityFolderBadge = computed((): UnityFolderBadge | null => {
   // 项目根级特殊目录
   if (name === 'Assets' && path === 'Assets') return { color: 'var(--color-unity-assets)', kind: 'box' };
   if (name === 'Packages' && path === 'Packages') return { color: 'var(--accent-color)', kind: 'square' };
+  // 仓库根的 scripts/：复用 Assets 的暗肉红配色 + box badge，跟 Unity Projects 类项目级元目录一致
+  if (name === 'scripts' && path === 'scripts') return { color: 'var(--color-unity-assets)', kind: 'box' };
 
   // 只有 Assets/ 下的子目录才算是 Unity 特殊文件夹
   if (path.startsWith('Assets/')) {
@@ -87,10 +90,11 @@ const unityFolderBadge = computed((): UnityFolderBadge | null => {
   return null;
 });
 
-// 仅 Assets 文件夹用暗肉红色标注文字，其他 Unity 文件夹只保留 badge
+// 仅 Assets / 仓库根 scripts/ 文件夹用暗肉红色标注文字，其他 Unity 文件夹只保留 badge
 const unityFolderColor = computed((): string | null => {
   if (!props.entry.isDir) return null;
   if (props.entry.name === 'Assets' && props.entry.relPath === 'Assets') return 'var(--color-unity-assets)';
+  if (props.entry.name === 'scripts' && props.entry.relPath === 'scripts') return 'var(--color-unity-assets)';
   return null;
 });
 
@@ -309,11 +313,7 @@ function bubbleOpen(relPath: string) {
             <path v-else-if="unityFolderBadge.kind === 'angle'" d="M10.5 11.5l1.5 1-1.5 1" stroke="white" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".95" />
           </g>
         </svg>
-        <svg v-else viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-          <path
-            d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5.379a1.5 1.5 0 0 1 1.06.44l2.122 2.12A1.5 1.5 0 0 1 13.5 3.62V14.5A1.5 1.5 0 0 1 12 16H4.5A1.5 1.5 0 0 1 3 14.5v-13zM10 1.5V3.5a.5.5 0 0 0 .5.5h2L10 1.5z"
-          />
-        </svg>
+        <FileTypeIcon v-else :name="entry.name" :dim="!!unityFolderColor" />
       </span>
       <span class="ed-tree-name">{{ entry.name }}</span>
     </button>
