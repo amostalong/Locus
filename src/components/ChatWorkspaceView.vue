@@ -55,7 +55,24 @@ const ASSISTANT_PANEL_MIN_CHAT_WIDTH = 560;
 const ASSISTANT_SIDEBAR_SIDE_MAX_WIDTH = 520;
 const ASSISTANT_SIDEBAR_RESIZE_HANDLE_WIDTH = 3;
 const ASSISTANT_SIDEBAR_MAX_WORKSPACE_RATIO = 0.34;
-const THINKING_PANEL_SIDE_WIDTH = 340;
+const THINKING_PANEL_SIDE_WIDTH = 480;
+const THINKING_PANEL_MAX_SIDE_WIDTH = 880;
+const THINKING_PANEL_MIN_SIDE_WIDTH = 260;
+const thinkingPanelMaxSideWidth = computed(() => {
+  if (!chatStore.showThinkingPanel) return THINKING_PANEL_MAX_SIDE_WIDTH;
+  const width = workspaceWidth.value;
+  if (width <= 0) return THINKING_PANEL_MAX_SIDE_WIDTH;
+  // Reserve: chat min + assistant sidebar max + its handle, so neither sibling
+  // gets squeezed when the user drags the thinking panel wider.
+  const reserved =
+    ASSISTANT_PANEL_MIN_CHAT_WIDTH
+    + ASSISTANT_SIDEBAR_SIDE_MAX_WIDTH
+    + ASSISTANT_SIDEBAR_RESIZE_HANDLE_WIDTH;
+  return Math.max(
+    THINKING_PANEL_MIN_SIDE_WIDTH,
+    Math.min(THINKING_PANEL_MAX_SIDE_WIDTH, Math.floor(width - reserved)),
+  );
+});
 const SIDEBAR_ENTER_TRANSITION_MS = 200;
 const SIDEBAR_EXIT_TRANSITION_MS = 180;
 const fixedAuxiliarySideWidth = computed(() =>
@@ -429,6 +446,8 @@ onUnmounted(() => {
       v-if="active && chatStore.showThinkingPanel"
       :thinking="chatStore.thinkingPanelContent || chatStore.streamingThinking"
       :is-thinking="chatStore.isThinking && !chatStore.thinkingPanelContent"
+      :layout="isVerticalLayout ? 'bottom' : 'side'"
+      :max-side-width="thinkingPanelMaxSideWidth"
       @close="chatStore.showThinkingPanel = false"
     />
     <Transition
@@ -471,15 +490,5 @@ onUnmounted(() => {
 
 .chat-workspace-view.is-vertical-layout {
   flex-direction: column;
-}
-
-.chat-workspace-view.is-vertical-layout :deep(.thinking-panel) {
-  width: 100%;
-  min-width: 0;
-  height: 220px;
-  min-height: 180px;
-  border-left: none;
-  border-top: 1px solid var(--border-color);
-  flex-shrink: 0;
 }
 </style>
