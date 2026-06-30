@@ -1604,18 +1604,41 @@ mod hook {
         st.symbol_count = 0;
     }
 
+    /// Engine PDB file name for the engine module identified by
+    /// `module_file_name` (e.g. `Unity.dll`, `Unity.exe`, `Tuanjie.dll`,
+    /// `Tuanjie.exe`). Anything not recognizably Tuanjie returns Unity's
+    /// exact PDB name, so the standard-Unity path is unchanged.
+    ///
+    /// Mirrors `unity_bridge::flavor::engine_pdb_name_for_module`. Tuanjie
+    /// ships the same engine binary with the engine module renamed
+    /// (`Unity.dll` → `Tuanjie.dll`, `Unity.exe` → `Tuanjie.exe`) and a
+    /// matching `Tuanjie_x64.pdb` next to it; this helper closes the last
+    /// in-process hard-coding that prevented the patch from loading inside
+    /// a Tuanjie editor.
+    fn engine_pdb_name_for_module(module_file_name: &str) -> &'static str {
+        let stem = Path::new(module_file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if stem.eq_ignore_ascii_case("Tuanjie") {
+            "Tuanjie_x64.pdb"
+        } else {
+            "unity_x64.pdb"
+        }
+    }
+
     fn apply_all() -> Result<Vec<PatchRecord>, String> {
         let module = find_unity_engine_module()?;
         let image_path = Path::new(&module.path);
         let symbol_dir = image_path.parent().ok_or_else(|| {
             format!(
-                "Unity engine module has no parent directory: {}",
+                "Editor engine module has no parent directory: {}",
                 module.path
             )
         })?;
-        let pdb_path = symbol_dir.join("unity_x64.pdb");
+        let pdb_path = symbol_dir.join(engine_pdb_name_for_module(&module.path));
         if !pdb_path.is_file() {
-            return Err(format!("Unity PDB is missing: {}", pdb_path.display()));
+            return Err(format!("Editor PDB is missing: {}", pdb_path.display()));
         }
 
         let mut records: Vec<PatchRecord> = Vec::new();
@@ -1672,15 +1695,24 @@ mod hook {
         let mut exe_module = None;
         while has_entry {
             let name = wide_to_string(&entry.szModule);
-            if name.eq_ignore_ascii_case("Unity.dll") {
+            // DLL form first (preferred), then the EXE that statically links
+            // the engine. Both `Unity.dll` / `Unity.exe` and Tuanjie's
+            // renamed `Tuanjie.dll` / `Tuanjie.exe` are accepted; a live
+            // editor only ever loads one flavor, so this never changes which
+            // module is picked for a standard Unity install.
+            if name.eq_ignore_ascii_case("Unity.dll")
+                || name.eq_ignore_ascii_case("Tuanjie.dll")
+            {
                 return Ok(module_info_from_entry(&entry));
             }
-            if name.eq_ignore_ascii_case("Unity.exe") {
+            if name.eq_ignore_ascii_case("Unity.exe")
+                || name.eq_ignore_ascii_case("Tuanjie.exe")
+            {
                 exe_module = Some(module_info_from_entry(&entry));
             }
             has_entry = unsafe { Module32NextW(snapshot.raw(), &mut entry) != 0 };
         }
-        exe_module.ok_or_else(|| "Unity engine module was not found in this process".to_string())
+        exe_module.ok_or_else(|| "Editor engine module was not found in this process".to_string())
     }
 
     fn module_info_from_entry(entry: &ModuleEntry32W) -> ModuleInfo {
@@ -1779,7 +1811,7 @@ mod hook {
 
     #[cfg(test)]
     mod tests {
-        use super::{PATCH_BYTES, SYMBOLS};
+        use super::{engine_pdb_name_for_module, PATCH_BYTES, SYMBOLS};
 
         /// Parity with `unity_bridge/background_hook.rs`: the cross-process and
         /// in-process patches must touch the same symbols with the same bytes.
@@ -1792,6 +1824,39 @@ mod hook {
                     "Unity!IsApplicationActive",
                     "Unity!IsApplicationActiveOSImpl",
                 ]
+            );
+        }
+
+        /// `engine_pdb_name_for_module` must resolve the in-process
+        /// `find_unity_engine_module` candidate into the matching PDB on
+        /// disk. Anything not recognizably Tuanjie falls back to Unity's
+        /// exact PDB name so the standard-Unity path is byte-for-byte
+        /// unchanged.
+        #[test]
+        fn pdb_name_derives_from_module_filename() {
+            // Standard Unity — must keep resolving to the original PDB name.
+            assert_eq!(engine_pdb_name_for_module("Unity.dll"), "unity_x64.pdb");
+            assert_eq!(engine_pdb_name_for_module("Unity.exe"), "unity_x64.pdb");
+            assert_eq!(engine_pdb_name_for_module("unity.dll"), "unity_x64.pdb");
+            assert_eq!(engine_pdb_name_for_module(""), "unity_x64.pdb");
+
+            // Tuanjie (团结引擎, the Unity China fork) — engine module
+            // renamed, PDB renamed to match.
+            assert_eq!(
+                engine_pdb_name_for_module("Tuanjie.dll"),
+                "Tuanjie_x64.pdb"
+            );
+            assert_eq!(
+                engine_pdb_name_for_module("Tuanjie.exe"),
+                "Tuanjie_x64.pdb"
+            );
+            assert_eq!(
+                engine_pdb_name_for_module("tuanjie.dll"),
+                "Tuanjie_x64.pdb"
+            );
+            assert_eq!(
+                engine_pdb_name_for_module(r"f:\tuanjie\2022.3.62t10\editor\tuanjie.dll"),
+                "Tuanjie_x64.pdb"
             );
         }
     }
