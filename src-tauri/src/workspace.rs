@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -9,7 +9,26 @@ pub struct WorkspaceConfig {
     pub workspace_id: String,
 }
 
+/// Workspace state. Splits the previously monolithic `working_dir` concept into:
+/// - `workspace_root`: user-selected canonical root. Knowledge / skill / memory
+///   are anchored here.
+/// - `unity_root`: canonical Unity project root (resolved from `workspace_root`
+///   via `resolve_unity_project_path`). Unity integration (asset_db, C# LSP,
+///   native bridge, Unity monitor) is anchored here.
+///
+/// During the migration window (`path` is still present), legacy code can keep
+/// reading `workspace.path` — it mirrors `unity_root`. Writes MUST go through
+/// [`Workspace::set_unity_root`] or [`Workspace::set_workspace_root`] so both
+/// fields stay in sync. The `path` field will be removed in P6 once all
+/// callers have migrated to `unity_root` / `workspace_root`.
 pub struct Workspace {
+    /// User-selected canonical root. Knowledge base lives here.
+    pub workspace_root: tokio::sync::RwLock<String>,
+    /// Resolved Unity project root. Unity integration lives here.
+    pub unity_root: tokio::sync::RwLock<String>,
+    /// **Deprecated alias** for `unity_root`. Retained so the ~223 legacy
+    /// `workspace.path.read().await` call sites keep compiling. Removed in P6.
+    #[allow(dead_code)]
     pub path: tokio::sync::RwLock<String>,
     pub workspace_id: tokio::sync::RwLock<Option<String>>,
     generation: AtomicU64,
@@ -17,13 +36,48 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Construct a workspace where `workspace_root == unity_root`. Used at app
+    /// startup before the user has had a chance to set a custom workspace.
     pub fn new(path: String, workspace_id: Option<String>) -> Self {
         Self {
+            workspace_root: tokio::sync::RwLock::new(path.clone()),
+            unity_root: tokio::sync::RwLock::new(path.clone()),
             path: tokio::sync::RwLock::new(path),
             workspace_id: tokio::sync::RwLock::new(workspace_id),
             generation: AtomicU64::new(0),
             generation_lock: Mutex::new(()),
         }
+    }
+
+    /// Construct a workspace with separate `workspace_root` and `unity_root`.
+    /// Used by `set_workspace` after path resolution.
+    pub fn new_with_roots(
+        workspace_root: String,
+        unity_root: String,
+        workspace_id: Option<String>,
+    ) -> Self {
+        Self {
+            workspace_root: tokio::sync::RwLock::new(workspace_root),
+            unity_root: tokio::sync::RwLock::new(unity_root.clone()),
+            path: tokio::sync::RwLock::new(unity_root),
+            workspace_id: tokio::sync::RwLock::new(workspace_id),
+            generation: AtomicU64::new(0),
+            generation_lock: Mutex::new(()),
+        }
+    }
+
+    /// Atomically update `unity_root` and the deprecated `path` alias.
+    /// Use this whenever legacy code needs to change the Unity root.
+    pub async fn set_unity_root(&self, new_path: String) {
+        *self.unity_root.write().await = new_path.clone();
+        *self.path.write().await = new_path;
+    }
+
+    /// Update `workspace_root` (knowledge base anchor). Does NOT change
+    /// `unity_root` — call `set_unity_root` separately if the Unity root
+    /// also moved.
+    pub async fn set_workspace_root(&self, new_path: String) {
+        *self.workspace_root.write().await = new_path;
     }
 
     pub fn generation(&self) -> u64 {
@@ -166,13 +220,171 @@ pub fn load_or_create_workspace(dir: &str) -> Result<String, String> {
     Ok(workspace_id)
 }
 
+// ============================================================================
+// Path resolution (P1 of workspace_root vs unity_root refactor)
+// ============================================================================
+
+/// Result of resolving a Unity project root from a user-selected path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ResolveUnityResult {
+    /// Path resolved unambiguously. `unity_root` is canonical; `levels` is
+    /// how many `parent()` steps we walked (0 = input was already a Unity
+    /// root).
+    Resolved { unity_root: String, levels: u8 },
+    /// Multiple Unity projects found under the input; front-end must show a
+    /// picker. Each candidate is canonical.
+    Picker { candidates: Vec<String> },
+    /// No Unity project found within the search radius.
+    NotFound,
+}
+
+/// How many `parent()` steps to take when walking up looking for a Unity root.
+const WALK_UP_MAX_LEVELS: u8 = 3;
+/// How deep the BFS descends below the input when no ancestor matched.
+const BFS_MAX_DEPTH: u8 = 2;
+/// Hard cap on BFS candidates before we declare "Picker".
+const BFS_MAX_RESULTS: usize = 5;
+/// Directories that BFS skips — known to be huge or irrelevant to Unity
+/// project discovery.
+const BFS_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".cache",
+    "Library",
+    "Temp",
+    "Logs",
+    ".idea",
+    ".vscode",
+    ".vs",
+    "obj",
+    "bin",
+    "target",
+    "dist",
+    "build",
+];
+
+fn is_unity_project_dir(path: &Path) -> bool {
+    path.join("Assets").is_dir() && path.join("ProjectSettings").is_dir()
+}
+
+/// Canonicalize a path for stable comparison. Returns `None` if the path
+/// doesn't exist (dunce errors on missing files).
+fn canonicalize_for_compare(p: &Path) -> Option<String> {
+    dunce::canonicalize(p)
+        .ok()
+        .map(|cp| cp.to_string_lossy().to_string())
+}
+
+/// Resolve a Unity project root from a user-selected path.
+///
+/// Resolution order:
+/// 1. The input itself contains `Assets/` + `ProjectSettings/`
+///    → `Resolved { unity_root: input, levels: 0 }`.
+/// 2. Walk up to `WALK_UP_MAX_LEVELS` ancestors; the first one containing
+///    `Assets/` + `ProjectSettings/` wins (levels=1..N).
+/// 3. Otherwise BFS depth `BFS_MAX_DEPTH` from the input looking for Unity
+///    projects, skipping known-noise directories:
+///    - 0 found → `NotFound`
+///    - 1 found → `Resolved` (levels=0, treated as exact)
+///    - >1 found → `Picker` (front-end asks user)
+pub fn resolve_unity_project_path(input: &str) -> ResolveUnityResult {
+    let canonical = match canonicalize_for_compare(Path::new(input)) {
+        Some(c) => c,
+        None => return ResolveUnityResult::NotFound,
+    };
+
+    // 1. self
+    if is_unity_project_dir(Path::new(&canonical)) {
+        return ResolveUnityResult::Resolved {
+            unity_root: canonical,
+            levels: 0,
+        };
+    }
+
+    // 2. walk up
+    let mut current = PathBuf::from(&canonical);
+    for level in 1..=WALK_UP_MAX_LEVELS {
+        match current.parent() {
+            Some(parent) => {
+                let parent_str = parent.to_string_lossy().to_string();
+                if is_unity_project_dir(Path::new(&parent_str)) {
+                    return ResolveUnityResult::Resolved {
+                        unity_root: parent_str,
+                        levels: level,
+                    };
+                }
+                current = parent.to_path_buf();
+            }
+            None => break, // reached drive root on Windows or `/` on Unix
+        }
+    }
+
+    // 3. BFS down
+    let candidates = find_unity_projects_bfs(Path::new(&canonical));
+    match candidates.len() {
+        0 => ResolveUnityResult::NotFound,
+        1 => ResolveUnityResult::Resolved {
+            unity_root: candidates.into_iter().next().unwrap(),
+            levels: 0,
+        },
+        _ => ResolveUnityResult::Picker { candidates },
+    }
+}
+
+/// BFS descendants looking for Unity project roots, depth-limited and
+/// result-capped.
+fn find_unity_projects_bfs(root: &Path) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, u8)> = std::collections::VecDeque::new();
+    queue.push_back((root.to_path_buf(), 0));
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if candidates.len() >= BFS_MAX_RESULTS {
+            break;
+        }
+        if depth > BFS_MAX_DEPTH {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            if candidates.len() >= BFS_MAX_RESULTS {
+                break;
+            }
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if BFS_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+
+            if is_unity_project_dir(&path) {
+                if let Some(canonical) = canonicalize_for_compare(&path) {
+                    candidates.push(canonical);
+                }
+            } else if depth < BFS_MAX_DEPTH {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::{
-        generated_workspace_id, load_or_create_workspace, read_workspace_config, Workspace,
-        WorkspaceConfig,
+        generated_workspace_id, load_or_create_workspace, read_workspace_config,
+        resolve_unity_project_path, ResolveUnityResult, Workspace, WorkspaceConfig,
     };
 
     fn write_project_settings(root: &tempfile::TempDir, body: &str) {
@@ -277,5 +489,157 @@ mod tests {
 
         assert!(workspace_id.starts_with("unity-"));
         assert_eq!(cfg.workspace_id, workspace_id);
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_unity_project_path (P1 of workspace_root vs unity_root)
+    // ------------------------------------------------------------------
+
+    /// Helper: turn a TempDir into a minimal Unity project (Assets/ +
+    /// ProjectSettings/) and return the path.
+    fn make_unity_project(root: &tempfile::TempDir) -> std::path::PathBuf {
+        let p = root.path().to_path_buf();
+        fs::create_dir_all(p.join("Assets")).unwrap();
+        fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+        p
+    }
+
+    #[test]
+    fn resolve_returns_exact_when_input_is_unity_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unity_root = make_unity_project(&tmp);
+
+        let result = resolve_unity_project_path(unity_root.to_str().unwrap());
+        match result {
+            ResolveUnityResult::Resolved { levels, .. } => {
+                assert_eq!(levels, 0, "input was already a Unity root");
+            }
+            other => panic!("expected Resolved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_walks_up_to_find_unity_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unity_root = make_unity_project(&tmp);
+        // /unity_root/Assets/Scripts/Player — 2 levels deep
+        let nested = unity_root.join("Assets").join("Scripts").join("Player");
+        fs::create_dir_all(&nested).unwrap();
+
+        let result = resolve_unity_project_path(nested.to_str().unwrap());
+        match result {
+            ResolveUnityResult::Resolved { levels, unity_root: r } => {
+                assert_eq!(
+                    levels, 3,
+                    "Player → Scripts → Assets → unity_root = 3 parents"
+                );
+                // Resolved path is the parent (unity_root), not the input.
+                let input_path = std::path::Path::new(nested.to_str().unwrap());
+                let resolved_path = std::path::Path::new(&r);
+                assert_eq!(
+                    resolved_path.parent(),
+                    input_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).and_then(|p| p.parent())
+                );
+            }
+            other => panic!("expected Resolved (walked up), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_stops_walk_up_after_three_levels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unity_root = make_unity_project(&tmp);
+        // /unity_root/a/b/c/d — 4 levels deep, exceeds WALK_UP_MAX_LEVELS=3
+        let deep = unity_root.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        // BFS won't find anything (d is a leaf and the path contains nothing
+        // that looks like a Unity project below it).
+
+        let result = resolve_unity_project_path(deep.to_str().unwrap());
+        assert_eq!(
+            result,
+            ResolveUnityResult::NotFound,
+            "4-level walk-up exceeds WALK_UP_MAX_LEVELS=3; expect NotFound"
+        );
+    }
+
+    #[test]
+    fn resolve_returns_picker_when_multiple_unity_descendants() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two sibling Unity projects under the parent.
+        for name in ["GameA", "GameB"] {
+            let game = tmp.path().join(name);
+            fs::create_dir_all(game.join("Assets")).unwrap();
+            fs::create_dir_all(game.join("ProjectSettings")).unwrap();
+        }
+
+        let result = resolve_unity_project_path(tmp.path().to_str().unwrap());
+        match result {
+            ResolveUnityResult::Picker { candidates } => {
+                assert_eq!(candidates.len(), 2, "two Unity siblings → Picker");
+                let names: Vec<String> = candidates
+                    .iter()
+                    .filter_map(|c| std::path::Path::new(c).file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .collect();
+                assert!(names.contains(&"GameA".to_string()));
+                assert!(names.contains(&"GameB".to_string()));
+            }
+            other => panic!("expected Picker, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_returns_not_found_when_no_unity_in_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No Assets/ + ProjectSettings/ within 3 up / 2 down.
+        let loose = tmp.path().join("loose");
+        fs::create_dir_all(&loose).unwrap();
+
+        let result = resolve_unity_project_path(loose.to_str().unwrap());
+        assert_eq!(result, ResolveUnityResult::NotFound);
+    }
+
+    #[test]
+    fn resolve_bfs_skips_node_modules_and_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plant fake Unity projects inside noise directories — BFS must skip them.
+        for noise in ["node_modules", ".git", "Library"] {
+            let noise_dir = tmp.path().join(noise);
+            fs::create_dir_all(noise_dir.join("Assets")).unwrap();
+            fs::create_dir_all(noise_dir.join("ProjectSettings")).unwrap();
+        }
+
+        let result = resolve_unity_project_path(tmp.path().to_str().unwrap());
+        assert_eq!(
+            result,
+            ResolveUnityResult::NotFound,
+            "noise dirs (node_modules/.git/Library) must be skipped by BFS"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_setter_keeps_path_alias_in_sync() {
+        // The deprecated `path` field must mirror `unity_root` so legacy
+        // `workspace.path.read().await` callers keep returning the correct
+        // value during the migration window.
+        let ws = Workspace::new("init".to_string(), None);
+        ws.set_unity_root("new-unity-root".to_string()).await;
+        assert_eq!(ws.unity_root.read().await.as_str(), "new-unity-root");
+        assert_eq!(
+            ws.path.read().await.as_str(),
+            "new-unity-root",
+            "deprecated path alias must mirror unity_root"
+        );
+
+        // workspace_root is independent (knowledge base anchor).
+        ws.set_workspace_root("new-workspace-root".to_string()).await;
+        assert_eq!(ws.workspace_root.read().await.as_str(), "new-workspace-root");
+        // path alias must NOT mirror workspace_root (it tracks unity_root only).
+        assert_eq!(
+            ws.path.read().await.as_str(),
+            "new-unity-root",
+            "path alias must NOT follow workspace_root"
+        );
     }
 }

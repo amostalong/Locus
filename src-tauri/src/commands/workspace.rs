@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::asset_db::{AssetDb, AssetDbState, LoadExistingAssetDb};
@@ -388,7 +389,6 @@ pub async fn set_working_dir(
     }
 
     let old_ref_graph_watcher = {
-        let mut dir = workspace.path.write().await;
         let old_ref_graph_watcher = if is_real_switch {
             let generation_guard = workspace
                 .lock_generation()
@@ -412,7 +412,8 @@ pub async fn set_working_dir(
         } else {
             None
         };
-        *dir = canonical.clone();
+        // Setter keeps the deprecated `path` alias in sync with `unity_root`.
+        workspace.set_unity_root(canonical.clone()).await;
         old_ref_graph_watcher
     };
     switch_timer.mark_detail(
@@ -734,6 +735,118 @@ pub async fn set_working_dir(
         canonical, ws_id
     );
     Ok(canonical)
+}
+
+// ============================================================================
+// set_workspace / resolve_unity_project_path (P1 of workspace_root vs
+// unity_root refactor — see `locus-workspace-unity-roots.md` topic in
+// agent memory + scratchpad design).
+//
+// P1 strategy: introduce the new IPC names with behavior identical to
+// `set_working_dir`, so the front-end can migrate incrementally without
+// a coordinated cutover. P5 replaces the body of `set_workspace` with
+// the full resolve → handle picker → migrate → split-roots flow and
+// changes its return type from `String` to `SetWorkspaceResult`.
+// ============================================================================
+
+/// Result returned by `set_workspace` once P5 lands. In P1 the type is
+/// defined but the command still returns `String` for back-compat.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkspaceResult {
+    pub workspace_root: String,
+    pub unity_root: String,
+    /// One of: "exact" | "walkedUp" | "pickerSelected".
+    pub resolution_kind: String,
+    pub migration: Option<MigrationInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationInfo {
+    /// Old path (the pre-migration `unity_root/Locus/knowledge`).
+    pub source: String,
+    /// New path (post-migration `workspace_root/Locus/knowledge`).
+    pub destination: String,
+    pub file_count: u32,
+    pub bytes: u64,
+}
+
+/// Resolve a Unity project root from a user-selected path. The front-end
+/// uses this to decide whether to call `set_workspace` directly or to pop
+/// a picker first. Pure: no I/O state mutation. See
+/// [`crate::workspace::resolve_unity_project_path`] for the algorithm.
+#[tauri::command]
+pub async fn resolve_unity_project_path_cmd(
+    path: String,
+) -> crate::workspace::ResolveUnityResult {
+    crate::workspace::resolve_unity_project_path(&path)
+}
+
+/// **P1 stub** — forwards to `set_working_dir` for behavior parity.
+///
+/// P5 will replace this body with:
+/// 1. Call `resolve_unity_project_path_cmd` on `path`.
+/// 2. If `Picker` → return `SetWorkspaceResult` with `resolution_kind =
+///    "pickerSelected"` and `candidates` filled in (the front-end picks
+///    one and re-invokes).
+/// 3. If `Resolved` → call existing `set_working_dir` flow against
+///    `unity_root`, then `workspace.set_workspace_root(user_root)`,
+///    then run the data-migration step.
+/// 4. Return `SetWorkspaceResult` instead of `String`.
+///
+/// Until then, the function signature is identical to `set_working_dir`
+/// so the macro accepts all required Tauri states.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn set_workspace(
+    path: String,
+    workspace: State<'_, Arc<Workspace>>,
+    unity_monitor: State<'_, UnityMonitorHandle>,
+    ref_graph_state: State<'_, AssetDbState>,
+    watcher_handle: State<'_, AssetDbWatcherHandle>,
+    knowledge_watcher_handle: State<'_, KnowledgeFsWatcherHandle>,
+    last_scan_info: State<'_, LastScanInfoState>,
+    scan_phase_state: State<'_, ScanPhaseState>,
+    scan_task_state: State<'_, super::RefGraphScanTaskState>,
+    reconcile_task_state: State<'_, AssetDbReconcileTaskState>,
+    preview_cache: State<'_, WorkspacePreviewCache>,
+    dir_entries_cache: State<'_, DirEntriesPageCache>,
+    watcher_tuning: State<'_, crate::asset_db::watcher::WatcherTuningState>,
+    knowledge_index_state: State<'_, Arc<crate::knowledge_index::KnowledgeIndexState>>,
+    app_knowledge_dir: State<'_, crate::commands::AppKnowledgeDir>,
+    registry: State<'_, crate::AgentDefRegistryState>,
+    app_agent_dir: State<'_, crate::AppAgentDir>,
+    config: State<'_, Arc<crate::config::AppConfig>>,
+    app_handle: AppHandle,
+) -> Result<String, AppError> {
+    eprintln!(
+        "[Locus] set_workspace (P1 stub) called with path={}; delegating to set_working_dir. \
+         P5 will replace this with the resolve→migrate→split flow.",
+        path
+    );
+    set_working_dir(
+        path,
+        workspace,
+        unity_monitor,
+        ref_graph_state,
+        watcher_handle,
+        knowledge_watcher_handle,
+        last_scan_info,
+        scan_phase_state,
+        scan_task_state,
+        reconcile_task_state,
+        preview_cache,
+        dir_entries_cache,
+        watcher_tuning,
+        knowledge_index_state,
+        app_knowledge_dir,
+        registry,
+        app_agent_dir,
+        config,
+        app_handle,
+    )
+    .await
 }
 
 const MAX_RECENT_DIRS: usize = 8;
@@ -2704,7 +2817,8 @@ pub async fn reset_all_config(
     crate::unity_bridge::stop_unity_monitor(&unity_monitor).await;
     let _ = app_handle.emit("unity-connection-status", false);
 
-    *workspace.path.write().await = String::new();
+    // Setter keeps the deprecated `path` alias in sync with `unity_root`.
+    workspace.set_unity_root(String::new()).await;
     *workspace.workspace_id.write().await = None;
     super::reset_unity_embed_control_window(&app_handle);
     super::refresh_unity_embed_control_server(app_handle.clone());

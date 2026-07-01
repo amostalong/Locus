@@ -1073,6 +1073,8 @@ pub fn run() {
             commands::clear_app_storage_migration,
             commands::get_working_dir,
             commands::set_working_dir,
+            commands::set_workspace,
+            commands::resolve_unity_project_path_cmd,
             commands::list_recent_dirs,
             commands::remove_recent_dir,
             commands::open_dir_in_file_explorer,

@@ -1,0 +1,27 @@
+feat(workspace): split workspace_root from unity_root (P1)
+
+Workspace grows workspace_root + unity_root fields; path stays as a
+deprecated alias synced via setters so existing call sites keep
+working without behavioral change.
+
+- resolve_unity_project_path(): walks up 3 ancestors and BFSs down 2
+  levels (skips node_modules/.git/Library/Temp/Logs/obj/target/etc.)
+  to locate Unity project roots; returns Resolved / Picker / NotFound
+- New set_workspace Tauri command (P1 stub: forwards to set_working_dir,
+  replaced in P5)
+- New resolve_unity_project_path_cmd Tauri command (standalone, no state)
+- new_with_roots() constructor + set_unity_root / set_workspace_root
+  setters keep all three fields consistent
+- 8 unit tests for resolve (exact / walked_up / picker / not_found /
+  bfs_skip / setter_sync) and setter behavior
+- Replace 3 path.write() call sites with set_unity_root() so the
+  deprecated alias stays in sync (cli_driver.rs:876 + 2x in
+  commands/workspace.rs)
+
+Scope: P1 only. P2 (knowledge_root migration), P3 (is_unity_project
+caller migration), P5 (frontend wiring + set_working_dir auto-resolve)
+deferred. Frontend keeps calling set_working_dir unchanged; alias
+behavior identical to legacy single-path semantics.
+
+Design-by: amostalong@126.com
+Co-authored-by: deepseek-v4-flash

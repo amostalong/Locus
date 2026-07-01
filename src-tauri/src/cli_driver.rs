@@ -872,10 +872,8 @@ async fn resolve_project_path(
 
 async fn set_workspace_for_driver(workspace: &Arc<Workspace>, project: &str) -> Result<(), String> {
     let workspace_id = crate::workspace::load_or_create_workspace(project).ok();
-    {
-        let mut path = workspace.path.write().await;
-        *path = project.to_string();
-    }
+    // Setter keeps the deprecated `path` alias in sync with `unity_root`.
+    workspace.set_unity_root(project.to_string()).await;
     {
         let mut id = workspace.workspace_id.write().await;
         *id = workspace_id;
