@@ -848,20 +848,26 @@ pub async fn resolve_unity_project_path_cmd(
     crate::workspace::resolve_unity_project_path(&path)
 }
 
-/// **P1 stub** — forwards to `set_working_dir` for behavior parity.
+/// **P5/P6 implementation** — full resolve → migrate → split-roots flow.
 ///
-/// P5 will replace this body with:
-/// 1. Call `resolve_unity_project_path_cmd` on `path`.
-/// 2. If `Picker` → return `SetWorkspaceResult` with `resolution_kind =
-///    "pickerSelected"` and `candidates` filled in (the front-end picks
-///    one and re-invokes).
-/// 3. If `Resolved` → call existing `set_working_dir` flow against
-///    `unity_root`, then `workspace.set_workspace_root(user_root)`,
-///    then run the data-migration step.
-/// 4. Return `SetWorkspaceResult` instead of `String`.
+/// P5/P6 behaviour:
+/// 1. Call `set_working_dir` to run the canonical switch (knowledge index
+///    rebuild, Unity monitor start/stop, etc.). It internally resolves
+///    `unity_root` from the input, splits the workspace roots, and runs
+///    both `migrate_workspace_config_from_unity_root` and
+///    `migrate_workspace_knowledge_from_unity_root` (via
+///    `load_or_create_workspace`).
+/// 2. Read the final `workspace_root` / `unity_root` from the `Workspace`
+///    state and package them into a `SetWorkspaceResult`.
+/// 3. If a knowledge-base migration just happened (a fresh marker file
+///    exists at `<workspace_root>/Locus/.knowledge-migration.json`),
+///    fill the `migration` field so the front-end can show a notice.
 ///
-/// Until then, the function signature is identical to `set_working_dir`
-/// so the macro accepts all required Tauri states.
+/// Note: the caller is expected to have already resolved any
+/// `Picker` case via `resolve_unity_project_path_cmd` and to have
+/// re-invoked `set_workspace` with the chosen candidate. The picker
+/// itself is purely a front-end concern — this command does not
+/// re-resolve, so passing a Picker candidate here is correct.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn set_workspace(
@@ -884,15 +890,14 @@ pub async fn set_workspace(
     app_agent_dir: State<'_, crate::AppAgentDir>,
     config: State<'_, Arc<crate::config::AppConfig>>,
     app_handle: AppHandle,
-) -> Result<String, AppError> {
+) -> Result<SetWorkspaceResult, AppError> {
     eprintln!(
-        "[Locus] set_workspace (P1 stub) called with path={}; delegating to set_working_dir. \
-         P5 will replace this with the resolve→migrate→split flow.",
+        "[Locus] set_workspace called with path={} (P5/P6: full resolve→migrate→split flow)",
         path
     );
-    set_working_dir(
+    let unity_root = set_working_dir(
         path,
-        workspace,
+        workspace.clone(),
         unity_monitor,
         ref_graph_state,
         watcher_handle,
@@ -911,7 +916,57 @@ pub async fn set_workspace(
         config,
         app_handle,
     )
-    .await
+    .await?;
+
+    // After the switch, the workspace state holds the canonical roots.
+    // We use `unity_root` (the return value of set_working_dir) as the
+    // authoritative source for unity_root (it matches what the front-end
+    // used to receive from the old `set_working_dir` String return).
+    let workspace_root = workspace.workspace_root.read().await.clone();
+
+    // Determine the resolution kind. We can't recover the *exact* kind
+    // here without re-running resolve, but the front-end already knows
+    // which path it picked from the picker, so "pickerSelected" is set
+    // by the front-end when it forwards a picker-chosen path. The
+    // back-end only reports "exact" (input was already a Unity root) or
+    // "walkedUp" (auto-resolved) based on whether the two roots diverge.
+    let resolution_kind = if workspace_root == unity_root {
+        "exact".to_string()
+    } else {
+        "walkedUp".to_string()
+    };
+
+    // Detect a knowledge-base migration by checking for the marker file
+    // written by `migrate_workspace_knowledge_from_unity_root`.
+    let migration = read_knowledge_migration_marker(&workspace_root);
+
+    Ok(SetWorkspaceResult {
+        workspace_root,
+        unity_root,
+        resolution_kind,
+        migration,
+    })
+}
+
+/// Read the `.knowledge-migration.json` marker file produced by the
+/// knowledge-base migration step. Returns `Some(MigrationInfo)` if the
+/// marker exists and is readable, `None` otherwise.
+fn read_knowledge_migration_marker(workspace_root: &str) -> Option<MigrationInfo> {
+    let marker_path = std::path::Path::new(workspace_root)
+        .join("Locus")
+        .join(".knowledge-migration.json");
+    let content = std::fs::read_to_string(&marker_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let source = value.get("source_path")?.as_str()?.to_string();
+    let destination = value.get("destination_path")?.as_str()?.to_string();
+    let file_count = value.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let bytes = value.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(MigrationInfo {
+        source,
+        destination,
+        file_count,
+        bytes,
+    })
 }
 
 const MAX_RECENT_DIRS: usize = 8;

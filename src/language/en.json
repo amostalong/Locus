@@ -3368,6 +3368,9 @@
   "onboarding.project.opening": "Opening...",
   "onboarding.project.selected": "Selected: {0}",
   "onboarding.project.invalid": "Not a valid Unity project directory",
+  "onboarding.project.notUnity": "The selected directory is not a Unity project, and no Unity project was found nearby",
+  "onboarding.project.pickerTitle": "Pick a Unity project",
+  "onboarding.project.pickerDesc": "Multiple Unity projects were found under {0}. Pick the one to use:",
   "onboarding.project.skipHint": "You can switch projects later from the workspace selector",
 
   "onboarding.plugin.title": "Install Unity Plugin",

@@ -3362,6 +3362,9 @@
   "onboarding.project.opening": "正在打开...",
   "onboarding.project.selected": "已选择：{0}",
   "onboarding.project.invalid": "不是有效的 Unity 项目目录",
+  "onboarding.project.notUnity": "所选目录不是 Unity 项目，也未在附近找到 Unity 项目",
+  "onboarding.project.pickerTitle": "选择 Unity 项目",
+  "onboarding.project.pickerDesc": "在 {0} 下找到多个 Unity 项目，请选择要使用的一个：",
   "onboarding.project.skipHint": "可以稍后在顶部工作区选择器中切换",
 
   "onboarding.plugin.title": "安装 Unity 插件",
