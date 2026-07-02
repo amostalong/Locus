@@ -15,6 +15,7 @@ import {
   getDebugConsoleSnapshot,
   initDebugConsole,
   refreshDebugConsole,
+  revealLogFile,
   saveDebugConsoleLogExport,
   subscribeDebugConsole,
 } from "../../services/debugConsole";
@@ -367,6 +368,22 @@ async function clearAll() {
   }
 }
 
+async function openLogFile() {
+  try {
+    await revealLogFile();
+  } catch (error) {
+    const normalized = normalizeAppError(error);
+    notificationStore.addNotice(
+      "error",
+      t("settings.console.revealLogFileFailed", normalized.message),
+      {
+        code: normalized.code,
+        operation: "revealLogFile",
+      },
+    );
+  }
+}
+
 async function exportLogs() {
   const snapshot = entries.value.slice();
   if (snapshot.length === 0 || isExporting.value) return;
@@ -467,6 +484,9 @@ watch(
           @click="exportLogs"
         >
           {{ isExporting ? t("settings.console.exporting") : t("settings.console.export") }}
+        </BaseButton>
+        <BaseButton class="console-action" size="sm" @click="openLogFile">
+          {{ t("settings.console.revealLogFile") }}
         </BaseButton>
         <BaseButton class="console-action" size="sm" @click="clearAll">
           {{ t("settings.console.clear") }}

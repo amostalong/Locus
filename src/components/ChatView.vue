@@ -105,8 +105,7 @@ const { state: chatInputSettings } = useChatInputSettings();
 const { state: displaySettings } = useDisplaySettings();
 const { state: knowledgeAccessState, setMode: setKnowledgeAccessMode } = useKnowledgeAccessMode();
 
-const isPlanStreaming = computed(() => !!chatStore.pendingPlanRun && props.isStreaming);
-const isPlanDone = computed(() => !!chatStore.pendingPlanRun && !props.isStreaming);
+const planModeActive = computed(() => chatStore.activeSessionPlanMode);
 const isViewingSubagent = computed(() => {
   if (!props.activeSessionId) return false;
   const session = props.sessions.find(s => s.id === props.activeSessionId);
@@ -1617,11 +1616,11 @@ function isSessionRestoreViewportGuardActive() {
 }
 
 function flushDisplayedStreamingText() {
-  logToolCollapseTrace("chat-view", "flushDisplayedStreamingText", {
+  logToolCollapseTrace("chat-view", "flushDisplayedStreamingText", () => ({
     pendingLen: pendingStreamingText.length,
     pendingPreview: previewTraceText(pendingStreamingText, 64),
     previousDisplayedLen: displayedStreamingText.value.length,
-  });
+  }));
   displayedStreamingText.value = pendingStreamingText;
   streamingTextFlushTimer = null;
 }
@@ -1630,13 +1629,13 @@ watch(
   () => props.streamingText,
   (nextText, previousText = "") => {
     pendingStreamingText = nextText;
-    logToolCollapseTrace("chat-view", "sourceStreamingTextChanged", {
+    logToolCollapseTrace("chat-view", "sourceStreamingTextChanged", () => ({
       previousLen: previousText.length,
       nextLen: nextText.length,
       displayedLen: displayedStreamingText.value.length,
       hasFlushTimer: !!streamingTextFlushTimer,
       nextPreview: nextText ? previewTraceText(nextText, 64) : "",
-    });
+    }));
     if (!nextText || nextText.length < displayedStreamingText.value.length) {
       clearStreamingTextFlushTimer();
       logToolCollapseTrace("chat-view", "syncDisplayedStreamingTextImmediately", {
@@ -2373,19 +2372,14 @@ watch(
   },
   { flush: "post" },
 );
+watch(() => displayedStreamingText.value, () => reconcileViewport());
+// Reconcile on tool-call identity/status changes only. A deep watch here would
+// re-traverse every tool call (including large streamed output strings) and
+// force a synchronous layout read on each output delta; growth-driven height
+// changes are already covered by the transcript ResizeObserver.
 watch(
-  () => displayedStreamingText.value,
-  () => scheduleCoalescedReconcile("streaming-text"),
-  { flush: "post" },
-);
-// Replaces the previous `watch(() => props.activeToolCalls, ..., { deep: true })`.
-// Fingerprint subscribes only to length + per-item status + nested-tool status
-// (all shallow getters). Deep output/arguments/progress mutations no longer trigger
-// a traverse of every tool call on every tick.
-watch(
-  activeToolCallsFingerprint,
-  () => scheduleCoalescedReconcile("tool-calls"),
-  { flush: "post" },
+  () => props.activeToolCalls.map((toolCall) => `${toolCall.id}:${toolCall.status}`).join(","),
+  () => reconcileViewport(),
 );
 watch(
   () => props.isStreaming,
@@ -2449,16 +2443,18 @@ const showSingleToolConfirmCard = computed(() =>
   && !showBatchToolConfirmCard.value,
 );
 
-function handlePlanContinue() {
-  chatStore.clearPendingPlan();
-  emit("send", t("chat.plan.continueMessage"), [], []);
+function handleExitPlanMode() {
+  if (!props.activeSessionId) return;
+  void chatStore.setSessionPlanMode(props.activeSessionId, false).catch((e) => {
+    const err = normalizeAppError(e);
+    notificationStore.addNotice("error", t("chat.plan.exitFailed"), {
+      code: err.code,
+      operation: "plan-mode-exit",
+    });
+  });
 }
 
 function handleComposerSend(payload: ChatComposerSendPayload) {
-  if (chatStore.pendingPlanRun) {
-    chatStore.clearPendingPlan();
-  }
-
   emit("send", payload.text, payload.images, payload.assetRefs, {
     displayText: payload.displayText,
     mode: payload.mode ?? undefined,
@@ -2806,7 +2802,7 @@ onUnmounted(() => {
       </div>
 
     <div
-      v-if="(pendingQuestion && !isViewingSubagent) || showBatchToolConfirmCard || showSingleToolConfirmCard || showQueuedFollowUp || (isPlanDone && !isViewingSubagent) || (isPlanStreaming && !isViewingSubagent)"
+      v-if="(pendingQuestion && !isViewingSubagent) || showBatchToolConfirmCard || showSingleToolConfirmCard || showQueuedFollowUp || (planModeActive && !isViewingSubagent)"
       class="chat-pending-stack"
       @wheel="handleBottomPanelWheel"
     >
@@ -2859,21 +2855,22 @@ onUnmounted(() => {
         @answer="emit('answerToolConfirm', pendingToolConfirms[0]!.questionId, $event)"
       />
 
-      <!-- Plan confirmation card after completion -->
-      <div v-if="isPlanDone && !isViewingSubagent" class="plan-confirm-card">
-        <span class="plan-confirm-text">{{ t('chat.plan.completed') }}</span>
-        <div class="plan-confirm-actions">
-          <BaseButton class="plan-confirm-btn ui-select-none" variant="primary" @click="handlePlanContinue">{{ t('chat.plan.continueImpl') }}</BaseButton>
-          <BaseButton class="plan-confirm-btn ui-select-none" @click="chatStore.clearPendingPlan()">{{ t('chat.plan.dismiss') }}</BaseButton>
-        </div>
-      </div>
-
-      <!-- Plan mode status bar -->
-      <div v-if="isPlanStreaming && !isViewingSubagent" class="plan-status-bar">
+      <!-- Sticky plan mode status bar: visible until exit_plan_mode is
+           approved or the user exits manually. -->
+      <div v-if="planModeActive && !isViewingSubagent" class="plan-status-bar">
         <svg class="plan-status-icon" viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
           <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9zM5 5h6v1H5V5zm0 3h6v1H5V8zm0 3h4v1H5v-1z"/>
         </svg>
-        <span>{{ t('chat.plan.planning') }}</span>
+        <span>{{ t('chat.plan.stickyActive') }}</span>
+        <button
+          class="plan-status-exit ui-select-none"
+          type="button"
+          :disabled="props.isStreaming"
+          :title="t('chat.plan.exit')"
+          @click="handleExitPlanMode"
+        >
+          {{ t('chat.plan.exit') }}
+        </button>
       </div>
     </div>
 
@@ -3753,6 +3750,24 @@ onUnmounted(() => {
 .plan-status-icon {
   color: var(--accent-color);
   flex-shrink: 0;
+}
+.plan-status-exit {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.plan-status-exit:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent-color) 40%, var(--border-color));
+}
+.plan-status-exit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .plan-confirm-card {
