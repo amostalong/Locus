@@ -245,7 +245,7 @@ function onKeydown(event: KeyboardEvent) {
   background: transparent;
   color: var(--text-color);
   font-size: 15px;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-family: var(--font-mono-editor);
   outline: none;
 }
 
@@ -275,7 +275,7 @@ function onKeydown(event: KeyboardEvent) {
   padding: 6px 10px;
   border-radius: 7px;
   cursor: pointer;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-family: var(--font-mono-editor);
 }
 
 .quick-open-list li.highlighted {

@@ -34,10 +34,14 @@ describe("skill package namespace settings", () => {
     expect(rustApp).toContain("commands::set_default_skill_package_namespace");
 
     expect(settingsView).not.toContain("KnowledgeSettings");
-    expect(settingsView).not.toContain("activeCategory === 'knowledge'");
     expect(settingsView).not.toContain("settings.tab.knowledge");
-    expect(settingsState).not.toContain('"knowledge"');
-    expect(uiStore).not.toContain('"knowledge" | "archived"');
+    // Fork P5 (workspace_root split) re-introduced the 'knowledge' SettingsCategory
+    // union value to drive a per-project Knowledge picker, so the category enum
+    // still appears in both uiStore and useSettingsState. The standalone
+    // 'KnowledgeSettings' Vue component is still gone — only the enum value
+    // remains as a routing target.
+    expect(settingsState).toContain('"knowledge"');
+    expect(uiStore).toContain('"knowledge"');
     expect(knowledgeService).toContain("get_default_skill_package_namespace");
     expect(knowledgeService).toContain("set_default_skill_package_namespace");
 

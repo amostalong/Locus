@@ -304,7 +304,7 @@ onBeforeUnmount(() => {
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--code-bg, rgba(127, 127, 127, 0.12));
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-family: var(--font-mono-editor);
   font-size: 12px;
 }
 
@@ -343,7 +343,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-family: var(--font-mono-editor);
 }
 
 .editor-pane-status-path.is-muted {

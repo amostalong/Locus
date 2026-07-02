@@ -96,7 +96,6 @@ export function createCoalesceRunner(
   }
 
   let handle: number | null = null;
-  let handleKind: "frame" | "timeout" | null = null;
   let dirty = false;
   let lastFlushAt = -Infinity;
   const reasons: string[] = [];
@@ -105,23 +104,19 @@ export function createCoalesceRunner(
     if (handle === null) return;
     cancelRaw(handle);
     handle = null;
-    handleKind = null;
   }
 
   function arm(delayMs: number) {
     cancelPending();
     if (delayMs <= 0) {
-      handleKind = "frame";
       handle = scheduleRaw(flush);
       return;
     }
-    handleKind = "timeout";
     handle = timeoutRaw(flush, delayMs);
   }
 
   function flush() {
     handle = null;
-    handleKind = null;
     if (!dirty) return;
     dirty = false;
     lastFlushAt = now();

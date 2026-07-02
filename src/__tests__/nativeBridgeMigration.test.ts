@@ -145,7 +145,11 @@ describe("native bridge migration", () => {
     // native in-process patcher + FFI + status surface
     expect(native).toContain("pub extern \"C\" fn locus_set_background_active");
     expect(native).toContain("const PATCH_BYTES: [u8; 6] = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];");
-    expect(native).toContain('"Unity!IsApplicationActive"');
+    // Native broker now stores bare symbol names; the engine module prefix is
+    // composed at lookup time via engine_module_sym_name() so a Tuanjie PDB
+    // resolves correctly without a UTF-8 boundary panic.
+    expect(native).toContain('"IsApplicationActive"');
+    expect(native).toContain("fn engine_module_sym_name");
     expect(native).toContain('"backgroundPatched": background_patched');
     expect(native).toContain("if !st.records.is_empty()");
     expect(native).toContain("return Ok(st.symbol_count);");

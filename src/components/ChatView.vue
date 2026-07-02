@@ -73,7 +73,6 @@ import { canOpenInEditor } from "../composables/useHideMeta";
 import { useDiffProgress } from "../composables/useDiffProgress";
 import { acquireSelectionLock } from "../composables/useSelectionLock";
 import { matchesShortcut, useKeyboardShortcuts } from "../composables/useKeyboardShortcuts";
-import { buildActiveToolCallsFingerprint } from "../composables/activeToolCallsFingerprint";
 import {
   getChatSubmitModifierLabel,
   useChatInputSettings,
@@ -237,13 +236,9 @@ const unityRecompileActive = computed(() => hasRunningUnityRecompile(props.activ
 
 // Fingerprint covering all activeToolCalls changes that can affect outer viewport layout:
 // - length (new tool added/removed)
-// - per-tool status (running → done may collapse tool block)
-// - nested tool status (parent's display height depends on nested status)
 // Excludes deep output/arguments/progress changes — those scroll inside the tool block,
-// not the outer viewport. Implementation lives in a composable so it can be unit-tested.
-const activeToolCallsFingerprint = computed(() =>
-  buildActiveToolCallsFingerprint(props.activeToolCalls),
-);
+// not the outer viewport. The shallow identity-only watch below handles this without
+// a separate fingerprint composable.
 
 const emit = defineEmits<{
   send: [text: string, images: ImageAttachment[], assetRefs: AssetRefAttachment[], overrides?: { displayText?: string; mode?: string; userIntent?: UserIntentMeta | null }];
@@ -1765,7 +1760,7 @@ function cancelViewportFrame(handle: number) {
 
 // --- Coalesced viewport reconcile ---
 // Multiple reactive triggers (messages, displayedStreamingText,
-// activeToolCallsFingerprint, pendingQuestion, ...) can fire within the same
+// pendingQuestion, ...) can fire within the same
 // frame, especially during streaming where displayedStreamingText + tool-call
 // status + messages.append all land in one tick. Each direct reconcileViewport
 // call does its own DOM reads (getBoundingClientRect + getComputedStyle + chat

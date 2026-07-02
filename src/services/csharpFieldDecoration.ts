@@ -530,6 +530,7 @@ export function findCsharpClassFields(source: string): IFieldRange[] {
           endLineNumber: line,
           endColumn: endCol,
           name: ident,
+          kind: "field",
         },
       };
       prevSig = "ident";
