@@ -153,8 +153,16 @@ fn extract_unity_yaml_scalar(content: &str, key: &str) -> Option<String> {
     })
 }
 
-fn unity_workspace_seed(dir: &str) -> Option<String> {
-    let settings_path = Path::new(dir)
+/// Read the Unity `ProjectSettings.asset` from a Unity project root and
+/// return a stable seed derived from `productGUID` / `cloudProjectId`.
+///
+/// `unity_root` MUST point at a directory containing `ProjectSettings/`
+/// (i.e. the resolved Unity project root, NOT a generic workspace root).
+/// When the user picks a non-Unity workspace root, `load_or_create_workspace`
+/// still resolves `unity_root` internally before calling this — callers do
+/// not have to do it themselves.
+fn unity_workspace_seed(unity_root: &str) -> Option<String> {
+    let settings_path = Path::new(unity_root)
         .join("ProjectSettings")
         .join("ProjectSettings.asset");
     let content = std::fs::read_to_string(&settings_path).ok()?;
@@ -182,17 +190,138 @@ fn random_workspace_id() -> String {
     format!("workspace-{}", uuid::Uuid::new_v4().simple())
 }
 
-fn generated_workspace_id(dir: &str) -> String {
-    unity_workspace_seed(dir)
+/// Generate a workspace_id. `unity_root` is the resolved Unity project root
+/// (so the seed is stable across `slg_gameclient/` ↔ `slg_gameclient/Project`
+/// workspace_root reshuffles — it always hashes the Unity GUID, never the
+/// outer directory).
+fn generated_workspace_id(unity_root: &str) -> String {
+    unity_workspace_seed(unity_root)
         .map(|seed| workspace_id_from_seed(&seed))
         .unwrap_or_else(random_workspace_id)
 }
 
-pub fn load_or_create_workspace(dir: &str) -> Result<String, String> {
-    let config_path = workspace_config_path(dir);
+/// Migrate `Locus/config.json` from the legacy `<unity_root>/Locus/` location
+/// to the new `<workspace_root>/Locus/` location, if needed.
+///
+/// Trigger conditions (X strategy — user-approved automatic migration):
+///   - `<workspace_root>/Locus/config.json` does not exist, AND
+///   - `<workspace_root>` ≠ `<unity_root>` (otherwise nothing to migrate — the
+///     legacy location IS the canonical location for the "老用户无感" path),
+///   - AND `<unity_root>/Locus/config.json` exists.
+///
+/// Behaviour:
+///   - `fs::rename` first (atomic on the same volume).
+///   - Fall back to copy + delete on cross-volume rename failures.
+///   - On success: write a marker at `<workspace_root>/Locus/.migration.json`
+///     recording the source path so users can audit / undo manually.
+///   - On any failure: log a warning and return Ok — the caller will create
+///     a fresh config at the new location anyway.
+///
+/// `load_or_create_workspace` calls this before deciding whether to create
+/// a new workspace_id, so existing users keep their session history.
+pub(crate) fn migrate_workspace_config_from_unity_root(
+    workspace_root: &str,
+    unity_root: &str,
+) -> Result<(), String> {
+    if workspace_root == unity_root {
+        // Same path — no migration needed (also covers the empty / first-launch case).
+        return Ok(());
+    }
+
+    let new_path = workspace_config_path(workspace_root);
+    if new_path.exists() {
+        // Already migrated (or written by an earlier run).
+        return Ok(());
+    }
+
+    let legacy_path = workspace_config_path(unity_root);
+    if !legacy_path.exists() {
+        // Nothing to migrate.
+        return Ok(());
+    }
+
+    eprintln!(
+        "[Workspace] migrating config: {} -> {}",
+        legacy_path.display(),
+        new_path.display()
+    );
+
+    // Ensure the destination directory exists (workspace_root/Locus/).
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create destination Locus dir: {}", e))?;
+    }
+
+    // Try rename first; fall back to copy + delete on cross-volume failures.
+    match std::fs::rename(&legacy_path, &new_path) {
+        Ok(()) => {}
+        Err(rename_err) => {
+            eprintln!(
+                "[Workspace] rename failed ({}), falling back to copy",
+                rename_err
+            );
+            std::fs::copy(&legacy_path, &new_path).map_err(|e| {
+                format!(
+                    "Failed to copy legacy config from {} to {}: {}",
+                    legacy_path.display(),
+                    new_path.display(),
+                    e
+                )
+            })?;
+            if let Err(remove_err) = std::fs::remove_file(&legacy_path) {
+                eprintln!(
+                    "[Workspace] warning: copied config but failed to remove legacy file ({}); user should clean up manually",
+                    remove_err
+                );
+            }
+        }
+    }
+
+    // Record the migration in a marker file inside the new Locus dir so users
+    // (and CI) can verify the migration happened.
+    let marker_path = new_path
+        .parent()
+        .map(|p| p.join(".migration.json"))
+        .unwrap_or_else(|| new_path.clone());
+    let marker = serde_json::json!({
+        "migrated_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "source_path": legacy_path.to_string_lossy(),
+        "destination_path": new_path.to_string_lossy(),
+        "schema": "workspace-config-migration/v1",
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&marker) {
+        let _ = std::fs::write(&marker_path, json);
+    }
+
+    Ok(())
+}
+
+/// Load (or create) the workspace_id for a given `(workspace_root, unity_root)`
+/// pair.
+///
+/// - `workspace_root`: the canonical user-selected root. `Locus/config.json`
+///   lives here. Knowledge / skill / memory are anchored here.
+/// - `unity_root`: the resolved Unity project root. Used as the seed for the
+///   workspace_id (`productGUID` hash) so the id is stable when the user
+///   reorganises the parent directory.
+///
+/// If the legacy `<unity_root>/Locus/config.json` exists but the new
+/// `<workspace_root>/Locus/config.json` does not, this function
+/// auto-migrates the file (see `migrate_workspace_config_from_unity_root`).
+pub fn load_or_create_workspace(workspace_root: &str, unity_root: &str) -> Result<String, String> {
+    // 1. Auto-migrate legacy config.json if the workspace_root differs from
+    //    the unity_root (X strategy).
+    if let Err(e) = migrate_workspace_config_from_unity_root(workspace_root, unity_root) {
+        eprintln!("[Workspace] migration warning: {}", e);
+    }
+
+    let config_path = workspace_config_path(workspace_root);
     let mut should_write_config = !config_path.exists();
 
-    match read_workspace_config(dir) {
+    match read_workspace_config(workspace_root) {
         Ok(cfg) if !cfg.workspace_id.is_empty() => {
             return Ok(cfg.workspace_id);
         }
@@ -207,16 +336,21 @@ pub fn load_or_create_workspace(dir: &str) -> Result<String, String> {
         }
     }
 
-    let workspace_id = generated_workspace_id(dir);
+    // Seed is derived from unity_root (the Unity project GUID), so the id is
+    // stable even when workspace_root moves around.
+    let workspace_id = generated_workspace_id(unity_root);
     if should_write_config {
         write_workspace_config(
-            dir,
+            workspace_root,
             &WorkspaceConfig {
                 workspace_id: workspace_id.clone(),
             },
         )?;
     }
-    eprintln!("[Workspace] resolved workspace {} at {}", workspace_id, dir);
+    eprintln!(
+        "[Workspace] resolved workspace {} at workspace_root={} (unity_root={})",
+        workspace_id, workspace_root, unity_root
+    );
     Ok(workspace_id)
 }
 
@@ -467,9 +601,11 @@ mod tests {
             "PlayerSettings:\n  companyName: OpenAI\n  productName: Locus\n  applicationIdentifier:\n    Standalone: com.openai.locus\n",
         );
 
-        let first = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
-        let second = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
-        let cfg = read_workspace_config(&dir.path().to_string_lossy()).unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        // Tempdir IS the Unity project root — workspace_root == unity_root.
+        let first = load_or_create_workspace(&path, &path).unwrap();
+        let second = load_or_create_workspace(&path, &path).unwrap();
+        let cfg = read_workspace_config(&path).unwrap();
 
         assert!(first.starts_with("workspace-"));
         assert_eq!(first, second);
@@ -484,11 +620,77 @@ mod tests {
             "PlayerSettings:\n  productGUID: 2d9a8f42f0da40f2a22b9c4c93ce7d34\n",
         );
 
-        let workspace_id = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
-        let cfg = read_workspace_config(&dir.path().to_string_lossy()).unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let workspace_id = load_or_create_workspace(&path, &path).unwrap();
+        let cfg = read_workspace_config(&path).unwrap();
 
         assert!(workspace_id.starts_with("unity-"));
         assert_eq!(cfg.workspace_id, workspace_id);
+    }
+
+    #[test]
+    fn load_or_create_workspace_auto_migrates_legacy_unity_root_config() {
+        // Simulate the "user upgraded from P1 — config.json lives at the
+        // legacy <unity_root>/Locus/ location" case. After the call, the
+        // config should live at <workspace_root>/Locus/config.json, and a
+        // migration marker should be present.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = tmp.path().join("ws_root");
+        let unity_root = workspace_root.join("Project");
+        std::fs::create_dir_all(unity_root.join("ProjectSettings")).unwrap();
+        std::fs::write(
+            unity_root.join("ProjectSettings").join("ProjectSettings.asset"),
+            "PlayerSettings:\n  productGUID: aaaaaaaa111122223333444455556666\n",
+        )
+        .unwrap();
+
+        // Pre-seed a legacy config at <unity_root>/Locus/config.json.
+        let legacy_config_path = unity_root.join("Locus").join("config.json");
+        std::fs::create_dir_all(legacy_config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_config_path,
+            r#"{"workspace_id":"legacy-id-aaa"}"#,
+        )
+        .unwrap();
+
+        let ws_str = workspace_root.to_string_lossy().to_string();
+        let un_str = unity_root.to_string_lossy().to_string();
+        let id = load_or_create_workspace(&ws_str, &un_str).unwrap();
+
+        // Same id (auto-migrated from the legacy file, not regenerated).
+        assert_eq!(id, "legacy-id-aaa");
+        // Config now lives at workspace_root/Locus/.
+        let new_path = workspace_root.join("Locus").join("config.json");
+        assert!(new_path.exists(), "config should be migrated to workspace_root");
+        let cfg = read_workspace_config(&ws_str).unwrap();
+        assert_eq!(cfg.workspace_id, "legacy-id-aaa");
+        // Marker file records the migration.
+        let marker = workspace_root.join("Locus").join(".migration.json");
+        assert!(marker.exists(), "migration marker should be written");
+        // Legacy file removed.
+        assert!(!legacy_config_path.exists(), "legacy config should be moved, not copied");
+    }
+
+    #[test]
+    fn load_or_create_workspace_noop_when_workspace_root_equals_unity_root() {
+        // The "legacy" path where workspace_root == unity_root (老用户无感).
+        // In this case no migration should happen even if legacy-style config
+        // exists at that single location.
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_settings(
+            &tmp,
+            "PlayerSettings:\n  productGUID: bbbbbbbb111122223333444455556666\n",
+        );
+        let path = tmp.path().to_string_lossy().to_string();
+        let id = load_or_create_workspace(&path, &path).unwrap();
+
+        assert!(id.starts_with("unity-"));
+        // No migration marker when workspace_root == unity_root.
+        let marker = tmp.path().join("Locus").join(".migration.json");
+        assert!(
+            !marker.exists(),
+            "no migration marker should be written when workspace_root == unity_root"
+        );
     }
 
     // ------------------------------------------------------------------

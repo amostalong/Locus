@@ -868,8 +868,8 @@ struct EmbeddingVectorBackfillReport {
     last_embedding_failure: Option<String>,
 }
 
-pub fn library_dir_for_working_dir(working_dir: &str) -> PathBuf {
-    Path::new(working_dir).join("Library").join("Locus")
+pub fn library_dir_for_working_dir(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root).join("Library").join("Locus")
 }
 
 pub fn no_workspace_library_dir() -> PathBuf {
@@ -920,7 +920,7 @@ fn apply_general_search_config(
 
 pub async fn maybe_auto_activate_embedding_runtime(
     state: Arc<KnowledgeIndexState>,
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
 ) -> Result<(), String> {
     let mgr_handle = state.embedding_mgr();
@@ -935,7 +935,7 @@ pub async fn maybe_auto_activate_embedding_runtime(
     }
     activate_embedding_runtime(
         state,
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         EmbeddingActivationBackfillStrategy::None,
     )
@@ -944,7 +944,7 @@ pub async fn maybe_auto_activate_embedding_runtime(
 
 pub async fn activate_embedding_runtime(
     state: Arc<KnowledgeIndexState>,
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     backfill_strategy: EmbeddingActivationBackfillStrategy,
 ) -> Result<(), String> {
@@ -1050,7 +1050,7 @@ pub async fn activate_embedding_runtime(
     ) {
         let mut last_logged_stage: Option<String> = None;
         let reconcile_result = reconcile_workspace_internal(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             state.clone(),
             true,
@@ -1060,7 +1060,7 @@ pub async fn activate_embedding_runtime(
                 if last_logged_stage.as_deref() != Some(stage) {
                     tracing::info!(
                         log_module = "knowledge_index",
-                        workspace = working_dir,
+                        workspace = workspace_root,
                         stage,
                         processed_docs = processed,
                         total_docs = total,
@@ -1086,7 +1086,7 @@ pub async fn activate_embedding_runtime(
             Err(err) => {
                 tracing::error!(
                     log_module = "knowledge_index",
-                    workspace = working_dir,
+                    workspace = workspace_root,
                     error = %err,
                     "embedding runtime activation reconcile failed"
                 );
@@ -1124,7 +1124,7 @@ pub async fn activate_embedding_runtime(
             if report.embedding_failed_docs == report.embedding_attempted_docs {
                 tracing::error!(
                     log_module = "knowledge_index",
-                    workspace = working_dir,
+                    workspace = workspace_root,
                     attempted_docs = report.embedding_attempted_docs,
                     failed_docs = report.embedding_failed_docs,
                     last_failed_file = report.last_embedding_failed_file.as_deref().unwrap_or(""),
@@ -1138,7 +1138,7 @@ pub async fn activate_embedding_runtime(
             }
             tracing::warn!(
                 log_module = "knowledge_index",
-                workspace = working_dir,
+                workspace = workspace_root,
                 attempted_docs = report.embedding_attempted_docs,
                 failed_docs = report.embedding_failed_docs,
                 last_failed_file = report.last_embedding_failed_file.as_deref().unwrap_or(""),
@@ -1156,7 +1156,7 @@ pub async fn activate_embedding_runtime(
         next.stage = Some("ready".to_string());
         tracing::info!(
             log_module = "knowledge_index",
-            workspace = working_dir,
+            workspace = workspace_root,
             attempted_docs = report.embedding_attempted_docs,
             failed_docs = report.embedding_failed_docs,
             total_docs = next.total_docs.unwrap_or_default(),
@@ -1171,7 +1171,7 @@ pub async fn activate_embedding_runtime(
         EmbeddingActivationBackfillStrategy::VectorOnly
     ) {
         let report =
-            vector_backfill_embeddings_internal(working_dir, app_knowledge_dir, state.clone())
+            vector_backfill_embeddings_internal(workspace_root, app_knowledge_dir, state.clone())
                 .await?;
         let mut next = state.embedding_status_snapshot();
         let mgr_status = state.embedding_mgr().lock().await.status();
@@ -1352,7 +1352,7 @@ pub async fn download_local_embedding_model(
 
 pub async fn rebuild_lexical_index_runtime(
     state: Arc<KnowledgeIndexState>,
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
 ) -> Result<usize, String> {
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -1361,7 +1361,7 @@ pub async fn rebuild_lexical_index_runtime(
     let mut last_total_docs: Option<usize> = None;
 
     let result = reconcile_workspace_internal(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         state.clone(),
         true,
@@ -1411,14 +1411,14 @@ pub async fn rebuild_lexical_index_runtime(
 }
 
 pub async fn reconcile_workspace(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<ReconcileReport, String> {
     let timer_started_at = Instant::now();
     eprintln!(
         "[KnowledgeIndex] reconcile start workspace={} app_root={}",
-        working_dir,
+        workspace_root,
         app_knowledge_dir
             .map(|value| value.display().to_string())
             .unwrap_or_else(|| "<none>".to_string())
@@ -1428,7 +1428,7 @@ pub async fn reconcile_workspace(
     let mut last_total_docs: Option<usize> = None;
 
     let result = reconcile_workspace_internal(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         state.clone(),
         false,
@@ -1465,7 +1465,7 @@ pub async fn reconcile_workspace(
             }
             eprintln!(
                 "[KnowledgeIndex] reconcile finished workspace={} elapsed_ms={} added={} removed={} stale={} rebuilt={}",
-                working_dir,
+                workspace_root,
                 timer_started_at.elapsed().as_millis(),
                 report.added,
                 report.removed,
@@ -1488,7 +1488,7 @@ pub async fn reconcile_workspace(
             }
             eprintln!(
                 "[KnowledgeIndex] reconcile failed workspace={} elapsed_ms={} error={}",
-                working_dir,
+                workspace_root,
                 timer_started_at.elapsed().as_millis(),
                 err
             );
@@ -1498,7 +1498,7 @@ pub async fn reconcile_workspace(
 }
 
 pub(crate) async fn reconcile_workspace_internal<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
     force_rebuild: bool,
@@ -1511,11 +1511,11 @@ where
 {
     let db = state.db();
     let tantivy = state.tantivy();
-    let library_dir = library_dir_for_working_dir(working_dir);
+    let library_dir = library_dir_for_working_dir(workspace_root);
     let mgr_handle = state.embedding_mgr();
     if let Ok(mgr) = mgr_handle.try_lock() {
         return reconcile_documents_sync(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             &db,
             &tantivy,
@@ -1531,7 +1531,7 @@ where
 
     let fallback_mgr = EmbeddingManager::new(embedding::load_config(&library_dir), &library_dir);
     reconcile_documents_sync(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         &db,
         &tantivy,
@@ -1546,7 +1546,7 @@ where
 }
 
 async fn vector_backfill_embeddings_internal(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<EmbeddingVectorBackfillReport, String> {
@@ -1558,7 +1558,7 @@ async fn vector_backfill_embeddings_internal(
     }
 
     vector_backfill_embeddings_sync(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         &db,
         &mgr,
@@ -1577,7 +1577,7 @@ async fn vector_backfill_embeddings_internal(
 }
 
 fn vector_backfill_embeddings_sync<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     embedding_mgr: &EmbeddingManager,
@@ -1588,7 +1588,7 @@ where
     F: FnMut(&str, usize, usize, Option<&str>, Option<String>),
 {
     let selection =
-        collect_vector_backfill_candidates(working_dir, app_knowledge_dir, db, backend_signature)?;
+        collect_vector_backfill_candidates(workspace_root, app_knowledge_dir, db, backend_signature)?;
     let total_docs = selection.pending.len();
     let mut report = EmbeddingVectorBackfillReport {
         skipped_docs_without_chunks: selection.skipped_docs_without_chunks,
@@ -1598,7 +1598,7 @@ where
     if total_docs == 0 {
         tracing::info!(
             log_module = "knowledge_index",
-            workspace = working_dir,
+            workspace = workspace_root,
             skipped_docs_without_chunks = report.skipped_docs_without_chunks,
             "vector-only embedding backfill skipped because no documents required updates"
         );
@@ -1673,20 +1673,20 @@ where
 }
 
 fn collect_vector_backfill_candidates(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     backend_signature: &str,
 ) -> Result<EmbeddingBackfillSelection, String> {
     let mut selection = EmbeddingBackfillSelection::default();
     let mut access_cache = HashMap::new();
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
 
     for existing_state in db.list_all_index_states()? {
         let doc_type = knowledge_type_from_str(&existing_state.doc_type)?;
         let access = apply_general_search_config(
             cached_document_search_access(
-                working_dir,
+                workspace_root,
                 app_knowledge_dir,
                 doc_type,
                 &existing_state.doc_path,
@@ -1722,7 +1722,7 @@ fn collect_vector_backfill_candidates(
             selection.skipped_docs_without_chunks += 1;
             tracing::warn!(
                 log_module = "knowledge_index",
-                workspace = working_dir,
+                workspace = workspace_root,
                 doc_id = %existing_state.doc_id,
                 doc_path = %existing_state.doc_path,
                 "vector-only embedding backfill skipped document without stored chunks"
@@ -1903,7 +1903,7 @@ fn prepare_and_commit_embedding_backfill_batch(
 }
 
 pub async fn reconcile_unity_reference_import<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
     mut on_rebuild_progress: F,
@@ -1913,11 +1913,11 @@ where
 {
     let db = state.db();
     let tantivy = state.tantivy();
-    let library_dir = library_dir_for_working_dir(working_dir);
+    let library_dir = library_dir_for_working_dir(workspace_root);
     let mgr_handle = state.embedding_mgr();
     if let Ok(mgr) = mgr_handle.try_lock() {
         return reconcile_unity_reference_import_sync(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             &db,
             &tantivy,
@@ -1929,7 +1929,7 @@ where
 
     let fallback_mgr = EmbeddingManager::new(embedding::load_config(&library_dir), &library_dir);
     reconcile_unity_reference_import_sync(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         &db,
         &tantivy,
@@ -1940,7 +1940,7 @@ where
 }
 
 fn reconcile_unity_reference_import_sync<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     tantivy: &KnowledgeTantivyIndex,
@@ -1951,7 +1951,7 @@ fn reconcile_unity_reference_import_sync<F>(
 where
     F: FnMut(&str, usize, usize, Option<&str>),
 {
-    let current_snapshot = unity_docs::current_unity_reference_managed_snapshot(working_dir)?
+    let current_snapshot = unity_docs::current_unity_reference_managed_snapshot(workspace_root)?
         .ok_or_else(|| {
             "Unity reference managed snapshot is unavailable after import".to_string()
         })?;
@@ -1960,7 +1960,7 @@ where
     }
 
     let documents = unity_docs::list_managed_documents(
-        working_dir,
+        workspace_root,
         Some(unity_docs::UNITY_REFERENCE_MANAGED_DIR),
     )?;
     if documents.len() != current_snapshot.document_count {
@@ -1992,7 +1992,7 @@ where
     let mut report = ReconcileReport::default();
     report.removed = removed_doc_ids.len();
     let mut access_cache = HashMap::new();
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
     let mut scanned = 0usize;
     let mut indexed_docs = 0usize;
     let mut pending_catalog_rows = Vec::with_capacity(UNITY_IMPORT_BULK_MAX_DOCS_PER_COMMIT);
@@ -2010,7 +2010,7 @@ where
 
     for documents_batch in documents.chunks(PREPARING_ANALYSIS_BATCH_DOCS) {
         populate_document_access_cache_for_batch(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             documents_batch,
             &mut access_cache,
@@ -2021,7 +2021,7 @@ where
             .map(|document| {
                 let access = apply_general_search_config(
                     cached_document_search_access(
-                        working_dir,
+                        workspace_root,
                         app_knowledge_dir,
                         document.doc_type,
                         &document.path,
@@ -2111,7 +2111,7 @@ where
     } else {
         db.delete_managed_directory_snapshot(unity_docs::UNITY_REFERENCE_MANAGED_PATH)?;
     }
-    refresh_unity_managed_retrieval_summary_cache(working_dir, app_knowledge_dir, db)?;
+    refresh_unity_managed_retrieval_summary_cache(workspace_root, app_knowledge_dir, db)?;
 
     Ok(report)
 }
@@ -2170,7 +2170,7 @@ fn commit_unity_import_bulk_batch(
 }
 
 fn reconcile_documents_sync<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     tantivy: &KnowledgeTantivyIndex,
@@ -2190,7 +2190,7 @@ where
         on_rebuild_progress("preparing", 0, 0, None);
     }
     let reuse_decision = plan_managed_directory_reuse(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         db,
         backend_signature,
@@ -2199,18 +2199,18 @@ where
     )?;
     eprintln!(
         "[KnowledgeIndex] reconcile decision workspace={} excluded_prefixes={:?} retained_doc_ids={}",
-        working_dir,
+        workspace_root,
         reuse_decision.excluded_prefixes,
         reuse_decision.retained_doc_ids.len()
     );
     let documents = load_all_documents(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         &reuse_decision.excluded_prefixes,
     )?;
     eprintln!(
         "[KnowledgeIndex] reconcile loaded documents workspace={} load_count={}",
-        working_dir,
+        workspace_root,
         documents.len()
     );
     let preparation_total = documents.len();
@@ -2228,7 +2228,7 @@ where
     let mut removed_lexical_doc_ids = Vec::new();
     let mut catalog_rows = Vec::with_capacity(documents.len());
     let mut access_cache = HashMap::new();
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
     let automatic_lexical_progress_enabled =
         general_config.enabled && general_config.lexical_search_enabled;
 
@@ -2247,7 +2247,7 @@ where
     let mut scanned = 0usize;
     for documents_batch in documents.chunks(PREPARING_ANALYSIS_BATCH_DOCS) {
         populate_document_access_cache_for_batch(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             documents_batch,
             &mut access_cache,
@@ -2426,22 +2426,22 @@ where
     }
 
     persist_managed_directory_snapshots(db, &reuse_decision.snapshot_persistence)?;
-    refresh_unity_managed_retrieval_summary_cache(working_dir, app_knowledge_dir, db)?;
+    refresh_unity_managed_retrieval_summary_cache(workspace_root, app_knowledge_dir, db)?;
 
     Ok(report)
 }
 
 fn plan_managed_directory_reuse(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     backend_signature: &str,
     embedding_backfill_ready: bool,
     force_rebuild: bool,
 ) -> Result<ManagedDirectoryReuseDecision, String> {
-    let unity_snapshot = unity_docs::current_unity_reference_managed_snapshot(working_dir)?;
+    let unity_snapshot = unity_docs::current_unity_reference_managed_snapshot(workspace_root)?;
     let mut decision = plan_unity_reference_reuse(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         db,
         backend_signature,
@@ -2461,7 +2461,7 @@ fn plan_managed_directory_reuse(
 }
 
 fn plan_unity_reference_reuse(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     backend_signature: &str,
@@ -2472,7 +2472,7 @@ fn plan_unity_reference_reuse(
     if force_rebuild {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=force_rebuild",
-            working_dir
+            workspace_root
         );
         return Ok(None);
     }
@@ -2480,14 +2480,14 @@ fn plan_unity_reference_reuse(
     let Some(current_snapshot) = current_snapshot else {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=no_current_snapshot",
-            working_dir
+            workspace_root
         );
         return Ok(None);
     };
     if current_snapshot.document_count != current_snapshot.expected_document_count {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=snapshot_count_mismatch current={} expected={}",
-            working_dir, current_snapshot.document_count, current_snapshot.expected_document_count
+            workspace_root, current_snapshot.document_count, current_snapshot.expected_document_count
         );
         return Ok(None);
     }
@@ -2497,7 +2497,7 @@ fn plan_unity_reference_reuse(
     else {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=no_stored_snapshot managed_path={}",
-            working_dir, current_snapshot.managed_path
+            workspace_root, current_snapshot.managed_path
         );
         return Ok(None);
     };
@@ -2506,7 +2506,7 @@ fn plan_unity_reference_reuse(
     {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=stored_snapshot_mismatch stored_docs={} current_docs={} stored_fingerprint={} current_fingerprint={}",
-            working_dir,
+            workspace_root,
             stored_snapshot.document_count,
             current_snapshot.document_count,
             stored_snapshot.fingerprint,
@@ -2522,7 +2522,7 @@ fn plan_unity_reference_reuse(
     if catalog_rows.len() != current_snapshot.document_count {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=catalog_count_mismatch catalog_rows={} snapshot_docs={}",
-            working_dir,
+            workspace_root,
             catalog_rows.len(),
             current_snapshot.document_count
         );
@@ -2536,7 +2536,7 @@ fn plan_unity_reference_reuse(
     if state_rows.len() != current_snapshot.document_count {
         eprintln!(
             "[KnowledgeIndex] unity reuse skipped workspace={} reason=index_state_count_mismatch state_rows={} snapshot_docs={}",
-            working_dir,
+            workspace_root,
             state_rows.len(),
             current_snapshot.document_count
         );
@@ -2556,7 +2556,7 @@ fn plan_unity_reference_reuse(
     };
 
     let mut access_cache = HashMap::new();
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
     let mut retained_doc_ids = HashSet::with_capacity(current_snapshot.document_count);
     for row in catalog_rows {
         let Some(state) = state_map.get(&row.doc_id) else {
@@ -2564,7 +2564,7 @@ fn plan_unity_reference_reuse(
         };
         let access = apply_general_search_config(
             cached_document_search_access(
-                working_dir,
+                workspace_root,
                 app_knowledge_dir,
                 KnowledgeType::Reference,
                 &row.doc_path,
@@ -2584,7 +2584,7 @@ fn plan_unity_reference_reuse(
         {
             eprintln!(
                 "[KnowledgeIndex] unity reuse skipped workspace={} reason=state_mismatch doc_id={} doc_path={} stale={} index_version={} state_doc_type={} state_doc_path={} expected_backend={} actual_backend={} missing_embedding={}",
-                working_dir,
+                workspace_root,
                 row.doc_id,
                 row.doc_path,
                 state.stale,
@@ -2604,7 +2604,7 @@ fn plan_unity_reference_reuse(
 
     eprintln!(
         "[KnowledgeIndex] unity reuse accepted workspace={} docs={}",
-        working_dir,
+        workspace_root,
         retained_doc_ids.len()
     );
     Ok(Some(ManagedDirectoryReuseDecision {
@@ -2655,10 +2655,10 @@ fn is_directory_config_file(path: &Path) -> bool {
 }
 
 fn managed_reference_config_signature(
-    working_dir: &str,
+    workspace_root: &str,
     managed_dir: &str,
 ) -> Result<String, String> {
-    let type_root = Path::new(working_dir)
+    let type_root = Path::new(workspace_root)
         .join("Locus")
         .join("knowledge")
         .join(KnowledgeType::Reference.as_str());
@@ -2711,13 +2711,13 @@ fn managed_reference_config_signature(
 }
 
 fn build_unity_managed_retrieval_summary_cache_row(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     snapshot: &unity_docs::UnityReferenceManagedSnapshot,
 ) -> Result<ManagedRetrievalSummaryCacheRow, String> {
     let config_signature =
-        managed_reference_config_signature(working_dir, unity_docs::UNITY_REFERENCE_MANAGED_DIR)?;
+        managed_reference_config_signature(workspace_root, unity_docs::UNITY_REFERENCE_MANAGED_DIR)?;
     let catalog_rows = db.list_document_catalog_entries_with_prefix(
         KnowledgeType::Reference.as_str(),
         unity_docs::UNITY_REFERENCE_MANAGED_DIR,
@@ -2740,7 +2740,7 @@ fn build_unity_managed_retrieval_summary_cache_row(
 
     for row in &catalog_rows {
         let access = cached_document_search_access(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             KnowledgeType::Reference,
             &row.doc_path,
@@ -2793,11 +2793,11 @@ fn build_unity_managed_retrieval_summary_cache_row(
 }
 
 fn refresh_unity_managed_retrieval_summary_cache(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
 ) -> Result<Option<ManagedRetrievalSummaryCacheRow>, String> {
-    let Some(snapshot) = unity_docs::current_unity_reference_managed_snapshot(working_dir)? else {
+    let Some(snapshot) = unity_docs::current_unity_reference_managed_snapshot(workspace_root)? else {
         db.delete_managed_retrieval_summary_cache(unity_docs::UNITY_REFERENCE_MANAGED_PATH)?;
         return Ok(None);
     };
@@ -2807,7 +2807,7 @@ fn refresh_unity_managed_retrieval_summary_cache(
     }
 
     let next = build_unity_managed_retrieval_summary_cache_row(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         db,
         &snapshot,
@@ -2817,11 +2817,11 @@ fn refresh_unity_managed_retrieval_summary_cache(
 }
 
 fn get_or_build_unity_managed_retrieval_summary_cache(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
 ) -> Result<Option<ManagedRetrievalSummaryCacheRow>, String> {
-    let Some(snapshot) = unity_docs::current_unity_reference_managed_snapshot(working_dir)? else {
+    let Some(snapshot) = unity_docs::current_unity_reference_managed_snapshot(workspace_root)? else {
         db.delete_managed_retrieval_summary_cache(unity_docs::UNITY_REFERENCE_MANAGED_PATH)?;
         return Ok(None);
     };
@@ -2831,7 +2831,7 @@ fn get_or_build_unity_managed_retrieval_summary_cache(
     }
 
     let config_signature =
-        managed_reference_config_signature(working_dir, unity_docs::UNITY_REFERENCE_MANAGED_DIR)?;
+        managed_reference_config_signature(workspace_root, unity_docs::UNITY_REFERENCE_MANAGED_DIR)?;
     if let Some(cached) =
         db.get_managed_retrieval_summary_cache(unity_docs::UNITY_REFERENCE_MANAGED_PATH)?
     {
@@ -2841,30 +2841,30 @@ fn get_or_build_unity_managed_retrieval_summary_cache(
         }
     }
 
-    refresh_unity_managed_retrieval_summary_cache(working_dir, app_knowledge_dir, db)
+    refresh_unity_managed_retrieval_summary_cache(workspace_root, app_knowledge_dir, db)
 }
 
 async fn ensure_document_catalog_available(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<(), String> {
-    let workspace_key = normalize_workspace_cache_key(working_dir);
+    let workspace_key = normalize_workspace_cache_key(workspace_root);
     let mut bootstrapped = state.catalog_bootstrapped_workspaces.lock().await;
     if !bootstrapped.contains(&workspace_key) {
         let started_at = Instant::now();
         eprintln!(
             "[KnowledgeIndex] bootstrap start workspace={} app_root={}",
-            working_dir,
+            workspace_root,
             app_knowledge_dir
                 .map(|value| value.display().to_string())
                 .unwrap_or_else(|| "<none>".to_string())
         );
-        reconcile_workspace(working_dir, app_knowledge_dir, state.clone()).await?;
+        reconcile_workspace(workspace_root, app_knowledge_dir, state.clone()).await?;
         bootstrapped.insert(workspace_key);
         eprintln!(
             "[KnowledgeIndex] bootstrap finished workspace={} elapsed_ms={}",
-            working_dir,
+            workspace_root,
             started_at.elapsed().as_millis()
         );
         return Ok(());
@@ -2875,20 +2875,20 @@ async fn ensure_document_catalog_available(
         let started_at = Instant::now();
         eprintln!(
             "[KnowledgeIndex] bootstrap retry for empty catalog workspace={}",
-            working_dir
+            workspace_root
         );
-        reconcile_workspace(working_dir, app_knowledge_dir, state.clone()).await?;
+        reconcile_workspace(workspace_root, app_knowledge_dir, state.clone()).await?;
         eprintln!(
             "[KnowledgeIndex] empty catalog bootstrap finished workspace={} elapsed_ms={}",
-            working_dir,
+            workspace_root,
             started_at.elapsed().as_millis()
         );
     }
     Ok(())
 }
 
-fn normalize_workspace_cache_key(working_dir: &str) -> String {
-    working_dir
+fn normalize_workspace_cache_key(workspace_root: &str) -> String {
+    workspace_root
         .trim()
         .replace('\\', "/")
         .trim_end_matches('/')
@@ -2896,13 +2896,13 @@ fn normalize_workspace_cache_key(working_dir: &str) -> String {
 }
 
 pub async fn list_cached_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<Vec<KnowledgeListItem>, String> {
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
     let rows = state.db().list_document_catalog_entries_filtered(
         doc_type.map(|value| value.as_str()),
         path_prefix,
@@ -2915,7 +2915,7 @@ pub async fn list_cached_documents(
 }
 
 pub async fn list_cached_documents_page(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
@@ -2923,7 +2923,7 @@ pub async fn list_cached_documents_page(
     offset: usize,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<CachedKnowledgeListPage, String> {
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
     let rows = state.db().list_document_catalog_entries_page(
         doc_type.map(|value| value.as_str()),
         path_prefix,
@@ -2934,13 +2934,13 @@ pub async fn list_cached_documents_page(
 }
 
 pub async fn list_cached_directory_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: KnowledgeType,
     directory_path: Option<&str>,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<Vec<KnowledgeListItem>, String> {
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
     let normalized_directory = directory_path
         .map(|value| value.trim().trim_matches('/').replace('\\', "/"))
         .filter(|value| !value.is_empty());
@@ -2956,7 +2956,7 @@ pub async fn list_cached_directory_documents(
 }
 
 pub async fn list_cached_directory_documents_page(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: KnowledgeType,
     directory_path: Option<&str>,
@@ -2964,7 +2964,7 @@ pub async fn list_cached_directory_documents_page(
     offset: usize,
     state: Arc<KnowledgeIndexState>,
 ) -> Result<CachedKnowledgeListPage, String> {
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
     let normalized_directory = directory_path
         .map(|value| value.trim().trim_matches('/').replace('\\', "/"))
         .filter(|value| !value.is_empty());
@@ -2979,7 +2979,7 @@ pub async fn list_cached_directory_documents_page(
 
 pub async fn upsert_document(
     state: Arc<KnowledgeIndexState>,
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     document: KnowledgeDocument,
 ) -> Result<(), String> {
@@ -2987,10 +2987,10 @@ pub async fn upsert_document(
     let tantivy = state.tantivy();
     let mgr_handle = state.embedding_mgr();
     let mgr = mgr_handle.lock().await;
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
     let access = apply_general_search_config(
         knowledge_store::effective_document_search_access_with_app_root(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             document.doc_type,
             &document.path,
@@ -3043,15 +3043,15 @@ pub fn remove_shadowed_documents_for_path(
 }
 
 pub async fn build_overview(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     state: Arc<KnowledgeIndexState>,
     model_storage_dir: &Path,
 ) -> Result<KnowledgeOverview, String> {
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
 
     let db = state.db();
-    let library_dir = library_dir_for_working_dir(working_dir);
+    let library_dir = library_dir_for_working_dir(workspace_root);
     let general_config = load_general_config(&library_dir);
     let catalog_rows = db.list_document_catalog_entries(None)?;
     let all_states = db.list_all_index_states()?;
@@ -3060,7 +3060,7 @@ pub async fn build_overview(
         .map(|state| (state.doc_id.clone(), state))
         .collect();
     let unity_managed_cache =
-        get_or_build_unity_managed_retrieval_summary_cache(working_dir, app_knowledge_dir, &db)?;
+        get_or_build_unity_managed_retrieval_summary_cache(workspace_root, app_knowledge_dir, &db)?;
     let mut access_cache = HashMap::new();
     let mut total_document_count = unity_managed_cache
         .as_ref()
@@ -3127,7 +3127,7 @@ pub async fn build_overview(
         };
         let access = apply_general_search_config(
             cached_document_search_access(
-                working_dir,
+                workspace_root,
                 app_knowledge_dir,
                 doc_type,
                 &row.doc_path,
@@ -3314,7 +3314,7 @@ fn query_progress_filter_info(
 }
 
 pub async fn query_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     lexical_query: Option<&str>,
     semantic_query: Option<&str>,
@@ -3325,7 +3325,7 @@ pub async fn query_documents(
     state: Arc<KnowledgeIndexState>,
 ) -> Result<Vec<KnowledgeSearchHit>, String> {
     query_documents_with_progress(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         lexical_query,
         semantic_query,
@@ -3340,7 +3340,7 @@ pub async fn query_documents(
 }
 
 pub async fn query_documents_with_progress<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     lexical_query: Option<&str>,
     semantic_query: Option<&str>,
@@ -3355,7 +3355,7 @@ where
     F: FnMut(KnowledgeQueryProgress) + Send,
 {
     query_documents_with_progress_with_timeout(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         lexical_query,
         semantic_query,
@@ -3371,7 +3371,7 @@ where
 }
 
 async fn query_documents_with_progress_with_timeout<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     lexical_query: Option<&str>,
     semantic_query: Option<&str>,
@@ -3393,7 +3393,7 @@ where
         0.06,
     );
 
-    let general_config = load_general_config(&library_dir_for_working_dir(working_dir));
+    let general_config = load_general_config(&library_dir_for_working_dir(workspace_root));
     if !general_config.enabled {
         return Ok(Vec::new());
     }
@@ -3404,7 +3404,7 @@ where
         query_progress_filter_info(types, path_prefix),
         0.14,
     );
-    ensure_document_catalog_available(working_dir, app_knowledge_dir, state.clone()).await?;
+    ensure_document_catalog_available(workspace_root, app_knowledge_dir, state.clone()).await?;
     let db = state.db();
     let tantivy = state.tantivy();
 
@@ -3437,7 +3437,7 @@ where
             );
             (
                 lexical_index_search_documents(
-                    working_dir,
+                    workspace_root,
                     app_knowledge_dir,
                     &db,
                     &tantivy,
@@ -3458,7 +3458,7 @@ where
                 0.28,
             );
             match text_scan_search_documents_with_progress(
-                working_dir,
+                workspace_root,
                 app_knowledge_dir,
                 value,
                 types,
@@ -3570,12 +3570,12 @@ where
             continue;
         };
         let access = cached_document_entry_search_access(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             document,
             &mut access_cache,
         )?;
-        if !include_hidden && !cached_document_entry_allows_model_recall(working_dir, document)? {
+        if !include_hidden && !cached_document_entry_allows_model_recall(workspace_root, document)? {
             continue;
         }
         if access.lexical_enabled {
@@ -3592,12 +3592,12 @@ where
             continue;
         };
         let access = cached_document_entry_search_access(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             document,
             &mut access_cache,
         )?;
-        if !include_hidden && !cached_document_entry_allows_model_recall(working_dir, document)? {
+        if !include_hidden && !cached_document_entry_allows_model_recall(workspace_root, document)? {
             continue;
         }
         if access.vector_enabled {
@@ -3705,7 +3705,7 @@ where
                     lexical_query
                         .and_then(|query| {
                             knowledge_store::load_document_by_path_with_app_root(
-                                working_dir,
+                                workspace_root,
                                 app_knowledge_dir,
                                 document.item.doc_type,
                                 &document.item.path,
@@ -4163,12 +4163,12 @@ fn prepare_document_update_sync(
 }
 
 fn load_all_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     excluded_prefixes: &[(KnowledgeType, String)],
 ) -> Result<Vec<KnowledgeDocument>, String> {
     let mut documents = knowledge_store::load_documents_with_app_root_excluding_prefixes(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         None,
         None,
@@ -4176,7 +4176,7 @@ fn load_all_documents(
     )?;
     documents.extend(
         crate::commands::list_skill_package_knowledge_documents_sync_with_hidden(
-            working_dir,
+            workspace_root,
             None,
             true,
         )
@@ -4198,14 +4198,14 @@ fn document_is_excluded(
 }
 
 fn cached_document_entry_allows_model_recall(
-    working_dir: &str,
+    workspace_root: &str,
     document: &CachedDocumentEntry,
 ) -> Result<bool, String> {
     if document.item.doc_type != KnowledgeType::Skill {
         return Ok(true);
     }
     let package_recall = crate::commands::skill_package_virtual_path_allows_model_recall_sync(
-        working_dir,
+        workspace_root,
         &document.item.path,
     )?;
     if let Some(allowed) = package_recall {
@@ -4396,7 +4396,7 @@ fn knowledge_type_from_str(value: &str) -> Result<KnowledgeType, String> {
 }
 
 fn cached_document_search_access(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: KnowledgeType,
     doc_path: &str,
@@ -4416,7 +4416,7 @@ fn cached_document_search_access(
         return Ok(*access);
     }
     let access = knowledge_store::effective_directory_search_access_with_app_root(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         &parent_path,
@@ -4434,7 +4434,7 @@ fn should_parallelize_directory_access_resolution(unique_dirs: usize) -> bool {
 }
 
 fn populate_document_access_cache_for_batch(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     documents: &[KnowledgeDocument],
     cache: &mut HashMap<DirectoryAccessCacheKey, DirectorySearchAccess>,
@@ -4468,7 +4468,7 @@ fn populate_document_access_cache_for_batch(
             .par_iter()
             .map(|key| {
                 let access = knowledge_store::effective_directory_search_access_with_app_root(
-                    working_dir,
+                    workspace_root,
                     app_knowledge_dir,
                     key.doc_type,
                     &key.path,
@@ -4482,7 +4482,7 @@ fn populate_document_access_cache_for_batch(
             .into_iter()
             .map(|key| {
                 let access = knowledge_store::effective_directory_search_access_with_app_root(
-                    working_dir,
+                    workspace_root,
                     app_knowledge_dir,
                     key.doc_type,
                     &key.path,
@@ -4528,13 +4528,13 @@ fn batch_document_search_inputs(
 }
 
 fn cached_document_entry_search_access(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     document: &CachedDocumentEntry,
     cache: &mut HashMap<DirectoryAccessCacheKey, DirectorySearchAccess>,
 ) -> Result<DirectorySearchAccess, String> {
     cached_document_search_access(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         document.item.doc_type,
         &document.item.path,
@@ -4766,7 +4766,7 @@ fn catalog_title_search_documents(
 }
 
 fn lexical_index_search_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     db: &KnowledgeDb,
     tantivy: &KnowledgeTantivyIndex,
@@ -4811,7 +4811,7 @@ fn lexical_index_search_documents(
                 continue;
             };
             let access = cached_document_entry_search_access(
-                working_dir,
+                workspace_root,
                 app_knowledge_dir,
                 document,
                 &mut access_cache,
@@ -4819,7 +4819,7 @@ fn lexical_index_search_documents(
             if !access.lexical_enabled {
                 continue;
             }
-            if !include_hidden && !cached_document_entry_allows_model_recall(working_dir, document)?
+            if !include_hidden && !cached_document_entry_allows_model_recall(workspace_root, document)?
             {
                 continue;
             }
@@ -4937,7 +4937,7 @@ fn text_scan_candidate_key(doc_type: KnowledgeType, path: &str) -> String {
 }
 
 fn collect_text_scan_file_candidates_from_root(
-    working_dir: &str,
+    workspace_root: &str,
     root: &Path,
     doc_type: KnowledgeType,
     normalized_prefix: Option<&str>,
@@ -4950,7 +4950,7 @@ fn collect_text_scan_file_candidates_from_root(
     }
     let skip_managed_reference_dir = skip_managed_reference_dir
         && doc_type == KnowledgeType::Reference
-        && crate::unity_docs::has_managed_store(working_dir);
+        && crate::unity_docs::has_managed_store(workspace_root);
 
     for entry in WalkDir::new(root)
         .into_iter()
@@ -4988,7 +4988,7 @@ fn collect_text_scan_file_candidates_from_root(
 }
 
 fn count_text_scan_file_candidates_from_root(
-    working_dir: &str,
+    workspace_root: &str,
     root: &Path,
     doc_type: KnowledgeType,
     normalized_prefix: Option<&str>,
@@ -5001,7 +5001,7 @@ fn count_text_scan_file_candidates_from_root(
     }
     let skip_managed_reference_dir = skip_managed_reference_dir
         && doc_type == KnowledgeType::Reference
-        && crate::unity_docs::has_managed_store(working_dir);
+        && crate::unity_docs::has_managed_store(workspace_root);
 
     for entry in WalkDir::new(root)
         .into_iter()
@@ -5047,14 +5047,14 @@ fn add_text_scan_candidate_count(count: &mut usize, additional: usize) -> Result
 }
 
 fn count_text_scan_candidate_documents(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     types: Option<&[KnowledgeType]>,
     path_prefix: Option<&str>,
     include_hidden: bool,
 ) -> Result<usize, String> {
-    knowledge_store::ensure_knowledge_roots(working_dir)?;
-    knowledge_store::ensure_memory_builtin_documents(working_dir)?;
+    knowledge_store::ensure_knowledge_roots(workspace_root)?;
+    knowledge_store::ensure_memory_builtin_documents(workspace_root)?;
 
     let normalized_prefix = normalize_text_scan_path_prefix(path_prefix)?;
     let selected_types = types
@@ -5062,12 +5062,12 @@ fn count_text_scan_candidate_documents(
         .unwrap_or_else(|| KnowledgeType::all().to_vec());
     let mut seen = HashSet::new();
     let mut count = 0usize;
-    let workspace_root = knowledge_store::knowledge_root(working_dir);
+    let knowledge_root_path = knowledge_store::knowledge_root(workspace_root);
 
     for doc_type in selected_types {
-        let root = workspace_root.join(doc_type.as_str());
+        let root = knowledge_root_path.join(doc_type.as_str());
         count_text_scan_file_candidates_from_root(
-            working_dir,
+            workspace_root,
             &root,
             doc_type,
             normalized_prefix.as_deref(),
@@ -5081,7 +5081,7 @@ fn count_text_scan_candidate_documents(
 
         if doc_type == KnowledgeType::Reference {
             let managed_count = crate::unity_docs::count_managed_document_paths(
-                working_dir,
+                workspace_root,
                 normalized_prefix.as_deref(),
             )?;
             add_text_scan_candidate_count(&mut count, managed_count)?;
@@ -5090,7 +5090,7 @@ fn count_text_scan_candidate_documents(
         if let Some(app_root) = app_knowledge_dir {
             let app_type_root = app_root.join(doc_type.as_str());
             count_text_scan_file_candidates_from_root(
-                working_dir,
+                workspace_root,
                 &app_type_root,
                 doc_type,
                 normalized_prefix.as_deref(),
@@ -5111,7 +5111,7 @@ fn count_text_scan_candidate_documents(
         add_text_scan_candidate_count(
             &mut count,
             crate::commands::list_skill_package_knowledge_items_sync_with_hidden(
-                working_dir,
+                workspace_root,
                 path_prefix,
                 include_hidden,
             )
@@ -5123,14 +5123,14 @@ fn count_text_scan_candidate_documents(
 }
 
 fn text_scan_candidate_allows_model_recall(
-    working_dir: &str,
+    workspace_root: &str,
     candidate: &TextScanDocumentCandidate,
 ) -> Result<bool, String> {
     if candidate.doc_type != KnowledgeType::Skill {
         return Ok(true);
     }
     if let Some(allowed) = crate::commands::skill_package_virtual_path_allows_model_recall_sync(
-        working_dir,
+        workspace_root,
         &candidate.path,
     )? {
         return Ok(allowed);
@@ -5139,33 +5139,33 @@ fn text_scan_candidate_allows_model_recall(
 }
 
 fn collect_searchable_text_scan_candidates(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     types: Option<&[KnowledgeType]>,
     path_prefix: Option<&str>,
     include_hidden: bool,
     deadline: &TextScanDeadline,
 ) -> Result<Vec<TextScanDocumentCandidate>, String> {
-    knowledge_store::ensure_knowledge_roots(working_dir)?;
-    knowledge_store::ensure_memory_builtin_documents(working_dir)?;
+    knowledge_store::ensure_knowledge_roots(workspace_root)?;
+    knowledge_store::ensure_memory_builtin_documents(workspace_root)?;
 
     let normalized_prefix = normalize_text_scan_path_prefix(path_prefix)?;
     let selected_types = types
         .map(|values| values.to_vec())
         .unwrap_or_else(|| KnowledgeType::all().to_vec());
     if selected_types.contains(&KnowledgeType::Reference) {
-        crate::unity_docs::ensure_managed_store_available(working_dir)?;
+        crate::unity_docs::ensure_managed_store_available(workspace_root)?;
     }
 
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
-    let workspace_root = knowledge_store::knowledge_root(working_dir);
+    let knowledge_root_path = knowledge_store::knowledge_root(workspace_root);
 
     for doc_type in selected_types {
         deadline.check("checking text scan documents")?;
-        let root = workspace_root.join(doc_type.as_str());
+        let root = knowledge_root_path.join(doc_type.as_str());
         collect_text_scan_file_candidates_from_root(
-            working_dir,
+            workspace_root,
             &root,
             doc_type,
             normalized_prefix.as_deref(),
@@ -5176,7 +5176,7 @@ fn collect_searchable_text_scan_candidates(
 
         if doc_type == KnowledgeType::Reference {
             for path in crate::unity_docs::list_managed_document_paths(
-                working_dir,
+                workspace_root,
                 normalized_prefix.as_deref(),
             )? {
                 deadline.check("checking text scan documents")?;
@@ -5190,7 +5190,7 @@ fn collect_searchable_text_scan_candidates(
         if let Some(app_root) = app_knowledge_dir {
             let app_type_root = app_root.join(doc_type.as_str());
             collect_text_scan_file_candidates_from_root(
-                working_dir,
+                workspace_root,
                 &app_type_root,
                 doc_type,
                 normalized_prefix.as_deref(),
@@ -5205,7 +5205,7 @@ fn collect_searchable_text_scan_candidates(
     for candidate in candidates {
         deadline.check("checking text scan documents")?;
         let access = knowledge_store::effective_document_search_access_with_app_root(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             candidate.doc_type,
             &candidate.path,
@@ -5214,7 +5214,7 @@ fn collect_searchable_text_scan_candidates(
         if !access.map(|value| value.lexical_enabled).unwrap_or(false) {
             continue;
         }
-        if !include_hidden && !text_scan_candidate_allows_model_recall(working_dir, &candidate)? {
+        if !include_hidden && !text_scan_candidate_allows_model_recall(workspace_root, &candidate)? {
             continue;
         }
         searchable.push(candidate);
@@ -5235,7 +5235,7 @@ fn text_scan_progress(start: f32, end: f32, processed: usize, total: usize) -> f
 }
 
 async fn text_scan_search_documents_with_progress<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     query: &str,
     types: Option<&[KnowledgeType]>,
@@ -5265,7 +5265,7 @@ where
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let deadline = TextScanDeadline::new(text_scan_timeout, cancel_requested.clone());
 
-    let working_dir = working_dir.to_string();
+    let workspace_root = workspace_root.to_string();
     let app_knowledge_dir = app_knowledge_dir.cloned();
     let query = query.to_string();
     let types = types.map(|values| values.to_vec());
@@ -5273,7 +5273,7 @@ where
 
     let mut handle = tokio::task::spawn_blocking(move || {
         text_scan_search_documents_blocking(
-            &working_dir,
+            &workspace_root,
             app_knowledge_dir.as_ref(),
             &query,
             types.as_deref(),
@@ -5322,7 +5322,7 @@ where
 }
 
 fn text_scan_search_documents_blocking<F>(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     query: &str,
     types: Option<&[KnowledgeType]>,
@@ -5348,7 +5348,7 @@ where
         0.30,
     );
     if let Err(error) = count_text_scan_candidate_documents(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         types,
         path_prefix,
@@ -5367,7 +5367,7 @@ where
     deadline.check("checking text scan documents")?;
 
     let candidates = collect_searchable_text_scan_candidates(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         types,
         path_prefix,
@@ -5381,7 +5381,7 @@ where
         .unwrap_or(true)
     {
         total_documents += crate::commands::list_skill_package_knowledge_items_sync_with_hidden(
-            working_dir,
+            workspace_root,
             path_prefix,
             include_hidden,
         )
@@ -5417,7 +5417,7 @@ where
             );
         }
         searchable_documents.push(knowledge_store::load_document_by_path_with_app_root(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             candidate.doc_type,
             &candidate.path,
@@ -5430,7 +5430,7 @@ where
     {
         searchable_documents.extend(
             crate::commands::list_skill_package_knowledge_documents_sync_with_hidden(
-                working_dir,
+                workspace_root,
                 path_prefix,
                 include_hidden,
             ),
@@ -5854,7 +5854,7 @@ mod tests {
     }
 
     fn save_design_document(
-        working_dir: &str,
+        workspace_root: &str,
         id: &str,
         path: &str,
         title: &str,
@@ -5863,7 +5863,7 @@ mod tests {
         updated_at: i64,
     ) {
         save_document(
-            working_dir,
+            workspace_root,
             KnowledgeDocument {
                 id: id.to_string(),
                 doc_type: KnowledgeType::Design,
@@ -5902,9 +5902,9 @@ mod tests {
         .expect("save knowledge document");
     }
 
-    fn seed_design_document(working_dir: &str) {
+    fn seed_design_document(workspace_root: &str) {
         save_design_document(
-            working_dir,
+            workspace_root,
             "kd_test_design_doc",
             "combat/core-loop.md",
             "核心循环",
@@ -5951,18 +5951,18 @@ mod tests {
         }
     }
 
-    fn save_memory_document(working_dir: &str, index: usize, body: &str, updated_at: i64) {
+    fn save_memory_document(workspace_root: &str, index: usize, body: &str, updated_at: i64) {
         save_document(
-            working_dir,
+            workspace_root,
             memory_document(index, body.to_string(), updated_at),
         )
         .expect("save memory document");
     }
 
-    fn seed_memory_documents(working_dir: &str, document_count: usize) {
+    fn seed_memory_documents(workspace_root: &str, document_count: usize) {
         for index in 0..document_count {
             save_memory_document(
-                working_dir,
+                workspace_root,
                 index,
                 &format!("Project memory body {:03}", index),
                 1,
@@ -5970,9 +5970,9 @@ mod tests {
         }
     }
 
-    fn seed_unity_reference_managed_document(working_dir: &str) {
+    fn seed_unity_reference_managed_document(workspace_root: &str) {
         crate::unity_docs::seed_managed_documents_for_tests(
-            working_dir,
+            workspace_root,
             &[KnowledgeDocument {
                 id: "kd_unity_execution_order".to_string(),
                 doc_type: KnowledgeType::Reference,
@@ -6018,7 +6018,7 @@ mod tests {
         )
         .expect("save unity index doc");
 
-        let manifest_path = std::path::Path::new(working_dir)
+        let manifest_path = std::path::Path::new(workspace_root)
             .join("Library")
             .join("Locus")
             .join("unity_reference_docs_manifest.json");
@@ -6039,8 +6039,8 @@ mod tests {
         .expect("write unity manifest");
     }
 
-    fn write_unity_reference_manifest(working_dir: &str, imported_doc_count: usize) {
-        let manifest_path = std::path::Path::new(working_dir)
+    fn write_unity_reference_manifest(workspace_root: &str, imported_doc_count: usize) {
+        let manifest_path = std::path::Path::new(workspace_root)
             .join("Library")
             .join("Locus")
             .join("unity_reference_docs_manifest.json");
@@ -6061,7 +6061,7 @@ mod tests {
         .expect("write unity manifest");
     }
 
-    fn seed_unity_reference_documents(working_dir: &str, document_count: usize) {
+    fn seed_unity_reference_documents(workspace_root: &str, document_count: usize) {
         let documents = (0..document_count)
             .map(|index| KnowledgeDocument {
                 id: format!("kd_unity_ref_{:03}", index),
@@ -6110,15 +6110,15 @@ mod tests {
                 updated_at: 1,
             })
             .collect::<Vec<_>>();
-        unity_docs::seed_managed_documents_for_tests(working_dir, &documents)
+        unity_docs::seed_managed_documents_for_tests(workspace_root, &documents)
             .expect("seed unity managed docs");
-        write_unity_reference_manifest(working_dir, document_count);
+        write_unity_reference_manifest(workspace_root, document_count);
     }
 
-    fn create_state(working_dir: &str) -> Arc<KnowledgeIndexState> {
+    fn create_state(workspace_root: &str) -> Arc<KnowledgeIndexState> {
         let runtime = KnowledgeRuntime::open(
-            &library_dir_for_working_dir(working_dir),
-            Path::new(working_dir),
+            &library_dir_for_working_dir(workspace_root),
+            Path::new(workspace_root),
         )
         .expect("open runtime");
         Arc::new(KnowledgeIndexState::new(
@@ -6129,12 +6129,12 @@ mod tests {
     }
 
     fn save_test_general_config(
-        working_dir: &str,
+        workspace_root: &str,
         lexical_search_enabled: bool,
         semantic_search_enabled: bool,
     ) {
         save_general_config(
-            &library_dir_for_working_dir(working_dir),
+            &library_dir_for_working_dir(workspace_root),
             &KnowledgeGeneralConfig {
                 enabled: true,
                 lexical_search_enabled,
@@ -6147,13 +6147,13 @@ mod tests {
     #[tokio::test]
     async fn query_documents_uses_text_scan_when_lexical_index_disabled() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗核心"),
             None,
@@ -6182,10 +6182,10 @@ mod tests {
     #[tokio::test]
     async fn query_documents_matches_single_char_document_name_with_lexical_index_enabled() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
         save_design_document(
-            &working_dir,
+            &workspace_root,
             "kd_single_char_doc",
             "notes/的.md",
             "的",
@@ -6193,11 +6193,11 @@ mod tests {
             "是是",
             1,
         );
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("的"),
             None,
@@ -6229,9 +6229,9 @@ mod tests {
     #[tokio::test]
     async fn query_documents_matches_single_char_document_name_when_indexes_disabled() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         save_design_document(
-            &working_dir,
+            &workspace_root,
             "kd_single_char_doc",
             "notes/的.md",
             "的",
@@ -6239,11 +6239,11 @@ mod tests {
             "是是",
             1,
         );
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("的"),
             None,
@@ -6266,11 +6266,11 @@ mod tests {
     #[tokio::test]
     async fn query_documents_returns_document_name_matches_when_text_scan_limit_exceeded() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let document_count = KNOWLEDGE_QUERY_TEXT_SCAN_MAX_DOCUMENTS + 1;
         for index in 0..document_count {
             save_design_document(
-                &working_dir,
+                &workspace_root,
                 &format!("kd_limit_doc_{:03}", index),
                 &format!("large/doc-{:03}.md", index),
                 &format!("Large Doc {:03}", index),
@@ -6279,11 +6279,11 @@ mod tests {
                 1,
             );
         }
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("doc-000"),
             None,
@@ -6302,13 +6302,13 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_matches_split_keyword_terms() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗 核心"),
             None,
@@ -6333,13 +6333,13 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_recalls_partial_keyword_terms() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗 unrelated_missing_term"),
             None,
@@ -6370,23 +6370,23 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_respects_directory_lexical_access() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
 
         let mut directory_config = default_directory_config_for_type(KnowledgeType::Design);
         directory_config.lexical_search = FolderIndexRuleSetting::Disabled;
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "combat",
             directory_config,
         )
         .expect("disable directory lexical search");
 
-        let state = create_state(&working_dir);
+        let state = create_state(&workspace_root);
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗核心"),
             None,
@@ -6405,14 +6405,14 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_emits_staged_progress() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
         let mut progress_events = Vec::new();
 
         let hits = query_documents_with_progress_with_timeout(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗核心"),
             None,
@@ -6449,13 +6449,13 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_times_out_with_clear_error() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let error = query_documents_with_progress_with_timeout(
-            &working_dir,
+            &workspace_root,
             None,
             Some("战斗核心"),
             None,
@@ -6476,11 +6476,11 @@ mod tests {
     #[tokio::test]
     async fn query_documents_text_scan_errors_when_document_limit_exceeded() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let document_count = KNOWLEDGE_QUERY_TEXT_SCAN_MAX_DOCUMENTS + 1;
         for index in 0..document_count {
             save_design_document(
-                &working_dir,
+                &workspace_root,
                 &format!("kd_limit_doc_{:03}", index),
                 &format!("large/doc-{:03}.md", index),
                 &format!("Large Doc {:03}", index),
@@ -6489,11 +6489,11 @@ mod tests {
                 1,
             );
         }
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
         let error = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("共享检索词"),
             None,
@@ -6514,12 +6514,12 @@ mod tests {
     #[tokio::test]
     async fn text_scan_errors_before_loading_large_unity_managed_documents() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_unity_reference_documents(&working_dir, KNOWLEDGE_QUERY_TEXT_SCAN_MAX_DOCUMENTS + 1);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_unity_reference_documents(&workspace_root, KNOWLEDGE_QUERY_TEXT_SCAN_MAX_DOCUMENTS + 1);
         let mut progress_events = Vec::new();
 
         let error = text_scan_search_documents_with_progress(
-            &working_dir,
+            &workspace_root,
             None,
             "test",
             Some(&[KnowledgeType::Reference]),
@@ -6544,10 +6544,10 @@ mod tests {
     #[tokio::test]
     async fn query_documents_lexical_index_refills_after_path_filter() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         for index in 0..24 {
             save_design_document(
-                &working_dir,
+                &workspace_root,
                 &format!("kd_noise_doc_{:03}", index),
                 &format!("noise/doc-{:03}.md", index),
                 &format!("共享检索词 Noise {:03}", index),
@@ -6557,7 +6557,7 @@ mod tests {
             );
         }
         save_design_document(
-            &working_dir,
+            &workspace_root,
             "kd_target_doc",
             "target/match.md",
             "Target",
@@ -6565,10 +6565,10 @@ mod tests {
             "共享检索词 target body",
             1,
         );
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             true,
@@ -6580,7 +6580,7 @@ mod tests {
         .expect("reconcile workspace");
 
         let hits = query_documents(
-            &working_dir,
+            &workspace_root,
             None,
             Some("共享检索词"),
             None,
@@ -6602,12 +6602,12 @@ mod tests {
     #[tokio::test]
     async fn rebuild_reopens_same_workspace_after_releasing_existing_tantivy_writer() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        let state = create_state(&working_dir);
-        let library_dir = library_dir_for_working_dir(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let state = create_state(&workspace_root);
+        let library_dir = library_dir_for_working_dir(&workspace_root);
 
         state
-            .rebuild(&library_dir, Path::new(&working_dir))
+            .rebuild(&library_dir, Path::new(&workspace_root))
             .await
             .expect("rebuild same workspace");
 
@@ -6628,10 +6628,10 @@ mod tests {
     #[tokio::test]
     async fn rebuild_clears_catalog_bootstrap_cache() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        let state = create_state(&working_dir);
-        let library_dir = library_dir_for_working_dir(&working_dir);
-        let workspace_key = super::normalize_workspace_cache_key(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let state = create_state(&workspace_root);
+        let library_dir = library_dir_for_working_dir(&workspace_root);
+        let workspace_key = super::normalize_workspace_cache_key(&workspace_root);
 
         state
             .catalog_bootstrapped_workspaces
@@ -6640,7 +6640,7 @@ mod tests {
             .insert(workspace_key);
 
         state
-            .rebuild(&library_dir, Path::new(&working_dir))
+            .rebuild(&library_dir, Path::new(&workspace_root))
             .await
             .expect("rebuild clears bootstrap cache");
 
@@ -6661,14 +6661,14 @@ mod tests {
     #[tokio::test]
     async fn list_cached_documents_returns_while_embedding_manager_is_busy() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        let state = create_state(&workspace_root);
         let guard = state.embedding_mgr().lock_owned().await;
 
         let result = tokio::time::timeout(
             Duration::from_millis(250),
-            list_cached_documents(&working_dir, None, None, None, state.clone()),
+            list_cached_documents(&workspace_root, None, None, None, state.clone()),
         )
         .await
         .expect("knowledge list should not block on embedding manager");
@@ -6684,15 +6684,15 @@ mod tests {
     #[tokio::test]
     async fn build_overview_returns_while_embedding_manager_is_busy() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
         let guard = state.embedding_mgr().lock_owned().await;
 
         let result = tokio::time::timeout(
             Duration::from_millis(250),
-            build_overview(&working_dir, None, state.clone(), Path::new(&working_dir)),
+            build_overview(&workspace_root, None, state.clone(), Path::new(&workspace_root)),
         )
         .await
         .expect("knowledge overview should not block on embedding manager");
@@ -6707,12 +6707,12 @@ mod tests {
     #[tokio::test]
     async fn list_cached_documents_reconciles_stale_catalog_on_first_read_after_restart() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
 
-        let initial_state = create_state(&working_dir);
+        let initial_state = create_state(&workspace_root);
         let initial_documents =
-            list_cached_documents(&working_dir, None, None, None, initial_state.clone())
+            list_cached_documents(&workspace_root, None, None, None, initial_state.clone())
                 .await
                 .expect("initial list");
         assert!(initial_documents.iter().any(|doc| {
@@ -6730,9 +6730,9 @@ mod tests {
             .join("core-loop.md");
         std::fs::remove_file(&doc_path).expect("remove knowledge doc");
 
-        let restarted_state = create_state(&working_dir);
+        let restarted_state = create_state(&workspace_root);
         let documents_after_restart =
-            list_cached_documents(&working_dir, None, None, None, restarted_state.clone())
+            list_cached_documents(&workspace_root, None, None, None, restarted_state.clone())
                 .await
                 .expect("list after restart");
 
@@ -6745,12 +6745,12 @@ mod tests {
     async fn plan_managed_directory_reuse_reuses_unity_reference_snapshot_when_fingerprint_matches()
     {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_unity_reference_managed_document(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_unity_reference_managed_document(&workspace_root);
 
-        let initial_state = create_state(&working_dir);
+        let initial_state = create_state(&workspace_root);
         let initial_documents =
-            list_cached_documents(&working_dir, None, None, None, initial_state.clone())
+            list_cached_documents(&workspace_root, None, None, None, initial_state.clone())
                 .await
                 .expect("initial list");
         assert!(initial_documents.iter().any(|doc| {
@@ -6760,7 +6760,7 @@ mod tests {
         drop(initial_documents);
         drop(initial_state);
 
-        let restarted_state = create_state(&working_dir);
+        let restarted_state = create_state(&workspace_root);
         let backend_signature = restarted_state
             .embedding_mgr()
             .lock()
@@ -6768,7 +6768,7 @@ mod tests {
             .backend_signature_json();
         let db = restarted_state.db();
         let decision = plan_managed_directory_reuse(
-            &working_dir,
+            &workspace_root,
             None,
             db.as_ref(),
             &backend_signature,
@@ -6796,14 +6796,14 @@ mod tests {
     #[tokio::test]
     async fn reconcile_unity_reference_import_bulk_indexes_large_managed_snapshot() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_unity_reference_documents(&working_dir, 129);
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_unity_reference_documents(&workspace_root, 129);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
 
         let mut events = Vec::new();
         let report = reconcile_unity_reference_import(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             |stage, processed, total, path| {
@@ -6841,12 +6841,12 @@ mod tests {
     #[tokio::test]
     async fn reconcile_unity_reference_import_skips_tantivy_when_lexical_index_disabled() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_unity_reference_documents(&working_dir, 2);
-        save_test_general_config(&working_dir, false, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_unity_reference_documents(&workspace_root, 2);
+        save_test_general_config(&workspace_root, false, false);
+        let state = create_state(&workspace_root);
 
-        reconcile_unity_reference_import(&working_dir, None, state.clone(), |_stage, _, _, _| {})
+        reconcile_unity_reference_import(&workspace_root, None, state.clone(), |_stage, _, _, _| {})
             .await
             .expect("reconcile unity reference import");
 
@@ -6867,10 +6867,10 @@ mod tests {
     #[tokio::test]
     async fn reconcile_workspace_reports_preparing_progress_before_indexing() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_design_document(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_design_document(&workspace_root);
         save_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeDocument {
                 id: "kd_test_design_doc_2".to_string(),
                 doc_type: KnowledgeType::Design,
@@ -6907,11 +6907,11 @@ mod tests {
             },
         )
         .expect("save second knowledge document");
-        let state = create_state(&working_dir);
+        let state = create_state(&workspace_root);
 
         let mut events = Vec::new();
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state,
             true,
@@ -6946,13 +6946,13 @@ mod tests {
     #[tokio::test]
     async fn reconcile_workspace_suppresses_progress_for_single_lexical_update_in_large_catalog() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_memory_documents(&working_dir, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_memory_documents(&workspace_root, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
 
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,
@@ -6963,11 +6963,11 @@ mod tests {
         .await
         .expect("initial reconcile");
 
-        save_memory_document(&working_dir, 42, "Updated single memory body", 2);
+        save_memory_document(&workspace_root, 42, "Updated single memory body", 2);
 
         let mut events = Vec::new();
         let report = reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state,
             false,
@@ -6997,13 +6997,13 @@ mod tests {
     #[tokio::test]
     async fn reconcile_workspace_surfaces_progress_for_large_lexical_update_batch() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_memory_documents(&working_dir, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_memory_documents(&workspace_root, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
 
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,
@@ -7016,7 +7016,7 @@ mod tests {
 
         for index in 0..LARGE_LEXICAL_REBUILD_DOC_THRESHOLD {
             save_memory_document(
-                &working_dir,
+                &workspace_root,
                 index,
                 &format!("Updated memory body {:03}", index),
                 2,
@@ -7025,7 +7025,7 @@ mod tests {
 
         let mut events = Vec::new();
         let report = reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state,
             false,
@@ -7061,13 +7061,13 @@ mod tests {
     #[tokio::test]
     async fn reconcile_workspace_suppresses_progress_for_large_lexical_disable_cleanup() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_memory_documents(&working_dir, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
-        save_test_general_config(&working_dir, true, false);
-        let state = create_state(&working_dir);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_memory_documents(&workspace_root, LARGE_LEXICAL_REBUILD_DOC_THRESHOLD + 1);
+        save_test_general_config(&workspace_root, true, false);
+        let state = create_state(&workspace_root);
 
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,
@@ -7083,11 +7083,11 @@ mod tests {
             .expect("list initial index states")
             .len();
 
-        save_test_general_config(&working_dir, false, false);
+        save_test_general_config(&workspace_root, false, false);
 
         let mut events = Vec::new();
         let report = reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,
@@ -7130,23 +7130,23 @@ mod tests {
     async fn reconcile_workspace_skips_lexical_progress_and_tantivy_commit_for_vector_only_change()
     {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
-        seed_unity_reference_documents(&working_dir, 129);
-        save_test_general_config(&working_dir, true, true);
+        let workspace_root = workspace.path().to_string_lossy().to_string();
+        seed_unity_reference_documents(&workspace_root, 129);
+        save_test_general_config(&workspace_root, true, true);
 
         let mut enabled_config = default_directory_config_for_type(KnowledgeType::Reference);
         enabled_config.vector_search = FolderIndexRuleSetting::Enabled;
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             unity_docs::UNITY_REFERENCE_MANAGED_DIR,
             enabled_config,
         )
         .expect("enable vector search");
 
-        let state = create_state(&working_dir);
+        let state = create_state(&workspace_root);
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,
@@ -7157,7 +7157,7 @@ mod tests {
         .await
         .expect("initial reconcile");
 
-        let meta_path = library_dir_for_working_dir(&working_dir)
+        let meta_path = library_dir_for_working_dir(&workspace_root)
             .join("knowledge_tantivy_index")
             .join("meta.json");
         let lexical_meta_before = std::fs::read_to_string(&meta_path).expect("read meta before");
@@ -7165,7 +7165,7 @@ mod tests {
         let mut disabled_config = default_directory_config_for_type(KnowledgeType::Reference);
         disabled_config.vector_search = FolderIndexRuleSetting::Disabled;
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             unity_docs::UNITY_REFERENCE_MANAGED_DIR,
             disabled_config,
@@ -7174,7 +7174,7 @@ mod tests {
 
         let mut events = Vec::new();
         reconcile_workspace_internal(
-            &working_dir,
+            &workspace_root,
             None,
             state.clone(),
             false,

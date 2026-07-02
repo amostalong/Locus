@@ -32,7 +32,7 @@ impl AgentInstance {
             }
         };
 
-        if let Err(error) = crate::view::read_view_sync(&self.working_dir, &view_id) {
+        if let Err(error) = crate::view::read_view_sync(&self.unity_root, &view_id) {
             return ExecutedToolResult::from_tool_result(ToolResult {
                 output: error,
                 is_error: true,

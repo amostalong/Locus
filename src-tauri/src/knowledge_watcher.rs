@@ -145,11 +145,11 @@ pub struct KnowledgeFsWatcher {
 impl KnowledgeFsWatcher {
     pub fn start(
         app_handle: AppHandle,
-        working_dir: String,
+        workspace_root: String,
         app_knowledge_dir: Option<PathBuf>,
         knowledge_index_state: Arc<KnowledgeIndexState>,
     ) -> Result<Self, String> {
-        let roots = watched_roots(&working_dir, app_knowledge_dir);
+        let roots = watched_roots(&workspace_root, app_knowledge_dir);
         if roots.is_empty() {
             return Err("No knowledge roots available to watch".to_string());
         }
@@ -178,7 +178,7 @@ impl KnowledgeFsWatcher {
                     rx,
                     worker_stop,
                     app_handle,
-                    working_dir,
+                    workspace_root,
                     knowledge_index_state,
                     roots,
                 );
@@ -201,11 +201,11 @@ impl KnowledgeFsWatcher {
 }
 
 fn watched_roots(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<PathBuf>,
 ) -> Vec<WatchedKnowledgeRoot> {
     let mut roots = Vec::new();
-    let workspace_root = crate::knowledge_store::knowledge_root(working_dir);
+    let workspace_root = crate::knowledge_store::knowledge_root(workspace_root);
     if workspace_root.is_dir() {
         roots.push(WatchedKnowledgeRoot {
             path: workspace_root,
@@ -238,7 +238,7 @@ fn watcher_loop(
     rx: mpsc::Receiver<notify::Result<Event>>,
     stop: Arc<AtomicBool>,
     app_handle: AppHandle,
-    working_dir: String,
+    workspace_root: String,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     roots: Vec<WatchedKnowledgeRoot>,
 ) {
@@ -271,7 +271,7 @@ fn watcher_loop(
 
         if let Err(error) = tauri::async_runtime::block_on(process_batch_changes(
             &app_handle,
-            &working_dir,
+            &workspace_root,
             knowledge_index_state.clone(),
             changes,
         )) {
@@ -497,7 +497,7 @@ fn parent_directory(path: &str) -> Option<String> {
 
 async fn process_batch_changes(
     app_handle: &AppHandle,
-    working_dir: &str,
+    workspace_root: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     changes: Vec<ResolvedKnowledgeChange>,
 ) -> Result<(), String> {
@@ -506,7 +506,7 @@ async fn process_batch_changes(
             ResolvedKnowledgeChange::Document { doc_type, path, .. } => {
                 commands::sync_visible_document_for_path(
                     app_handle,
-                    working_dir,
+                    workspace_root,
                     knowledge_index_state.clone(),
                     *doc_type,
                     path,
@@ -518,7 +518,7 @@ async fn process_batch_changes(
                 if path.trim().is_empty() {
                     commands::reconcile_and_emit_knowledge_changed(
                         app_handle,
-                        working_dir,
+                        workspace_root,
                         knowledge_index_state.clone(),
                         "knowledge_fs_watcher",
                     )
@@ -528,7 +528,7 @@ async fn process_batch_changes(
                 }
                 commands::sync_visible_documents_for_prefix(
                     app_handle,
-                    working_dir,
+                    workspace_root,
                     knowledge_index_state.clone(),
                     *doc_type,
                     path,
@@ -538,12 +538,12 @@ async fn process_batch_changes(
             }
         }
 
-        emit_change_event(app_handle, working_dir, &change);
+        emit_change_event(app_handle, workspace_root, &change);
     }
     Ok(())
 }
 
-fn emit_change_event(app_handle: &AppHandle, working_dir: &str, change: &ResolvedKnowledgeChange) {
+fn emit_change_event(app_handle: &AppHandle, workspace_root: &str, change: &ResolvedKnowledgeChange) {
     let target = match change {
         ResolvedKnowledgeChange::Document {
             doc_type,
@@ -575,7 +575,7 @@ fn emit_change_event(app_handle: &AppHandle, working_dir: &str, change: &Resolve
     };
     commands::emit_knowledge_changed_with_target(
         app_handle,
-        working_dir,
+        workspace_root,
         "knowledge_fs_watcher",
         target,
     );

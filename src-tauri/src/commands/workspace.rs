@@ -349,29 +349,83 @@ pub async fn set_working_dir(
         return Err(format!("Directory not found: {}", path).into());
     }
 
-    if !p.join("Assets").is_dir() {
-        return Err(
-            "Selected directory is not a Unity project (Assets/ folder not found)"
-                .to_string()
-                .into(),
-        );
-    }
-    switch_timer.mark("target_validated");
-
-    let canonical = dunce::canonicalize(p)
-        .map(|p| p.display().to_string())
+    // Resolve `workspace_root` (the user-selected canonical root) and
+    // `unity_root` (the resolved Unity project root) from the input path.
+    //
+    // - `workspace_root`: canonicalized user input. Knowledge / skill / memory
+    //   live here, and this is what we persist to `working_dir.txt`.
+    // - `unity_root`: the Unity project root, used by Unity integration
+    //   (asset_db / native bridge / Unity monitor).
+    //
+    // Resolution (P5):
+    //   1. Input itself is a Unity project (has `Assets/`) →
+    //      workspace_root == unity_root == canonicalized(input).
+    //   2. Otherwise → resolve_unity_project_path:
+    //        - Resolved { unity_root } → workspace_root = canonicalized(input)
+    //        - Picker { candidates }   → return error (front-end P5 will show picker)
+    //        - NotFound               → return error
+    //
+    // Behaviour change vs legacy `set_working_dir`:
+    //   - Legacy:  non-Unity input  →  error, no resolution attempt.
+    //   - P5:      non-Unity input  →  try resolve →  Resolved / Picker / NotFound.
+    //              Existing call sites that already pass a Unity root keep
+    //              the exact same behaviour (no migration needed in P2/P3).
+    let canonical_input = dunce::canonicalize(p)
+        .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.clone());
-    switch_timer.mark_detail("canonicalized", format!(" canonical={}", canonical));
+    let workspace_root = canonical_input;
 
-    let ws_id = crate::workspace::load_or_create_workspace(&canonical)?;
+    let unity_root: String = if p.join("Assets").is_dir() {
+        switch_timer.mark("target_validated");
+        workspace_root.clone()
+    } else {
+        match crate::workspace::resolve_unity_project_path(&path) {
+            crate::workspace::ResolveUnityResult::Resolved { unity_root, .. } => {
+                eprintln!(
+                    "[Locus] auto-resolved workspace_root '{}' -> unity_root '{}'",
+                    workspace_root, unity_root
+                );
+                switch_timer.mark_detail(
+                    "target_auto_resolved",
+                    format!(" {} -> {}", workspace_root, unity_root),
+                );
+                unity_root
+            }
+            crate::workspace::ResolveUnityResult::Picker { candidates } => {
+                let list = candidates
+                    .iter()
+                    .map(|c| format!("  - {}", c))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "Multiple Unity projects found under '{}'. Please specify one directly:\n{}",
+                    path, list
+                )
+                .into());
+            }
+            crate::workspace::ResolveUnityResult::NotFound => {
+                return Err(format!(
+                    "Selected directory is not a Unity project (Assets/ folder not found) and no Unity project could be auto-resolved nearby: {}",
+                    path
+                )
+                .into());
+            }
+        }
+    };
+    switch_timer.mark_detail(
+        "canonicalized",
+        format!(" workspace_root={} unity_root={}", workspace_root, unity_root),
+    );
+
+    let ws_id = crate::workspace::load_or_create_workspace(&workspace_root, &unity_root)?;
     switch_timer.mark_detail("workspace_id_ready", format!(" workspace_id={}", ws_id));
 
     // Decide whether the workspace is actually changing. We compare the
     // canonical form against the currently-stored cwd. If unchanged, we keep
     // the previous `LastScanInfo` so the asset page status row stays accurate;
     // a re-`set_working_dir` of the same project should not erase its history.
-    let prev_cwd = workspace.path.read().await.clone();
-    let is_real_switch = prev_cwd != canonical;
+    let prev_unity_root = workspace.unity_root.read().await.clone();
+    let is_real_switch = prev_unity_root != unity_root;
     if is_real_switch {
         reconcile_task_state.cancel_current("workspace switch");
         let cancelled = scan_task_state.cancel_current_and_wait("workspace switch");
@@ -413,7 +467,12 @@ pub async fn set_working_dir(
             None
         };
         // Setter keeps the deprecated `path` alias in sync with `unity_root`.
-        workspace.set_unity_root(canonical.clone()).await;
+        // We update both roots here: `workspace_root` (knowledge anchor)
+        // and `unity_root` (Unity integration anchor). The deprecated `path`
+        // alias mirrors `unity_root` so the 223+ legacy `workspace.path.read()`
+        // callers keep working unchanged.
+        workspace.set_workspace_root(workspace_root.clone()).await;
+        workspace.set_unity_root(unity_root.clone()).await;
         old_ref_graph_watcher
     };
     switch_timer.mark_detail(
@@ -430,7 +489,7 @@ pub async fn set_working_dir(
         *wid = Some(ws_id.clone());
     }
     switch_timer.mark("workspace_id_state_committed");
-    super::plugin::reload_agent_registry(&registry, &app_agent_dir, &canonical).await;
+    super::plugin::reload_agent_registry(&registry, &app_agent_dir, &workspace_root).await;
     switch_timer.mark("agent_registry_reloaded");
 
     if is_real_switch {
@@ -441,13 +500,17 @@ pub async fn set_working_dir(
 
     if let Ok(data_dir) = super::resolve_runtime_storage_dir(&app_handle) {
         let file: std::path::PathBuf = data_dir.join("working_dir.txt");
-        let _ = std::fs::write(&file, &canonical);
-        save_recent_dir(&data_dir, &canonical);
+        // M1: persist workspace_root (not unity_root) so that on next launch
+        // we can distinguish "user picked a Unity project" (workspace_root ==
+        // unity_root) from "user picked a non-Unity org dir" (workspace_root
+        // != unity_root, requires re-resolution).
+        let _ = std::fs::write(&file, &workspace_root);
+        save_recent_dir(&data_dir, &workspace_root);
     }
     switch_timer.mark("working_dir_persisted");
 
     if is_real_switch {
-        let library_dir = crate::knowledge_index::library_dir_for_working_dir(&canonical);
+        let library_dir = crate::knowledge_index::library_dir_for_working_dir(&workspace_root);
         let model_storage_dir = super::resolve_runtime_storage_dir(&app_handle)?;
         switch_timer.mark("knowledge_index_rebuild_start");
         knowledge_index_state
@@ -455,14 +518,14 @@ pub async fn set_working_dir(
             .await?;
         switch_timer.mark("knowledge_index_rebuild_done");
         let knowledge_state = knowledge_index_state.inner().clone();
-        let working_dir_for_index = canonical.clone();
+        let workspace_root_for_index = workspace_root.clone();
         let app_handle_for_index = app_handle.clone();
         tauri::async_runtime::spawn(async move {
             let app_knowledge_dir: tauri::State<'_, crate::commands::AppKnowledgeDir> =
                 app_handle_for_index.state();
             if let Err(e) = crate::knowledge_index::maybe_auto_activate_embedding_runtime(
                 knowledge_state.clone(),
-                &working_dir_for_index,
+                &workspace_root_for_index,
                 app_knowledge_dir.0.as_ref().as_ref(),
             )
             .await
@@ -470,7 +533,7 @@ pub async fn set_working_dir(
                 eprintln!("[Locus] knowledge embedding auto-activate error: {}", e);
             }
             if let Err(e) = crate::knowledge_index::reconcile_workspace(
-                &working_dir_for_index,
+                &workspace_root_for_index,
                 app_knowledge_dir.0.as_ref().as_ref(),
                 knowledge_state,
             )
@@ -483,7 +546,7 @@ pub async fn set_working_dir(
     }
 
     if is_real_switch {
-        if let Err(error) = crate::knowledge_store::ensure_knowledge_roots(&canonical) {
+        if let Err(error) = crate::knowledge_store::ensure_knowledge_roots(&workspace_root) {
             eprintln!(
                 "[Locus] warning: failed to prepare knowledge roots for new working dir: {}",
                 error
@@ -501,7 +564,7 @@ pub async fn set_working_dir(
         switch_timer.mark("knowledge_watcher_start_begin");
         match crate::knowledge_watcher::KnowledgeFsWatcher::start(
             app_handle.clone(),
-            canonical.clone(),
+            workspace_root.clone(),
             app_knowledge_dir.0.as_ref().as_ref().cloned(),
             knowledge_index_state.inner().clone(),
         ) {
@@ -524,12 +587,12 @@ pub async fn set_working_dir(
     }
 
     switch_timer.mark("asset_db_load_existing_start");
-    match AssetDb::load_existing(std::path::Path::new(&canonical)) {
+    match AssetDb::load_existing(std::path::Path::new(&unity_root)) {
         LoadExistingAssetDb::Ready(graph) => {
             switch_timer.mark("asset_db_load_existing_ready");
             switch_timer.mark_detail("asset_db_reconcile_start", " verify_hashes=false");
             match crate::asset_db::watcher::reconcile_loaded_db_light(
-                std::path::Path::new(&canonical),
+                std::path::Path::new(&unity_root),
                 graph,
             ) {
                 Ok((graph, stats)) => {
@@ -547,7 +610,7 @@ pub async fn set_working_dir(
                         stats.processed,
                         stats.failed
                     );
-                    let db_path = std::path::Path::new(&canonical)
+                    let db_path = std::path::Path::new(&unity_root)
                         .join("Library")
                         .join("Locus")
                         .join("locus.db");
@@ -559,7 +622,7 @@ pub async fn set_working_dir(
                         .0
                         .lock()
                         .map_err(|e| format!("Lock error: {}", e))? = Some(graph);
-                    match read_persisted_last_scan_info(std::path::Path::new(&canonical)) {
+                    match read_persisted_last_scan_info(std::path::Path::new(&unity_root)) {
                         Ok(Some(info)) => last_scan_info.set(info),
                         Ok(None) => {
                             if is_real_switch {
@@ -579,7 +642,7 @@ pub async fn set_working_dir(
                     switch_timer.mark("asset_db_state_ready");
 
                     let graph_arc = ref_graph_state.0.clone();
-                    let watcher_root = std::path::PathBuf::from(&canonical);
+                    let watcher_root = std::path::PathBuf::from(&unity_root);
                     switch_timer.mark("asset_db_watcher_start_begin");
                     match crate::asset_db::watcher::AssetDbWatcher::start(
                         watcher_root,
@@ -607,7 +670,7 @@ pub async fn set_working_dir(
                             app_handle.clone(),
                             workspace.inner().clone(),
                             workspace_generation,
-                            std::path::PathBuf::from(&canonical),
+                            std::path::PathBuf::from(&unity_root),
                             ref_graph_state.0.clone(),
                             scan_phase_state.inner().clone(),
                             reconcile_task_state.inner().clone(),
@@ -624,7 +687,7 @@ pub async fn set_working_dir(
                     );
                     last_scan_info.clear();
                     if let Err(clear_err) =
-                        delete_persisted_last_scan_info(std::path::Path::new(&canonical))
+                        delete_persisted_last_scan_info(std::path::Path::new(&unity_root))
                     {
                         eprintln!(
                             "[Locus] warning: failed to clear stale asset scan info: {}",
@@ -656,7 +719,7 @@ pub async fn set_working_dir(
                 issue.message
             );
             last_scan_info.clear();
-            if let Err(err) = delete_persisted_last_scan_info(std::path::Path::new(&canonical)) {
+            if let Err(err) = delete_persisted_last_scan_info(std::path::Path::new(&unity_root)) {
                 eprintln!(
                     "[Locus] warning: failed to clear stale asset scan info: {}",
                     err
@@ -674,7 +737,7 @@ pub async fn set_working_dir(
             switch_timer.mark("asset_db_load_existing_missing");
             eprintln!("[Locus] no ref_graph DB in new working dir, clearing state");
             last_scan_info.clear();
-            if let Err(err) = delete_persisted_last_scan_info(std::path::Path::new(&canonical)) {
+            if let Err(err) = delete_persisted_last_scan_info(std::path::Path::new(&unity_root)) {
                 eprintln!(
                     "[Locus] warning: failed to clear stale asset scan info: {}",
                     err
@@ -687,9 +750,9 @@ pub async fn set_working_dir(
         }
     }
 
-    if crate::unity_bridge::is_unity_project(&canonical) {
+    if crate::unity_bridge::is_unity_project(&unity_root) {
         if let Err(error) = crate::unity_bridge::sync_native_bridge_marker(
-            &canonical,
+            &unity_root,
             config.unity_native_bridge_enabled(),
         ) {
             eprintln!(
@@ -698,7 +761,7 @@ pub async fn set_working_dir(
             );
         }
         if let Err(error) = crate::unity_bridge::sync_background_hook_marker(
-            &canonical,
+            &unity_root,
             config.unity_background_hook_enabled(),
         ) {
             eprintln!(
@@ -709,13 +772,13 @@ pub async fn set_working_dir(
         switch_timer.mark("unity_monitor_start_begin");
         crate::unity_bridge::start_unity_monitor(
             app_handle.clone(),
-            canonical.clone(),
+            unity_root.clone(),
             &unity_monitor,
         )
         .await;
         switch_timer.mark("unity_monitor_start_done");
         switch_timer.mark("plugin_status_emit_begin");
-        crate::unity_bridge::emit_plugin_status(&app_handle, &canonical);
+        crate::unity_bridge::emit_plugin_status(&app_handle, &unity_root);
         switch_timer.mark("plugin_status_emit_done");
     } else {
         crate::unity_bridge::stop_unity_monitor(&unity_monitor).await;
@@ -726,15 +789,17 @@ pub async fn set_working_dir(
     switch_timer.mark_detail(
         "finished",
         format!(
-            " canonical={} workspace_id={} is_real_switch={}",
-            canonical, ws_id, is_real_switch
+            " workspace_root={} unity_root={} workspace_id={} is_real_switch={}",
+            workspace_root, unity_root, ws_id, is_real_switch
         ),
     );
     eprintln!(
-        "[Locus] working_dir changed to: {}, workspace_id: {}",
-        canonical, ws_id
+        "[Locus] working_dir changed: workspace_root={} unity_root={} workspace_id={}",
+        workspace_root, unity_root, ws_id
     );
-    Ok(canonical)
+    // Returns unity_root for backward compatibility with front-end `get_working_dir`.
+    // The new `set_workspace` IPC returns both fields via SetWorkspaceResult.
+    Ok(unity_root)
 }
 
 // ============================================================================
@@ -931,9 +996,13 @@ pub async fn open_dir_in_file_explorer(path: String) -> Result<(), AppError> {
         return Err(format!("Directory not found: {}", target).into());
     }
 
-    let canonical =
+    let canonical_path =
         dunce::canonicalize(path).map_err(|e| format!("Failed to resolve path: {}", e))?;
-    crate::commands::knowledge::reveal_path_native(&canonical).map_err(Into::into)
+    // reveal_path_native resolves against the knowledge base (workspace_root
+    // semantics). The input here is the user-selected dir, which in our model
+    // is the workspace_root — the command will reject the call if the user
+    // asked to reveal a path outside the knowledge tree.
+    crate::commands::knowledge::reveal_path_native(&canonical_path).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1096,7 +1165,7 @@ pub async fn save_codex_model_config(config: CodexModelConfig) -> Result<(), App
 
 // ── Workspace model overrides ───────────────────────────────────────────
 // Persists a per-workspace model override file under the persistent config
-// directory, keyed by a blake3 hash of the canonical workspace path.
+// directory, keyed by a blake3 hash of the unity_root workspace path.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1123,11 +1192,11 @@ impl Default for WorkspaceModelOverride {
 }
 
 fn workspace_override_path_for_path(path: &str) -> Result<Option<std::path::PathBuf>, String> {
-    let canonical = path.trim();
-    if canonical.is_empty() {
+    let workspace_path = path.trim();
+    if workspace_path.is_empty() {
         return Ok(None);
     }
-    let key: String = blake3::hash(canonical.as_bytes()).to_hex()[..8].to_string();
+    let key: String = blake3::hash(workspace_path.as_bytes()).to_hex()[..8].to_string();
     let dir = persistent_config_dir()?.join("ws_model");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create ws_model dir: {}", e))?;
@@ -1891,9 +1960,9 @@ fn resolve_workspace_dir_target(
         return Ok((target, normalized_sub_path));
     }
 
-    let canonical_base = dunce::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
-    let canonical_target = dunce::canonicalize(&target).unwrap_or_else(|_| target.clone());
-    if canonical_target.starts_with(&canonical_base)
+    let unity_root_base = dunce::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let unity_root_target = dunce::canonicalize(&target).unwrap_or_else(|_| target.clone());
+    if unity_root_target.starts_with(&unity_root_base)
         || path_reaches_allowed_linked_asset_dir(base, &normalized_sub_path)
     {
         return Ok((target, normalized_sub_path));
@@ -2080,13 +2149,13 @@ fn workspace_entry_target_allowed(
     rel_path: &str,
     target: &std::path::Path,
 ) -> bool {
-    let canonical_base =
+    let unity_root_base =
         dunce::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-    let canonical_target = match dunce::canonicalize(target) {
+    let unity_root_target = match dunce::canonicalize(target) {
         Ok(path) => path,
         Err(_) => return false,
     };
-    canonical_target.starts_with(&canonical_base)
+    unity_root_target.starts_with(&unity_root_base)
         || path_reaches_allowed_linked_asset_dir(workspace_root, rel_path)
 }
 

@@ -212,7 +212,7 @@ impl Default for FeishuReferenceImportStatus {
 
 #[derive(Debug, Clone)]
 pub struct FeishuReferenceImportRuntime {
-    pub working_dir: String,
+    pub workspace_root: String,
     pub status: FeishuReferenceImportStatus,
     pub cancel_requested: Arc<AtomicBool>,
     pub oauth_wait_session: Arc<AtomicU64>,
@@ -222,7 +222,7 @@ pub struct FeishuReferenceImportRuntime {
 impl Default for FeishuReferenceImportRuntime {
     fn default() -> Self {
         Self {
-            working_dir: String::new(),
+            workspace_root: String::new(),
             status: FeishuReferenceImportStatus::default(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             oauth_wait_session: Arc::new(AtomicU64::new(0)),
@@ -533,26 +533,26 @@ fn now_millis() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-fn library_dir(working_dir: &str) -> std::path::PathBuf {
-    std::path::Path::new(working_dir)
+fn library_dir(workspace_root: &str) -> std::path::PathBuf {
+    std::path::Path::new(workspace_root)
         .join("Library")
         .join("Locus")
 }
 
-fn config_path(working_dir: &str) -> std::path::PathBuf {
-    library_dir(working_dir).join(FEISHU_REFERENCE_CONFIG_FILE)
+fn config_path(workspace_root: &str) -> std::path::PathBuf {
+    library_dir(workspace_root).join(FEISHU_REFERENCE_CONFIG_FILE)
 }
 
-fn manifest_path(working_dir: &str) -> std::path::PathBuf {
-    library_dir(working_dir).join(FEISHU_REFERENCE_MANIFEST_FILE)
+fn manifest_path(workspace_root: &str) -> std::path::PathBuf {
+    library_dir(workspace_root).join(FEISHU_REFERENCE_MANIFEST_FILE)
 }
 
-fn directory_binding_root(working_dir: &str) -> std::path::PathBuf {
-    library_dir(working_dir).join(FEISHU_REFERENCE_DIRECTORY_BINDING_ROOT_DIR)
+fn directory_binding_root(workspace_root: &str) -> std::path::PathBuf {
+    library_dir(workspace_root).join(FEISHU_REFERENCE_DIRECTORY_BINDING_ROOT_DIR)
 }
 
-fn directory_binding_path(working_dir: &str, target_path: &str) -> std::path::PathBuf {
-    let mut path = directory_binding_root(working_dir);
+fn directory_binding_path(workspace_root: &str, target_path: &str) -> std::path::PathBuf {
+    let mut path = directory_binding_root(workspace_root);
     for segment in target_path
         .trim()
         .trim_matches('/')
@@ -565,20 +565,20 @@ fn directory_binding_path(working_dir: &str, target_path: &str) -> std::path::Pa
     path.join(FEISHU_REFERENCE_DIRECTORY_BINDING_FILE)
 }
 
-fn knowledge_root(working_dir: &str) -> std::path::PathBuf {
-    std::path::Path::new(working_dir)
+fn knowledge_root(workspace_root: &str) -> std::path::PathBuf {
+    std::path::Path::new(workspace_root)
         .join("Locus")
         .join("knowledge")
 }
 
-fn managed_dir_path(working_dir: &str) -> std::path::PathBuf {
-    knowledge_root(working_dir)
+fn managed_dir_path(workspace_root: &str) -> std::path::PathBuf {
+    knowledge_root(workspace_root)
         .join("reference")
         .join(FEISHU_REFERENCE_MANAGED_DIR)
 }
 
-fn managed_directory_config_path(working_dir: &str, suffix: &str) -> std::path::PathBuf {
-    knowledge_root(working_dir)
+fn managed_directory_config_path(workspace_root: &str, suffix: &str) -> std::path::PathBuf {
+    knowledge_root(workspace_root)
         .join("reference")
         .join(format!("{}{}", FEISHU_REFERENCE_MANAGED_DIR, suffix))
 }
@@ -587,18 +587,18 @@ fn reference_target_managed_path(target_path: &str) -> String {
     format!("reference/{}", target_path.trim().trim_matches('/'))
 }
 
-fn reference_target_dir_path(working_dir: &str, target_path: &str) -> std::path::PathBuf {
-    knowledge_root(working_dir)
+fn reference_target_dir_path(workspace_root: &str, target_path: &str) -> std::path::PathBuf {
+    knowledge_root(workspace_root)
         .join("reference")
         .join(target_path.trim().trim_matches('/').replace('\\', "/"))
 }
 
 fn ensure_reference_target_directory(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
 ) -> Result<crate::knowledge_store::KnowledgeDirectoryConfigRecord, String> {
     let record =
-        knowledge_store::read_directory_config(working_dir, KnowledgeType::Reference, target_path)?;
+        knowledge_store::read_directory_config(workspace_root, KnowledgeType::Reference, target_path)?;
     if record.read_only {
         return Err("当前 Reference 文件夹是只读目录，无法配置外部导入。".to_string());
     }
@@ -606,17 +606,17 @@ fn ensure_reference_target_directory(
 }
 
 fn delete_target_reference_import_artifacts(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
 ) -> Result<(), String> {
-    let record = ensure_reference_target_directory(working_dir, target_path)?;
-    remove_dir_if_exists(&reference_target_dir_path(working_dir, &record.path))?;
+    let record = ensure_reference_target_directory(workspace_root, target_path)?;
+    remove_dir_if_exists(&reference_target_dir_path(workspace_root, &record.path))?;
     knowledge_store::delete_directory_config_sidecars(
-        working_dir,
+        workspace_root,
         KnowledgeType::Reference,
         &record.path,
     )?;
-    delete_directory_binding(working_dir, &record.path)?;
+    delete_directory_binding(workspace_root, &record.path)?;
     Ok(())
 }
 
@@ -644,7 +644,7 @@ fn parse_locator_parts(locator: Option<&str>) -> std::collections::HashMap<Strin
 }
 
 fn read_feishu_directory_import_snapshot(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
 ) -> Result<
     (
@@ -655,7 +655,7 @@ fn read_feishu_directory_import_snapshot(
     ),
     String,
 > {
-    let record = ensure_reference_target_directory(working_dir, target_path)?;
+    let record = ensure_reference_target_directory(workspace_root, target_path)?;
     let sources = record
         .external_sources
         .iter()
@@ -732,12 +732,12 @@ fn count_reference_markdown_documents(root: &std::path::Path) -> Result<u32, Str
     Ok(count)
 }
 
-fn temp_root_path(working_dir: &str) -> std::path::PathBuf {
-    library_dir(working_dir).join(FEISHU_REFERENCE_TEMP_ROOT_DIR)
+fn temp_root_path(workspace_root: &str) -> std::path::PathBuf {
+    library_dir(workspace_root).join(FEISHU_REFERENCE_TEMP_ROOT_DIR)
 }
 
-fn backup_dir_path(working_dir: &str) -> std::path::PathBuf {
-    knowledge_root(working_dir)
+fn backup_dir_path(workspace_root: &str) -> std::path::PathBuf {
+    knowledge_root(workspace_root)
         .join("reference")
         .join(FEISHU_REFERENCE_BACKUP_DIR)
 }
@@ -941,9 +941,9 @@ fn pkce_s256(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
 
-fn workspace_secret_suffix(working_dir: &str) -> String {
+fn workspace_secret_suffix(workspace_root: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(working_dir.as_bytes());
+    hasher.update(workspace_root.as_bytes());
     hasher
         .finalize()
         .iter()
@@ -951,17 +951,17 @@ fn workspace_secret_suffix(working_dir: &str) -> String {
         .collect::<String>()
 }
 
-fn feishu_app_secret_key(working_dir: &str) -> String {
+fn feishu_app_secret_key(workspace_root: &str) -> String {
     format!(
         "feishu_reference/app_secret/{}",
-        workspace_secret_suffix(working_dir)
+        workspace_secret_suffix(workspace_root)
     )
 }
 
-fn feishu_oauth_key(working_dir: &str) -> String {
+fn feishu_oauth_key(workspace_root: &str) -> String {
     format!(
         "feishu_reference/oauth/{}",
-        workspace_secret_suffix(working_dir)
+        workspace_secret_suffix(workspace_root)
     )
 }
 
@@ -1100,8 +1100,8 @@ fn normalize_request_roots(
     normalized
 }
 
-fn read_config(working_dir: &str) -> Result<FeishuReferenceConfig, String> {
-    let path = config_path(working_dir);
+fn read_config(workspace_root: &str) -> Result<FeishuReferenceConfig, String> {
+    let path = config_path(workspace_root);
     match std::fs::read_to_string(&path) {
         Ok(raw) => {
             let mut config: FeishuReferenceConfig =
@@ -1130,8 +1130,8 @@ fn read_config(working_dir: &str) -> Result<FeishuReferenceConfig, String> {
     }
 }
 
-fn save_config(working_dir: &str, config: &FeishuReferenceConfig) -> Result<(), String> {
-    let path = config_path(working_dir);
+fn save_config(workspace_root: &str, config: &FeishuReferenceConfig) -> Result<(), String> {
+    let path = config_path(workspace_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -1153,10 +1153,10 @@ fn save_config(working_dir: &str, config: &FeishuReferenceConfig) -> Result<(), 
 }
 
 fn read_directory_binding(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
 ) -> Result<Option<FeishuReferenceDirectoryBinding>, String> {
-    let path = directory_binding_path(working_dir, target_path);
+    let path = directory_binding_path(workspace_root, target_path);
     match std::fs::read_to_string(&path) {
         Ok(raw) => {
             let mut binding = serde_json::from_str::<FeishuReferenceDirectoryBinding>(&raw)
@@ -1184,11 +1184,11 @@ fn read_directory_binding(
 }
 
 fn save_directory_binding(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
     binding: &FeishuReferenceDirectoryBinding,
 ) -> Result<(), String> {
-    let path = directory_binding_path(working_dir, target_path);
+    let path = directory_binding_path(workspace_root, target_path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -1209,8 +1209,8 @@ fn save_directory_binding(
     })
 }
 
-fn delete_directory_binding(working_dir: &str, target_path: &str) -> Result<(), String> {
-    let path = directory_binding_path(working_dir, target_path);
+fn delete_directory_binding(workspace_root: &str, target_path: &str) -> Result<(), String> {
+    let path = directory_binding_path(workspace_root, target_path);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1223,19 +1223,19 @@ fn delete_directory_binding(working_dir: &str, target_path: &str) -> Result<(), 
 }
 
 fn save_or_delete_directory_binding(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
     binding: &FeishuReferenceDirectoryBinding,
 ) -> Result<(), String> {
     if directory_binding_has_selection(binding) {
-        save_directory_binding(working_dir, target_path, binding)
+        save_directory_binding(workspace_root, target_path, binding)
     } else {
-        delete_directory_binding(working_dir, target_path)
+        delete_directory_binding(workspace_root, target_path)
     }
 }
 
-fn read_manifest(working_dir: &str) -> Result<Option<FeishuReferenceImportManifest>, String> {
-    let path = manifest_path(working_dir);
+fn read_manifest(workspace_root: &str) -> Result<Option<FeishuReferenceImportManifest>, String> {
+    let path = manifest_path(workspace_root);
     match std::fs::read_to_string(&path) {
         Ok(raw) => {
             let mut manifest = serde_json::from_str::<FeishuReferenceImportManifest>(&raw)
@@ -1259,10 +1259,10 @@ fn read_manifest(working_dir: &str) -> Result<Option<FeishuReferenceImportManife
 }
 
 fn save_manifest(
-    working_dir: &str,
+    workspace_root: &str,
     manifest: &FeishuReferenceImportManifest,
 ) -> Result<(), String> {
-    let path = manifest_path(working_dir);
+    let path = manifest_path(workspace_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -1283,8 +1283,8 @@ fn save_manifest(
     })
 }
 
-fn delete_manifest(working_dir: &str) -> Result<(), String> {
-    let path = manifest_path(working_dir);
+fn delete_manifest(workspace_root: &str) -> Result<(), String> {
+    let path = manifest_path(workspace_root);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1296,26 +1296,26 @@ fn delete_manifest(working_dir: &str) -> Result<(), String> {
     }
 }
 
-fn app_secret_configured(working_dir: &str) -> Result<bool, String> {
-    Ok(keychain::get_secret(&feishu_app_secret_key(working_dir))?
+fn app_secret_configured(workspace_root: &str) -> Result<bool, String> {
+    Ok(keychain::get_secret(&feishu_app_secret_key(workspace_root))?
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false))
 }
 
-fn read_app_secret(working_dir: &str) -> Result<Option<String>, String> {
-    keychain::get_secret(&feishu_app_secret_key(working_dir))
+fn read_app_secret(workspace_root: &str) -> Result<Option<String>, String> {
+    keychain::get_secret(&feishu_app_secret_key(workspace_root))
 }
 
-fn write_app_secret(working_dir: &str, secret: &str) -> Result<(), String> {
-    keychain::set_secret(&feishu_app_secret_key(working_dir), secret)
+fn write_app_secret(workspace_root: &str, secret: &str) -> Result<(), String> {
+    keychain::set_secret(&feishu_app_secret_key(workspace_root), secret)
 }
 
-fn delete_app_secret(working_dir: &str) -> Result<(), String> {
-    keychain::delete_secret(&feishu_app_secret_key(working_dir))
+fn delete_app_secret(workspace_root: &str) -> Result<(), String> {
+    keychain::delete_secret(&feishu_app_secret_key(workspace_root))
 }
 
-fn read_stored_user_token(working_dir: &str) -> Result<Option<FeishuStoredUserToken>, String> {
-    let Some(raw) = keychain::get_secret(&feishu_oauth_key(working_dir))? else {
+fn read_stored_user_token(workspace_root: &str) -> Result<Option<FeishuStoredUserToken>, String> {
+    let Some(raw) = keychain::get_secret(&feishu_oauth_key(workspace_root))? else {
         return Ok(None);
     };
     if raw.trim().is_empty() {
@@ -1343,7 +1343,7 @@ fn read_stored_user_token(working_dir: &str) -> Result<Option<FeishuStoredUserTo
     }))
 }
 
-fn write_stored_user_token(working_dir: &str, token: &FeishuStoredUserToken) -> Result<(), String> {
+fn write_stored_user_token(workspace_root: &str, token: &FeishuStoredUserToken) -> Result<(), String> {
     let record = FeishuStoredUserTokenRecord {
         access_token: token.access_token.clone(),
         refresh_token: token.refresh_token.clone(),
@@ -1360,11 +1360,11 @@ fn write_stored_user_token(working_dir: &str, token: &FeishuStoredUserToken) -> 
     };
     let raw = serde_json::to_string(&record)
         .map_err(|error| format!("Failed to serialize Feishu OAuth token payload: {}", error))?;
-    keychain::set_secret(&feishu_oauth_key(working_dir), &raw)
+    keychain::set_secret(&feishu_oauth_key(workspace_root), &raw)
 }
 
-fn delete_stored_user_token(working_dir: &str) -> Result<(), String> {
-    keychain::delete_secret(&feishu_oauth_key(working_dir))
+fn delete_stored_user_token(workspace_root: &str) -> Result<(), String> {
+    keychain::delete_secret(&feishu_oauth_key(workspace_root))
 }
 
 fn oauth_token_is_usable(token: &FeishuStoredUserToken) -> bool {
@@ -1397,16 +1397,16 @@ fn apply_authorized_user_to_status(
     status.authorized_user_email = token.and_then(|item| item.user_email.clone());
 }
 
-fn authorization_ready(working_dir: &str, config: &FeishuReferenceConfig) -> Result<bool, String> {
+fn authorization_ready(workspace_root: &str, config: &FeishuReferenceConfig) -> Result<bool, String> {
     if config.app_id.trim().is_empty() {
         return Ok(false);
     }
-    if !app_secret_configured(working_dir)? {
+    if !app_secret_configured(workspace_root)? {
         return Ok(false);
     }
     match config.auth_mode {
         FeishuReferenceAuthMode::AppCredentials => Ok(true),
-        FeishuReferenceAuthMode::Oauth => Ok(read_stored_user_token(working_dir)?
+        FeishuReferenceAuthMode::Oauth => Ok(read_stored_user_token(workspace_root)?
             .map(|token| oauth_token_is_authorized(&token, config))
             .unwrap_or(false)),
     }
@@ -1551,17 +1551,17 @@ fn derive_status_from_snapshot(
 }
 
 fn derive_persisted_feishu_reference_import_status(
-    working_dir: &str,
+    workspace_root: &str,
 ) -> Result<FeishuReferenceImportStatus, String> {
-    let config = read_config(working_dir)?;
-    let secret_configured = app_secret_configured(working_dir)?;
+    let config = read_config(workspace_root)?;
+    let secret_configured = app_secret_configured(workspace_root)?;
     let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-        read_stored_user_token(working_dir)?
+        read_stored_user_token(workspace_root)?
     } else {
         None
     };
-    let authorized = authorization_ready(working_dir, &config)?;
-    let manifest = read_manifest(working_dir)?;
+    let authorized = authorization_ready(workspace_root, &config)?;
+    let manifest = read_manifest(workspace_root)?;
     Ok(derive_status_from_snapshot(
         &config,
         secret_configured,
@@ -1572,22 +1572,22 @@ fn derive_persisted_feishu_reference_import_status(
 }
 
 fn derive_directory_feishu_reference_import_status(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
 ) -> Result<FeishuReferenceImportStatus, String> {
-    let config = read_config(working_dir)?;
-    let secret_configured = app_secret_configured(working_dir)?;
+    let config = read_config(workspace_root)?;
+    let secret_configured = app_secret_configured(workspace_root)?;
     let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-        read_stored_user_token(working_dir)?
+        read_stored_user_token(workspace_root)?
     } else {
         None
     };
-    let authorized = authorization_ready(working_dir, &config)?;
-    let selection = read_directory_binding(working_dir, target_path)?;
+    let authorized = authorization_ready(workspace_root, &config)?;
+    let selection = read_directory_binding(workspace_root, target_path)?;
     let (_, imported_space_id, imported_roots, imported_at) =
-        read_feishu_directory_import_snapshot(working_dir, target_path)?;
+        read_feishu_directory_import_snapshot(workspace_root, target_path)?;
     let imported_doc_count =
-        count_reference_markdown_documents(&reference_target_dir_path(working_dir, target_path))?;
+        count_reference_markdown_documents(&reference_target_dir_path(workspace_root, target_path))?;
     let (root_node_token, root_node_title) = selection
         .as_ref()
         .map(|binding| primary_root_fields(&binding.roots))
@@ -1668,33 +1668,33 @@ fn derive_directory_feishu_reference_import_status(
 
 async fn oauth_wait_session_is_current(
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
-    working_dir: &str,
+    workspace_root: &str,
     session: u64,
 ) -> bool {
     let runtime = state.lock().await;
-    runtime.working_dir == working_dir
+    runtime.workspace_root == workspace_root
         && runtime.oauth_wait_session.load(Ordering::Relaxed) == session
 }
 
 async fn update_runtime_status<F>(
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
-    working_dir: &str,
+    workspace_root: &str,
     mutate: F,
 ) where
     F: FnOnce(&mut FeishuReferenceImportStatus),
 {
     let mut runtime = state.lock().await;
-    runtime.working_dir = working_dir.to_string();
+    runtime.workspace_root = workspace_root.to_string();
     mutate(&mut runtime.status);
 }
 
 async fn set_runtime_status(
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
-    working_dir: &str,
+    workspace_root: &str,
     status: FeishuReferenceImportStatus,
 ) {
     let mut runtime = state.lock().await;
-    runtime.working_dir = working_dir.to_string();
+    runtime.workspace_root = workspace_root.to_string();
     runtime.status = status;
 }
 
@@ -2021,11 +2021,11 @@ async fn refresh_user_access_token(
 }
 
 async fn resolve_access_token(
-    working_dir: &str,
+    workspace_root: &str,
     config: &FeishuReferenceConfig,
     client: &Client,
 ) -> Result<String, String> {
-    let app_secret = read_app_secret(working_dir)?
+    let app_secret = read_app_secret(workspace_root)?
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "请输入飞书 App Secret 后再继续。".to_string())?;
 
@@ -2034,15 +2034,15 @@ async fn resolve_access_token(
             fetch_tenant_access_token(client, config, &app_secret).await
         }
         FeishuReferenceAuthMode::Oauth => {
-            let mut stored = read_stored_user_token(working_dir)?
+            let mut stored = read_stored_user_token(workspace_root)?
                 .ok_or_else(|| "当前鉴权模式需要先完成飞书授权。".to_string())?;
             let context = evaluate_stored_user_token(&stored, config);
             if !context.binding_matches {
-                delete_stored_user_token(working_dir)?;
+                delete_stored_user_token(workspace_root)?;
                 return Err("当前用户授权与现有飞书应用配置不一致，请重新授权。".to_string());
             }
             if !context.missing_scopes.is_empty() {
-                delete_stored_user_token(working_dir)?;
+                delete_stored_user_token(workspace_root)?;
                 return Err(format!(
                     "当前用户授权缺少必要权限，请重新授权：{}",
                     context.missing_scopes.join("、")
@@ -2051,12 +2051,12 @@ async fn resolve_access_token(
             if stored.expires_at > now_millis() + 60_000 {
                 if !token_has_user_profile(&stored) {
                     populate_user_profile(client, config, &mut stored).await?;
-                    write_stored_user_token(working_dir, &stored)?;
+                    write_stored_user_token(workspace_root, &stored)?;
                 }
                 return Ok(stored.access_token);
             }
             if !token_can_refresh(&stored) {
-                delete_stored_user_token(working_dir)?;
+                delete_stored_user_token(workspace_root)?;
                 return Err("飞书用户身份授权已过期，请重新授权。".to_string());
             }
             let refreshed = refresh_user_access_token(
@@ -2067,7 +2067,7 @@ async fn resolve_access_token(
                 &stored,
             )
             .await?;
-            write_stored_user_token(working_dir, &refreshed)?;
+            write_stored_user_token(workspace_root, &refreshed)?;
             Ok(refreshed.access_token)
         }
     }
@@ -3130,7 +3130,7 @@ fn directory_summary(space_name: &str, roots: &[FeishuReferenceRootSelection]) -
 }
 
 fn configure_managed_directory(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
     space_name: &str,
     roots: &[FeishuReferenceRootSelection],
@@ -3146,7 +3146,7 @@ fn configure_managed_directory(
     config.allow_move_documents = false;
     config.allow_move_directories = false;
     knowledge_store::update_directory_config(
-        working_dir,
+        workspace_root,
         KnowledgeType::Reference,
         target_path,
         config,
@@ -3186,7 +3186,7 @@ fn build_directory_external_sources(
 }
 
 async fn collect_planned_documents(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
     config: &FeishuReferenceConfig,
     access_token: &str,
@@ -3231,7 +3231,7 @@ async fn collect_planned_documents(
         if !visited_listing_tokens.insert(traversal_key) {
             continue;
         }
-        update_runtime_status(state.clone(), working_dir, |status| {
+        update_runtime_status(state.clone(), workspace_root, |status| {
             status.stage = FeishuReferenceImportStage::ListingNodes;
             status.running = true;
             status.state = FeishuReferenceImportStateKind::Running;
@@ -3298,8 +3298,8 @@ fn remove_file_if_exists(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-fn prepare_temp_root(working_dir: &str) -> Result<std::path::PathBuf, String> {
-    let root = temp_root_path(working_dir);
+fn prepare_temp_root(workspace_root: &str) -> Result<std::path::PathBuf, String> {
+    let root = temp_root_path(workspace_root);
     remove_dir_if_exists(&root)?;
     std::fs::create_dir_all(&root).map_err(|error| {
         format!(
@@ -3312,7 +3312,7 @@ fn prepare_temp_root(working_dir: &str) -> Result<std::path::PathBuf, String> {
 }
 
 fn swap_managed_directory(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: &str,
     temp_root: &std::path::Path,
 ) -> Result<(), String> {
@@ -3324,8 +3324,8 @@ fn swap_managed_directory(
         ));
     }
 
-    let managed = reference_target_dir_path(working_dir, target_path);
-    let backup = backup_dir_path(working_dir);
+    let managed = reference_target_dir_path(workspace_root, target_path);
+    let backup = backup_dir_path(workspace_root);
     remove_dir_if_exists(&backup)?;
     if let Some(parent) = managed.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -3396,7 +3396,7 @@ async fn respond_loopback_html(socket: &mut tokio::net::TcpStream, title: &str, 
 
 async fn run_feishu_reference_import(
     app_handle: AppHandle,
-    working_dir: String,
+    workspace_root: String,
     config: FeishuReferenceConfig,
     target_path: Option<String>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
@@ -3409,7 +3409,7 @@ async fn run_feishu_reference_import(
     let managed_path = reference_target_managed_path(&target_path);
     ensure_not_cancelled(&cancel_requested)?;
     let client = feishu_client().map_err(FeishuReferenceImportRunError::Failed)?;
-    let access_token = resolve_access_token(&working_dir, &config, &client)
+    let access_token = resolve_access_token(&workspace_root, &config, &client)
         .await
         .map_err(FeishuReferenceImportRunError::Failed)?;
     ensure_not_cancelled(&cancel_requested)?;
@@ -3455,19 +3455,19 @@ async fn run_feishu_reference_import(
     config.roots = resolved_selected_roots.clone();
     (config.root_node_token, config.root_node_title) = primary_root_fields(&config.roots);
     if use_workspace_config {
-        save_config(&working_dir, &config).map_err(FeishuReferenceImportRunError::Failed)?;
+        save_config(&workspace_root, &config).map_err(FeishuReferenceImportRunError::Failed)?;
     } else {
         let binding = directory_binding_from_selection(
             config.space_id.clone(),
             config.space_name.clone(),
             config.roots.clone(),
         );
-        save_or_delete_directory_binding(&working_dir, &target_path, &binding)
+        save_or_delete_directory_binding(&workspace_root, &target_path, &binding)
             .map_err(FeishuReferenceImportRunError::Failed)?;
     }
 
     let planned = collect_planned_documents(
-        &working_dir,
+        &workspace_root,
         &target_path,
         &config,
         &access_token,
@@ -3485,7 +3485,7 @@ async fn run_feishu_reference_import(
         ));
     }
 
-    update_runtime_status(state.clone(), &working_dir, |status| {
+    update_runtime_status(state.clone(), &workspace_root, |status| {
         status.stage = FeishuReferenceImportStage::Importing;
         status.progress = Some(0.0);
         status.total_docs = Some(planned.len() as u32);
@@ -3495,10 +3495,10 @@ async fn run_feishu_reference_import(
     .await;
 
     let temp_root =
-        prepare_temp_root(&working_dir).map_err(FeishuReferenceImportRunError::Failed)?;
+        prepare_temp_root(&workspace_root).map_err(FeishuReferenceImportRunError::Failed)?;
     for (index, planned_doc) in planned.iter().enumerate() {
         ensure_not_cancelled(&cancel_requested)?;
-        update_runtime_status(state.clone(), &working_dir, |status| {
+        update_runtime_status(state.clone(), &workspace_root, |status| {
             status.stage = FeishuReferenceImportStage::Importing;
             status.current_title = Some(planned_doc.title.clone());
             status.current_path = Some(planned_doc.relative_path.clone());
@@ -3578,7 +3578,7 @@ async fn run_feishu_reference_import(
     }
 
     ensure_not_cancelled(&cancel_requested)?;
-    update_runtime_status(state.clone(), &working_dir, |status| {
+    update_runtime_status(state.clone(), &workspace_root, |status| {
         status.stage = FeishuReferenceImportStage::Reconciling;
         status.progress = Some(1.0);
         status.processed_docs = planned.len() as u32;
@@ -3589,12 +3589,12 @@ async fn run_feishu_reference_import(
     })
     .await;
 
-    swap_managed_directory(&working_dir, &target_path, &temp_root)
+    swap_managed_directory(&workspace_root, &target_path, &temp_root)
         .map_err(FeishuReferenceImportRunError::Failed)?;
     remove_dir_if_exists(&temp_root).map_err(FeishuReferenceImportRunError::Failed)?;
 
     configure_managed_directory(
-        &working_dir,
+        &workspace_root,
         &target_path,
         &resolved_space_name,
         &resolved_selected_roots,
@@ -3602,7 +3602,7 @@ async fn run_feishu_reference_import(
     .map_err(FeishuReferenceImportRunError::Failed)?;
     let imported_at = now_millis();
     knowledge_store::update_directory_external_sources(
-        &working_dir,
+        &workspace_root,
         KnowledgeType::Reference,
         &target_path,
         build_directory_external_sources(
@@ -3624,11 +3624,11 @@ async fn run_feishu_reference_import(
             imported_doc_count: planned.len() as u32,
         };
         (manifest.root_node_token, manifest.root_node_title) = primary_root_fields(&manifest.roots);
-        save_manifest(&working_dir, &manifest).map_err(FeishuReferenceImportRunError::Failed)?;
+        save_manifest(&workspace_root, &manifest).map_err(FeishuReferenceImportRunError::Failed)?;
     }
     commands::reconcile_and_emit_knowledge_changed(
         &app_handle,
-        &working_dir,
+        &workspace_root,
         knowledge_index_state,
         "knowledge_import_feishu_reference_docs",
     )
@@ -3636,7 +3636,7 @@ async fn run_feishu_reference_import(
     .map_err(|error| FeishuReferenceImportRunError::Failed(error.message))?;
 
     let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-        read_stored_user_token(&working_dir).map_err(FeishuReferenceImportRunError::Failed)?
+        read_stored_user_token(&workspace_root).map_err(FeishuReferenceImportRunError::Failed)?
     } else {
         None
     };
@@ -3649,7 +3649,7 @@ async fn run_feishu_reference_import(
         app_id: config.app_id.clone(),
         app_secret: None,
         app_secret_configured: true,
-        authorized: authorization_ready(&working_dir, &config)
+        authorized: authorization_ready(&workspace_root, &config)
             .map_err(FeishuReferenceImportRunError::Failed)?,
         authorized_user_name: None,
         authorized_user_open_id: None,
@@ -3695,32 +3695,32 @@ async fn run_feishu_reference_import(
 }
 
 pub async fn get_feishu_reference_import_status(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceImportStatus, String> {
     if let Some(target_path) = target_path.map(str::trim).filter(|value| !value.is_empty()) {
         let runtime = state.lock().await.clone();
         let requested_managed_path = reference_target_managed_path(target_path);
-        let selection = read_directory_binding(working_dir, target_path)?;
-        if runtime.working_dir == working_dir
+        let selection = read_directory_binding(workspace_root, target_path)?;
+        if runtime.workspace_root == workspace_root
             && runtime.status.managed_path == requested_managed_path
             && (runtime.status.running
                 || runtime.status.stage == FeishuReferenceImportStage::Authorizing
                 || runtime.status.stage == FeishuReferenceImportStage::Error)
         {
             let mut status = runtime.status;
-            let config = read_config(working_dir)?;
-            let app_secret = read_app_secret(working_dir)?;
-            let secret_configured = app_secret_configured(working_dir)?;
+            let config = read_config(workspace_root)?;
+            let app_secret = read_app_secret(workspace_root)?;
+            let secret_configured = app_secret_configured(workspace_root)?;
             let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-                read_stored_user_token(working_dir)?
+                read_stored_user_token(workspace_root)?
             } else {
                 None
             };
-            let authorized = authorization_ready(working_dir, &config)?;
+            let authorized = authorization_ready(workspace_root, &config)?;
             let (_, imported_space_id, imported_roots, imported_at) =
-                read_feishu_directory_import_snapshot(working_dir, target_path)?;
+                read_feishu_directory_import_snapshot(workspace_root, target_path)?;
             let (root_node_token, root_node_title) = selection
                 .as_ref()
                 .map(|binding| primary_root_fields(&binding.roots))
@@ -3728,7 +3728,7 @@ pub async fn get_feishu_reference_import_status(
             let (imported_root_node_token, imported_root_node_title) =
                 primary_root_fields(&imported_roots);
             let imported_doc_count = count_reference_markdown_documents(
-                &reference_target_dir_path(working_dir, target_path),
+                &reference_target_dir_path(workspace_root, target_path),
             )?;
 
             status.auth_mode = config.auth_mode;
@@ -3784,9 +3784,9 @@ pub async fn get_feishu_reference_import_status(
             return Ok(status);
         }
 
-        let mut status = derive_directory_feishu_reference_import_status(working_dir, target_path)?;
-        status.app_secret = read_app_secret(working_dir)?;
-        if runtime.working_dir == working_dir
+        let mut status = derive_directory_feishu_reference_import_status(workspace_root, target_path)?;
+        status.app_secret = read_app_secret(workspace_root)?;
+        if runtime.workspace_root == workspace_root
             && runtime.status.managed_path == requested_managed_path
             && runtime.status.last_outcome == Some(FeishuReferenceImportLastOutcome::Cancelled)
         {
@@ -3796,19 +3796,19 @@ pub async fn get_feishu_reference_import_status(
         return Ok(status);
     }
 
-    let config = read_config(working_dir)?;
-    let app_secret = read_app_secret(working_dir)?;
-    let secret_configured = app_secret_configured(working_dir)?;
+    let config = read_config(workspace_root)?;
+    let app_secret = read_app_secret(workspace_root)?;
+    let secret_configured = app_secret_configured(workspace_root)?;
     let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-        read_stored_user_token(working_dir)?
+        read_stored_user_token(workspace_root)?
     } else {
         None
     };
-    let authorized = authorization_ready(working_dir, &config)?;
-    let manifest = read_manifest(working_dir)?;
+    let authorized = authorization_ready(workspace_root, &config)?;
+    let manifest = read_manifest(workspace_root)?;
     let runtime = state.lock().await.clone();
 
-    if runtime.working_dir == working_dir
+    if runtime.workspace_root == workspace_root
         && (runtime.status.running
             || runtime.status.stage == FeishuReferenceImportStage::Authorizing
             || runtime.status.stage == FeishuReferenceImportStage::Error)
@@ -3851,7 +3851,7 @@ pub async fn get_feishu_reference_import_status(
         manifest.as_ref(),
     );
     status.app_secret = app_secret;
-    if runtime.working_dir == working_dir
+    if runtime.workspace_root == workspace_root
         && runtime.status.last_outcome == Some(FeishuReferenceImportLastOutcome::Cancelled)
     {
         status.last_outcome = Some(FeishuReferenceImportLastOutcome::Cancelled);
@@ -3861,13 +3861,13 @@ pub async fn get_feishu_reference_import_status(
 }
 
 pub async fn save_feishu_reference_config(
-    working_dir: &str,
+    workspace_root: &str,
     input: FeishuReferenceConfigInput,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceImportStatus, String> {
-    let previous = read_config(working_dir)?;
+    let previous = read_config(workspace_root)?;
     let target_path = normalize_optional_text(input.target_path.clone())
-        .map(|path| ensure_reference_target_directory(working_dir, &path).map(|record| record.path))
+        .map(|path| ensure_reference_target_directory(workspace_root, &path).map(|record| record.path))
         .transpose()?;
     let requested_space_id = normalize_optional_text(input.space_id.clone());
     let requested_space_name = normalize_optional_text(input.space_name.clone());
@@ -3907,37 +3907,37 @@ pub async fn save_feishu_reference_config(
     normalize_config_roots(&mut next_config);
 
     if input.clear_app_secret {
-        delete_app_secret(working_dir)?;
+        delete_app_secret(workspace_root)?;
     } else if let Some(secret) = input
         .app_secret
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
-        write_app_secret(working_dir, &secret)?;
+        write_app_secret(workspace_root, &secret)?;
     }
 
     if previous.app_id != next_config.app_id
         || previous.open_base_url != next_config.open_base_url
         || previous.oauth_persistence_mode != next_config.oauth_persistence_mode
     {
-        delete_stored_user_token(working_dir)?;
+        delete_stored_user_token(workspace_root)?;
     }
 
-    save_config(working_dir, &next_config)?;
+    save_config(workspace_root, &next_config)?;
     if let Some(target_path) = target_path.as_deref() {
-        save_or_delete_directory_binding(working_dir, target_path, &directory_binding)?;
+        save_or_delete_directory_binding(workspace_root, target_path, &directory_binding)?;
     }
     let status =
-        get_feishu_reference_import_status(working_dir, target_path.as_deref(), state.clone())
+        get_feishu_reference_import_status(workspace_root, target_path.as_deref(), state.clone())
             .await?;
     if !status.running {
-        set_runtime_status(state, working_dir, status.clone()).await;
+        set_runtime_status(state, workspace_root, status.clone()).await;
     }
     Ok(status)
 }
 
 pub async fn test_feishu_reference_connection(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceConnectionTestResult, String> {
@@ -3945,18 +3945,18 @@ pub async fn test_feishu_reference_connection(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            ensure_reference_target_directory(working_dir, value).map(|record| record.path)
+            ensure_reference_target_directory(workspace_root, value).map(|record| record.path)
         })
         .transpose()?;
-    let mut config = read_config(working_dir)?;
+    let mut config = read_config(workspace_root)?;
     if let Some(target_path) = target_path.as_deref() {
-        let binding = read_directory_binding(working_dir, target_path)?;
+        let binding = read_directory_binding(workspace_root, target_path)?;
         apply_directory_binding_to_config(&mut config, binding.as_ref());
     }
-    validate_core_config(&config, !app_secret_configured(working_dir)?)?;
+    validate_core_config(&config, !app_secret_configured(workspace_root)?)?;
     let client = feishu_client()?;
 
-    update_runtime_status(state.clone(), working_dir, |status| {
+    update_runtime_status(state.clone(), workspace_root, |status| {
         status.stage = FeishuReferenceImportStage::TestingConnection;
         status.running = false;
         status.state = FeishuReferenceImportStateKind::Ready;
@@ -3965,7 +3965,7 @@ pub async fn test_feishu_reference_connection(
     })
     .await;
 
-    let access_token = resolve_access_token(working_dir, &config, &client).await?;
+    let access_token = resolve_access_token(workspace_root, &config, &client).await?;
     let spaces = fetch_all_spaces(&client, &config, &access_token).await?;
     let resolved_space = config.space_id.as_deref().and_then(|space_id| {
         spaces
@@ -3998,7 +3998,7 @@ pub async fn test_feishu_reference_connection(
                 updated.root_node_title = resolved_root_title.clone();
             }
             normalize_directory_binding(&mut updated);
-            save_or_delete_directory_binding(working_dir, target_path, &updated)?;
+            save_or_delete_directory_binding(workspace_root, target_path, &updated)?;
         } else {
             let mut updated = config.clone();
             updated.space_name = Some(space.name.clone());
@@ -4010,7 +4010,7 @@ pub async fn test_feishu_reference_connection(
                 updated.root_node_title = resolved_root_title.clone();
             }
             normalize_config_roots(&mut updated);
-            save_config(working_dir, &updated)?;
+            save_config(workspace_root, &updated)?;
         }
     }
 
@@ -4031,11 +4031,11 @@ pub async fn test_feishu_reference_connection(
 }
 
 pub async fn start_feishu_reference_oauth(
-    working_dir: String,
+    workspace_root: String,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceOauthStartResult, String> {
-    let config = read_config(&working_dir)?;
-    validate_core_config(&config, !app_secret_configured(&working_dir)?)?;
+    let config = read_config(&workspace_root)?;
+    validate_core_config(&config, !app_secret_configured(&workspace_root)?)?;
 
     let callback_urls = feishu_oauth_callback_urls();
     let (listener, callback_url) = bind_feishu_oauth_listener()?;
@@ -4045,19 +4045,19 @@ pub async fn start_feishu_reference_oauth(
     let requested_scopes = feishu_reference_user_auth_scopes(config.oauth_persistence_mode);
     let (oauth_wait_session, oauth_wait_cancel) = {
         let mut runtime = state.lock().await;
-        if runtime.working_dir == working_dir
+        if runtime.workspace_root == workspace_root
             && runtime.status.stage == FeishuReferenceImportStage::Authorizing
         {
             return Err("当前正在等待飞书授权回调。".to_string());
         }
-        runtime.working_dir = working_dir.clone();
+        runtime.workspace_root = workspace_root.clone();
         (
             runtime.oauth_wait_session.fetch_add(1, Ordering::Relaxed) + 1,
             runtime.oauth_wait_cancel.clone(),
         )
     };
 
-    update_runtime_status(state.clone(), &working_dir, |status| {
+    update_runtime_status(state.clone(), &workspace_root, |status| {
         status.running = false;
         status.stage = FeishuReferenceImportStage::Authorizing;
         status.state = FeishuReferenceImportStateKind::NeedsAuthorization;
@@ -4081,7 +4081,7 @@ pub async fn start_feishu_reference_oauth(
 
     let authorize_url_string = authorize_url.to_string();
     let oauth_state_for_task = oauth_state.clone();
-    let working_dir_for_task = working_dir.clone();
+    let working_dir_for_task = workspace_root.clone();
     let state_for_task = state.clone();
     let oauth_wait_cancel_for_task = oauth_wait_cancel.clone();
     let callback_url_for_task = callback_url.clone();
@@ -4287,16 +4287,16 @@ pub async fn start_feishu_reference_oauth(
 }
 
 pub async fn cancel_feishu_reference_oauth_wait(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceImportStatus, String> {
     let runtime = state.lock().await;
-    if runtime.working_dir != working_dir
+    if runtime.workspace_root != workspace_root
         || runtime.status.stage != FeishuReferenceImportStage::Authorizing
     {
         drop(runtime);
-        return get_feishu_reference_import_status(working_dir, target_path, state).await;
+        return get_feishu_reference_import_status(workspace_root, target_path, state).await;
     }
 
     runtime.oauth_wait_session.fetch_add(1, Ordering::Relaxed);
@@ -4304,24 +4304,24 @@ pub async fn cancel_feishu_reference_oauth_wait(
     drop(runtime);
 
     let mut status = if let Some(target_path) = target_path {
-        derive_directory_feishu_reference_import_status(working_dir, target_path)?
+        derive_directory_feishu_reference_import_status(workspace_root, target_path)?
     } else {
-        derive_persisted_feishu_reference_import_status(working_dir)?
+        derive_persisted_feishu_reference_import_status(workspace_root)?
     };
     status.message = "已停止等待飞书授权，可重新发起授权。".to_string();
-    set_runtime_status(state, working_dir, status.clone()).await;
+    set_runtime_status(state, workspace_root, status.clone()).await;
     Ok(status)
 }
 
 pub async fn list_feishu_reference_space_nodes(
-    working_dir: &str,
+    workspace_root: &str,
     space_id: String,
     parent_node_token: Option<String>,
 ) -> Result<Vec<FeishuReferenceNodeSummary>, String> {
-    let config = read_config(working_dir)?;
-    validate_core_config(&config, !app_secret_configured(working_dir)?)?;
+    let config = read_config(workspace_root)?;
+    validate_core_config(&config, !app_secret_configured(workspace_root)?)?;
     let client = feishu_client()?;
-    let access_token = resolve_access_token(working_dir, &config, &client).await?;
+    let access_token = resolve_access_token(workspace_root, &config, &client).await?;
     let items = fetch_all_space_nodes(
         &client,
         &config,
@@ -4354,16 +4354,16 @@ pub async fn list_feishu_reference_space_nodes(
 
 pub async fn start_feishu_reference_import(
     app_handle: AppHandle,
-    working_dir: String,
+    workspace_root: String,
     request: FeishuReferenceImportRequest,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceImportStatus, String> {
     let target_path = normalize_optional_text(request.target_path.clone());
     if let Some(target_path) = target_path.as_deref() {
-        ensure_reference_target_directory(&working_dir, target_path)?;
+        ensure_reference_target_directory(&workspace_root, target_path)?;
     }
-    let mut config = read_config(&working_dir)?;
+    let mut config = read_config(&workspace_root)?;
     config.space_id = normalize_optional_text(Some(request.space_id));
     config.space_name = normalize_optional_text(request.space_name);
     config.roots = normalize_request_roots(
@@ -4373,21 +4373,21 @@ pub async fn start_feishu_reference_import(
     );
     (config.root_node_token, config.root_node_title) = primary_root_fields(&config.roots);
     if target_path.is_none() {
-        save_config(&working_dir, &config)?;
+        save_config(&workspace_root, &config)?;
     }
-    validate_core_config(&config, !app_secret_configured(&working_dir)?)?;
+    validate_core_config(&config, !app_secret_configured(&workspace_root)?)?;
     validate_selection(&config)?;
 
-    let authorized = authorization_ready(&working_dir, &config)?;
+    let authorized = authorization_ready(&workspace_root, &config)?;
     if config.auth_mode == FeishuReferenceAuthMode::Oauth && !authorized {
         return Err("当前鉴权模式需要先完成飞书授权。".to_string());
     }
 
     let prior_status =
-        get_feishu_reference_import_status(&working_dir, target_path.as_deref(), state.clone())
+        get_feishu_reference_import_status(&workspace_root, target_path.as_deref(), state.clone())
             .await?;
     let stored_user_token = if config.auth_mode == FeishuReferenceAuthMode::Oauth {
-        read_stored_user_token(&working_dir)?
+        read_stored_user_token(&workspace_root)?
     } else {
         None
     };
@@ -4450,7 +4450,7 @@ pub async fn start_feishu_reference_import(
         if runtime.status.running {
             return Err("飞书知识库导入任务仍在进行中。".to_string());
         }
-        runtime.working_dir = working_dir.clone();
+        runtime.workspace_root = workspace_root.clone();
         runtime.cancel_requested.store(false, Ordering::Relaxed);
         runtime.status = starting_status.clone();
     }
@@ -4460,7 +4460,7 @@ pub async fn start_feishu_reference_import(
         runtime.cancel_requested.clone()
     };
     let state_for_task = state.clone();
-    let working_dir_for_task = working_dir.clone();
+    let working_dir_for_task = workspace_root.clone();
     let config_for_task = config.clone();
     let target_path_for_task = target_path.clone();
     tauri::async_runtime::spawn(async move {
@@ -4540,7 +4540,7 @@ pub async fn start_feishu_reference_import(
 }
 
 pub async fn cancel_feishu_reference_import(
-    working_dir: &str,
+    workspace_root: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
 ) -> Result<FeishuReferenceImportStatus, String> {
@@ -4549,19 +4549,19 @@ pub async fn cancel_feishu_reference_import(
         .map(reference_target_managed_path)
         .map(|value| runtime.status.managed_path == value)
         .unwrap_or(true);
-    if runtime.working_dir == working_dir && runtime.status.running && target_matches {
+    if runtime.workspace_root == workspace_root && runtime.status.running && target_matches {
         runtime.cancel_requested.store(true, Ordering::Relaxed);
         let mut status = runtime.status.clone();
         status.message = "正在取消飞书知识库文档导入。".to_string();
         return Ok(status);
     }
     drop(runtime);
-    get_feishu_reference_import_status(working_dir, target_path, state).await
+    get_feishu_reference_import_status(workspace_root, target_path, state).await
 }
 
 pub async fn delete_feishu_reference_docs(
     app_handle: AppHandle,
-    working_dir: String,
+    workspace_root: String,
     target_path: Option<String>,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     state: Arc<tokio::sync::Mutex<FeishuReferenceImportRuntime>>,
@@ -4573,7 +4573,7 @@ pub async fn delete_feishu_reference_docs(
         .unwrap_or_else(|| FEISHU_REFERENCE_MANAGED_PATH.to_string());
     {
         let runtime = state.lock().await;
-        if runtime.working_dir == working_dir
+        if runtime.workspace_root == workspace_root
             && runtime.status.running
             && runtime.status.managed_path == target_managed_path
         {
@@ -4582,33 +4582,33 @@ pub async fn delete_feishu_reference_docs(
     }
 
     if let Some(target_path) = target_path.as_deref() {
-        delete_target_reference_import_artifacts(&working_dir, target_path)?;
+        delete_target_reference_import_artifacts(&workspace_root, target_path)?;
     } else {
-        remove_dir_if_exists(&managed_dir_path(&working_dir))?;
-        remove_dir_if_exists(&temp_root_path(&working_dir))?;
-        remove_dir_if_exists(&backup_dir_path(&working_dir))?;
+        remove_dir_if_exists(&managed_dir_path(&workspace_root))?;
+        remove_dir_if_exists(&temp_root_path(&workspace_root))?;
+        remove_dir_if_exists(&backup_dir_path(&workspace_root))?;
         remove_file_if_exists(&managed_directory_config_path(
-            &working_dir,
+            &workspace_root,
             FEISHU_REFERENCE_DIRECTORY_CONFIG_SUFFIX,
         ))?;
         remove_file_if_exists(&managed_directory_config_path(
-            &working_dir,
+            &workspace_root,
             FEISHU_REFERENCE_LEGACY_DIRECTORY_CONFIG_SUFFIX,
         ))?;
-        delete_manifest(&working_dir)?;
+        delete_manifest(&workspace_root)?;
     }
     commands::reconcile_and_emit_knowledge_changed(
         &app_handle,
-        &working_dir,
+        &workspace_root,
         knowledge_index_state,
         "knowledge_delete_feishu_reference_docs",
     )
     .await
     .map_err(|error| error.message)?;
     let status =
-        get_feishu_reference_import_status(&working_dir, target_path.as_deref(), state.clone())
+        get_feishu_reference_import_status(&workspace_root, target_path.as_deref(), state.clone())
             .await?;
-    set_runtime_status(state, &working_dir, status.clone()).await;
+    set_runtime_status(state, &workspace_root, status.clone()).await;
     Ok(status)
 }
 
@@ -4618,8 +4618,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    fn seed_reference_directory(working_dir: &str, target_path: &str) {
-        let root = reference_target_dir_path(working_dir, target_path);
+    fn seed_reference_directory(workspace_root: &str, target_path: &str) {
+        let root = reference_target_dir_path(workspace_root, target_path);
         std::fs::create_dir_all(&root).expect("create reference directory");
         std::fs::write(root.join("Imported.md"), "# Imported").expect("seed imported markdown");
     }
@@ -4634,17 +4634,17 @@ mod tests {
     #[tokio::test]
     async fn saving_directory_config_keeps_imported_snapshot_separate() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let target_path = "reference-folder";
 
-        seed_reference_directory(&working_dir, target_path);
+        seed_reference_directory(&workspace_root, target_path);
 
         let mut config = FeishuReferenceConfig::default();
         config.app_id = "app-test".to_string();
-        save_config(&working_dir, &config).expect("seed global config");
+        save_config(&workspace_root, &config).expect("seed global config");
 
         knowledge_store::update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             target_path,
             build_directory_external_sources(
@@ -4659,7 +4659,7 @@ mod tests {
         .expect("seed imported snapshot");
 
         let status = save_feishu_reference_config(
-            &working_dir,
+            &workspace_root,
             FeishuReferenceConfigInput {
                 target_path: Some(target_path.to_string()),
                 auth_mode: FeishuReferenceAuthMode::AppCredentials,
@@ -4692,7 +4692,7 @@ mod tests {
         assert_eq!(status.imported_roots[0].node_token, "imported-root");
         assert_eq!(status.imported_at, Some(123));
 
-        let binding = read_directory_binding(&working_dir, target_path)
+        let binding = read_directory_binding(&workspace_root, target_path)
             .expect("read directory binding")
             .expect("directory binding exists");
         assert_eq!(binding.space_id.as_deref(), Some("selected-space"));
@@ -4701,7 +4701,7 @@ mod tests {
         assert_eq!(binding.roots[0].node_token, "selected-root");
 
         let (_, imported_space_id, imported_roots, imported_at) =
-            read_feishu_directory_import_snapshot(&working_dir, target_path)
+            read_feishu_directory_import_snapshot(&workspace_root, target_path)
                 .expect("read imported snapshot");
         assert_eq!(imported_space_id.as_deref(), Some("imported-space"));
         assert_eq!(imported_roots.len(), 1);
@@ -4712,12 +4712,12 @@ mod tests {
     #[test]
     fn delete_target_reference_import_artifacts_removes_directory_and_sidecars() {
         let workspace = tempdir().expect("workspace");
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let target_path = "reference-folder";
 
-        seed_reference_directory(&working_dir, target_path);
+        seed_reference_directory(&workspace_root, target_path);
         knowledge_store::update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             target_path,
             build_directory_external_sources(
@@ -4731,7 +4731,7 @@ mod tests {
         )
         .expect("seed imported snapshot");
         save_directory_binding(
-            &working_dir,
+            &workspace_root,
             target_path,
             &FeishuReferenceDirectoryBinding {
                 space_id: Some("selected-space".to_string()),
@@ -4746,21 +4746,21 @@ mod tests {
         )
         .expect("save directory binding");
 
-        let legacy_config = knowledge_root(&working_dir)
+        let legacy_config = knowledge_root(&workspace_root)
             .join("reference")
             .join("reference-folder.meta");
         std::fs::write(&legacy_config, "legacy").expect("write legacy config");
 
-        delete_target_reference_import_artifacts(&working_dir, target_path)
+        delete_target_reference_import_artifacts(&workspace_root, target_path)
             .expect("delete target artifacts");
 
-        assert!(!reference_target_dir_path(&working_dir, target_path).exists());
-        assert!(!knowledge_root(&working_dir)
+        assert!(!reference_target_dir_path(&workspace_root, target_path).exists());
+        assert!(!knowledge_root(&workspace_root)
             .join("reference")
             .join("reference-folder.locus-meta")
             .exists());
         assert!(!legacy_config.exists());
-        assert!(!directory_binding_path(&working_dir, target_path).exists());
+        assert!(!directory_binding_path(&workspace_root, target_path).exists());
     }
 
     #[test]

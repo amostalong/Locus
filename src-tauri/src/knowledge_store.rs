@@ -1066,7 +1066,7 @@ fn legacy_memory_builtin_path(seed: &MemoryBuiltinSeed) -> Option<&'static str> 
 }
 
 fn resolve_legacy_memory_project_understanding_target(
-    working_dir: &str,
+    workspace_root: &str,
     legacy_doc: &KnowledgeDocument,
 ) -> Result<Option<String>, String> {
     let base_candidates = [
@@ -1076,12 +1076,12 @@ fn resolve_legacy_memory_project_understanding_target(
     ];
 
     for candidate in base_candidates {
-        let target_file = document_path(working_dir, KnowledgeType::Memory, &candidate)?;
+        let target_file = document_path(workspace_root, KnowledgeType::Memory, &candidate)?;
         if !target_file.is_file() {
             return Ok(Some(candidate));
         }
 
-        let existing = load_document_by_path(working_dir, KnowledgeType::Memory, &candidate)?;
+        let existing = load_document_by_path(workspace_root, KnowledgeType::Memory, &candidate)?;
         if memory_document_payload_matches(legacy_doc, &existing) {
             return Ok(None);
         }
@@ -1092,12 +1092,12 @@ fn resolve_legacy_memory_project_understanding_target(
             "unity-project-understanding/legacy-project-understanding-{}.md",
             index
         );
-        let target_file = document_path(working_dir, KnowledgeType::Memory, &candidate)?;
+        let target_file = document_path(workspace_root, KnowledgeType::Memory, &candidate)?;
         if !target_file.is_file() {
             return Ok(Some(candidate));
         }
 
-        let existing = load_document_by_path(working_dir, KnowledgeType::Memory, &candidate)?;
+        let existing = load_document_by_path(workspace_root, KnowledgeType::Memory, &candidate)?;
         if memory_document_payload_matches(legacy_doc, &existing) {
             return Ok(None);
         }
@@ -1106,14 +1106,14 @@ fn resolve_legacy_memory_project_understanding_target(
     Err("Failed to resolve migration target for legacy memory project understanding".to_string())
 }
 
-fn migrate_legacy_memory_project_understanding(working_dir: &str) -> Result<(), String> {
+fn migrate_legacy_memory_project_understanding(workspace_root: &str) -> Result<(), String> {
     let legacy_path = "project-understanding.md";
-    let legacy_file = document_path(working_dir, KnowledgeType::Memory, legacy_path)?;
+    let legacy_file = document_path(workspace_root, KnowledgeType::Memory, legacy_path)?;
     if !legacy_file.is_file() {
         return Ok(());
     }
 
-    let legacy_doc = load_document_by_path(working_dir, KnowledgeType::Memory, legacy_path)?;
+    let legacy_doc = load_document_by_path(workspace_root, KnowledgeType::Memory, legacy_path)?;
     let is_legacy_builtin_stub = legacy_doc.id == "kd_builtin_memory_project_understanding"
         && !has_summary_content(legacy_doc.summary.as_deref())
         && !has_body_content(&legacy_doc.body);
@@ -1130,16 +1130,16 @@ fn migrate_legacy_memory_project_understanding(working_dir: &str) -> Result<(), 
     }
 
     create_directory(
-        working_dir,
+        workspace_root,
         KnowledgeType::Memory,
         "unity-project-understanding",
     )?;
     if let Some(target_path) =
-        resolve_legacy_memory_project_understanding_target(working_dir, &legacy_doc)?
+        resolve_legacy_memory_project_understanding_target(workspace_root, &legacy_doc)?
     {
         let mut migrated = legacy_doc;
         migrated.path = target_path;
-        save_document(working_dir, migrated)?;
+        save_document(workspace_root, migrated)?;
     }
 
     std::fs::remove_file(&legacy_file).map_err(|e| {
@@ -1153,23 +1153,23 @@ fn migrate_legacy_memory_project_understanding(working_dir: &str) -> Result<(), 
     Ok(())
 }
 
-fn memory_builtin_seed_marker_path(working_dir: &str) -> PathBuf {
-    Path::new(working_dir)
+fn memory_builtin_seed_marker_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root)
         .join("Library")
         .join("Locus")
         .join("memory_builtin_seed_version.txt")
 }
 
-fn read_memory_builtin_seed_version(working_dir: &str) -> u32 {
-    let path = memory_builtin_seed_marker_path(working_dir);
+fn read_memory_builtin_seed_version(workspace_root: &str) -> u32 {
+    let path = memory_builtin_seed_marker_path(workspace_root);
     std::fs::read_to_string(path)
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or(0)
 }
 
-fn write_memory_builtin_seed_version(working_dir: &str, version: u32) -> Result<(), String> {
-    let path = memory_builtin_seed_marker_path(working_dir);
+fn write_memory_builtin_seed_version(workspace_root: &str, version: u32) -> Result<(), String> {
+    let path = memory_builtin_seed_marker_path(workspace_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create memory seed marker directory: {}", e))?;
@@ -1179,16 +1179,16 @@ fn write_memory_builtin_seed_version(working_dir: &str, version: u32) -> Result<
 }
 
 fn migrate_builtin_memory_document_rules(
-    working_dir: &str,
+    workspace_root: &str,
     seed: &MemoryBuiltinSeed,
     previous_rules: &str,
 ) -> Result<(), String> {
-    let target = document_path(working_dir, KnowledgeType::Memory, seed.path)?;
+    let target = document_path(workspace_root, KnowledgeType::Memory, seed.path)?;
     if !target.is_file() {
         return Ok(());
     }
 
-    let mut document = load_document_by_path(working_dir, KnowledgeType::Memory, seed.path)?;
+    let mut document = load_document_by_path(workspace_root, KnowledgeType::Memory, seed.path)?;
     let Some(current_rules) = document.maintenance_rules.as_deref().map(str::trim) else {
         return Ok(());
     };
@@ -1198,48 +1198,48 @@ fn migrate_builtin_memory_document_rules(
     }
 
     document.maintenance_rules = Some(seed.maintenance_rules.to_string());
-    save_document(working_dir, document)?;
+    save_document(workspace_root, document)?;
     Ok(())
 }
 
 fn migrate_builtin_memory_document_inject_mode(
-    working_dir: &str,
+    workspace_root: &str,
     seed_id: &str,
     path: &str,
     previous_mode: KnowledgeInjectMode,
     next_mode: KnowledgeInjectMode,
 ) -> Result<(), String> {
-    let target = document_path(working_dir, KnowledgeType::Memory, path)?;
+    let target = document_path(workspace_root, KnowledgeType::Memory, path)?;
     if !target.is_file() {
         return Ok(());
     }
 
-    let mut document = load_document_by_path(working_dir, KnowledgeType::Memory, path)?;
+    let mut document = load_document_by_path(workspace_root, KnowledgeType::Memory, path)?;
     if document.id != seed_id || document.inject_mode != previous_mode {
         return Ok(());
     }
 
     document.inject_mode = next_mode;
-    save_document(working_dir, document)?;
+    save_document(workspace_root, document)?;
     Ok(())
 }
 
-fn migrate_builtin_memory_document_paths(working_dir: &str) -> Result<(), String> {
+fn migrate_builtin_memory_document_paths(workspace_root: &str) -> Result<(), String> {
     for seed in memory_builtin_seeds() {
         let Some(legacy_path) = legacy_memory_builtin_path(seed) else {
             continue;
         };
-        let legacy_file = document_path(working_dir, KnowledgeType::Memory, legacy_path)?;
+        let legacy_file = document_path(workspace_root, KnowledgeType::Memory, legacy_path)?;
         if !legacy_file.is_file() {
             continue;
         }
 
-        let target_file = document_path(working_dir, KnowledgeType::Memory, seed.path)?;
+        let target_file = document_path(workspace_root, KnowledgeType::Memory, seed.path)?;
         if !target_file.is_file() {
             let mut legacy_doc =
-                load_document_by_path(working_dir, KnowledgeType::Memory, legacy_path)?;
+                load_document_by_path(workspace_root, KnowledgeType::Memory, legacy_path)?;
             legacy_doc.path = seed.path.to_string();
-            save_document(working_dir, legacy_doc)?;
+            save_document(workspace_root, legacy_doc)?;
             std::fs::remove_file(&legacy_file).map_err(|e| {
                 format!(
                     "Failed to delete migrated legacy memory document '{}': {}",
@@ -1250,8 +1250,8 @@ fn migrate_builtin_memory_document_paths(working_dir: &str) -> Result<(), String
             continue;
         }
 
-        let legacy_doc = load_document_by_path(working_dir, KnowledgeType::Memory, legacy_path)?;
-        let current_doc = load_document_by_path(working_dir, KnowledgeType::Memory, seed.path)?;
+        let legacy_doc = load_document_by_path(workspace_root, KnowledgeType::Memory, legacy_path)?;
+        let current_doc = load_document_by_path(workspace_root, KnowledgeType::Memory, seed.path)?;
         if memory_builtin_documents_match(&legacy_doc, &current_doc) {
             std::fs::remove_file(&legacy_file).map_err(|e| {
                 format!(
@@ -1266,12 +1266,12 @@ fn migrate_builtin_memory_document_paths(working_dir: &str) -> Result<(), String
 }
 
 fn migrate_memory_builtin_seed_updates(
-    working_dir: &str,
+    workspace_root: &str,
     previous_seed_version: u32,
 ) -> Result<(), String> {
     if previous_seed_version < 5 {
         let record = read_directory_config(
-            working_dir,
+            workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )?;
@@ -1282,7 +1282,7 @@ fn migrate_memory_builtin_seed_updates(
             next.summary = MEMORY_UNITY_PROJECT_UNDERSTANDING_SUMMARY.to_string();
             next.maintenance_rules = MEMORY_UNITY_PROJECT_UNDERSTANDING_RULES.to_string();
             update_directory_config(
-                working_dir,
+                workspace_root,
                 KnowledgeType::Memory,
                 MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
                 next,
@@ -1292,7 +1292,7 @@ fn migrate_memory_builtin_seed_updates(
 
     if previous_seed_version < 6 {
         let record = read_directory_config(
-            working_dir,
+            workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )?;
@@ -1304,7 +1304,7 @@ fn migrate_memory_builtin_seed_updates(
             let mut next = record.config;
             next.inject_mode = KnowledgeInjectMode::Path;
             update_directory_config(
-                working_dir,
+                workspace_root,
                 KnowledgeType::Memory,
                 MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
                 next,
@@ -1319,12 +1319,12 @@ fn migrate_memory_builtin_seed_updates(
                 MEMORY_USER_PREFERENCE_PATH => MEMORY_USER_PREFERENCE_RULES_V6,
                 _ => continue,
             };
-            migrate_builtin_memory_document_rules(working_dir, seed, previous_rules)?;
+            migrate_builtin_memory_document_rules(workspace_root, seed, previous_rules)?;
         }
     }
     if previous_seed_version < 9 {
         migrate_builtin_memory_document_inject_mode(
-            working_dir,
+            workspace_root,
             "kd_builtin_memory_user_preference",
             MEMORY_USER_PREFERENCE_PATH,
             KnowledgeInjectMode::Full,
@@ -1333,7 +1333,7 @@ fn migrate_memory_builtin_seed_updates(
     }
     if previous_seed_version < 10 {
         let record = read_directory_config(
-            working_dir,
+            workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )?;
@@ -1343,7 +1343,7 @@ fn migrate_memory_builtin_seed_updates(
             let mut next = record.config;
             next.maintenance_rules = MEMORY_UNITY_PROJECT_UNDERSTANDING_RULES.to_string();
             update_directory_config(
-                working_dir,
+                workspace_root,
                 KnowledgeType::Memory,
                 MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
                 next,
@@ -1356,12 +1356,12 @@ fn migrate_memory_builtin_seed_updates(
                 MEMORY_USER_PREFERENCE_PATH => MEMORY_USER_PREFERENCE_RULES_V9,
                 _ => continue,
             };
-            migrate_builtin_memory_document_rules(working_dir, seed, previous_rules)?;
+            migrate_builtin_memory_document_rules(workspace_root, seed, previous_rules)?;
         }
     }
     if previous_seed_version < 11 {
         let record = read_directory_config(
-            working_dir,
+            workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )?;
@@ -1371,7 +1371,7 @@ fn migrate_memory_builtin_seed_updates(
             let mut next = record.config;
             next.summary = MEMORY_UNITY_PROJECT_UNDERSTANDING_SUMMARY.to_string();
             update_directory_config(
-                working_dir,
+                workspace_root,
                 KnowledgeType::Memory,
                 MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
                 next,
@@ -1381,28 +1381,28 @@ fn migrate_memory_builtin_seed_updates(
     Ok(())
 }
 
-pub fn ensure_memory_builtin_documents(working_dir: &str) -> Result<(), String> {
-    if working_dir.trim().is_empty() {
+pub fn ensure_memory_builtin_documents(workspace_root: &str) -> Result<(), String> {
+    if workspace_root.trim().is_empty() {
         return Ok(());
     }
 
-    ensure_knowledge_roots(working_dir)?;
-    migrate_legacy_memory_project_understanding(working_dir)?;
-    let previous_seed_version = read_memory_builtin_seed_version(working_dir);
+    ensure_knowledge_roots(workspace_root)?;
+    migrate_legacy_memory_project_understanding(workspace_root)?;
+    let previous_seed_version = read_memory_builtin_seed_version(workspace_root);
     if previous_seed_version >= MEMORY_BUILTIN_SEED_VERSION {
         return Ok(());
     }
     if previous_seed_version < 8 {
-        migrate_builtin_memory_document_paths(working_dir)?;
+        migrate_builtin_memory_document_paths(workspace_root)?;
     }
 
     for seed in memory_builtin_directory_seeds() {
-        create_directory(working_dir, KnowledgeType::Memory, seed.path)?;
+        create_directory(workspace_root, KnowledgeType::Memory, seed.path)?;
         let (config_file, _) =
-            directory_config_path(working_dir, KnowledgeType::Memory, seed.path)?;
+            directory_config_path(workspace_root, KnowledgeType::Memory, seed.path)?;
         if !config_file.is_file() {
             update_directory_config(
-                working_dir,
+                workspace_root,
                 KnowledgeType::Memory,
                 seed.path,
                 KnowledgeDirectoryConfig {
@@ -1427,13 +1427,13 @@ pub fn ensure_memory_builtin_documents(working_dir: &str) -> Result<(), String> 
     }
 
     for seed in memory_builtin_seeds() {
-        let target = document_path(working_dir, KnowledgeType::Memory, seed.path)?;
+        let target = document_path(workspace_root, KnowledgeType::Memory, seed.path)?;
         if target.is_file() {
             continue;
         }
 
         save_document(
-            working_dir,
+            workspace_root,
             KnowledgeDocument {
                 id: seed.id.to_string(),
                 doc_type: KnowledgeType::Memory,
@@ -1465,8 +1465,8 @@ pub fn ensure_memory_builtin_documents(working_dir: &str) -> Result<(), String> 
         )?;
     }
 
-    migrate_memory_builtin_seed_updates(working_dir, previous_seed_version)?;
-    write_memory_builtin_seed_version(working_dir, MEMORY_BUILTIN_SEED_VERSION)
+    migrate_memory_builtin_seed_updates(workspace_root, previous_seed_version)?;
+    write_memory_builtin_seed_version(workspace_root, MEMORY_BUILTIN_SEED_VERSION)
 }
 
 fn has_summary_content(summary: Option<&str>) -> bool {
@@ -1635,10 +1635,10 @@ fn inherited_document_config_and_sources_from_root(
 }
 
 fn resolve_document_inheritance(
-    working_dir: Option<&str>,
+    workspace_root: Option<&str>,
     document: &mut KnowledgeDocument,
 ) -> Result<(), String> {
-    let knowledge_root = working_dir.map(knowledge_root);
+    let knowledge_root = workspace_root.map(knowledge_root);
     resolve_document_inheritance_from_root(knowledge_root.as_deref(), document)
 }
 
@@ -1743,26 +1743,26 @@ fn is_read_only_locked_by_source(document: &KnowledgeDocument) -> bool {
     derive_read_only(document.external_source.as_ref())
 }
 
-pub fn knowledge_root(working_dir: &str) -> PathBuf {
-    Path::new(working_dir).join(KNOWLEDGE_ROOT_DIR)
+pub fn knowledge_root(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root).join(KNOWLEDGE_ROOT_DIR)
 }
 
 fn type_root_in_knowledge_root(knowledge_root: &Path, doc_type: KnowledgeType) -> PathBuf {
     knowledge_root.join(doc_type.as_str())
 }
 
-fn type_root(working_dir: &str, doc_type: KnowledgeType) -> PathBuf {
-    knowledge_root(working_dir).join(doc_type.as_str())
+fn type_root(workspace_root: &str, doc_type: KnowledgeType) -> PathBuf {
+    knowledge_root(workspace_root).join(doc_type.as_str())
 }
 
-pub fn ensure_knowledge_roots(working_dir: &str) -> Result<(), String> {
-    std::fs::create_dir_all(knowledge_root(working_dir))
+pub fn ensure_knowledge_roots(workspace_root: &str) -> Result<(), String> {
+    std::fs::create_dir_all(knowledge_root(workspace_root))
         .map_err(|e| format!("Failed to create knowledge root: {}", e))?;
     for doc_type in KnowledgeType::all() {
-        std::fs::create_dir_all(type_root(working_dir, doc_type))
+        std::fs::create_dir_all(type_root(workspace_root, doc_type))
             .map_err(|e| format!("Failed to create knowledge type root: {}", e))?;
     }
-    migrate_legacy_directory_config_suffixes(working_dir)?;
+    migrate_legacy_directory_config_suffixes(workspace_root)?;
     Ok(())
 }
 
@@ -1879,11 +1879,11 @@ fn legacy_directory_config_path_in_type_root(
 }
 
 fn directory_config_path(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<(PathBuf, String), String> {
-    directory_config_path_in_type_root(&type_root(working_dir, doc_type), path)
+    directory_config_path_in_type_root(&type_root(workspace_root, doc_type), path)
 }
 
 fn is_directory_config_file(path: &Path) -> bool {
@@ -1987,8 +1987,8 @@ fn migrate_legacy_directory_config_for_path(type_root: &Path, path: &str) -> Res
     Ok(())
 }
 
-fn migrate_legacy_directory_config_suffixes(working_dir: &str) -> Result<(), String> {
-    let knowledge_root = knowledge_root(working_dir);
+fn migrate_legacy_directory_config_suffixes(workspace_root: &str) -> Result<(), String> {
+    let knowledge_root = knowledge_root(workspace_root);
     if !knowledge_root.is_dir() {
         return Ok(());
     }
@@ -2191,12 +2191,12 @@ fn render_directory_config(
 }
 
 pub fn document_path(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<PathBuf, String> {
     let rel = normalize_relative_path(path)?;
-    Ok(type_root(working_dir, doc_type).join(rel))
+    Ok(type_root(workspace_root, doc_type).join(rel))
 }
 
 pub fn document_path_in_root(
@@ -2467,12 +2467,12 @@ fn read_directory_config_from_knowledge_root_internal(
 }
 
 fn read_virtual_workspace_directory_config(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<KnowledgeDirectoryConfigRecord, String> {
     let dir_path = normalize_relative_directory_path(path)?;
-    let (config_file, config_rel) = directory_config_path(working_dir, doc_type, &dir_path)?;
+    let (config_file, config_rel) = directory_config_path(workspace_root, doc_type, &dir_path)?;
     let exists = config_file.is_file();
     let stored = if exists {
         Some(read_stored_directory_config(&config_file)?)
@@ -2481,7 +2481,7 @@ fn read_virtual_workspace_directory_config(
     };
     let parent_config = relative_parent_directory(&dir_path)
         .as_deref()
-        .map(|parent_path| read_directory_config(working_dir, doc_type, parent_path))
+        .map(|parent_path| read_directory_config(workspace_root, doc_type, parent_path))
         .transpose()?;
     let updated_at = if exists {
         std::fs::metadata(&config_file)
@@ -2506,35 +2506,35 @@ fn read_virtual_workspace_directory_config(
 }
 
 pub fn directory_exists(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<bool, String> {
     let normalized_path = normalize_relative_directory_path(path)?;
-    if type_root(working_dir, doc_type)
+    if type_root(workspace_root, doc_type)
         .join(&normalized_path)
         .is_dir()
     {
         return Ok(true);
     }
     if doc_type == KnowledgeType::Reference {
-        return crate::unity_docs::managed_directory_exists(working_dir, &normalized_path);
+        return crate::unity_docs::managed_directory_exists(workspace_root, &normalized_path);
     }
     Ok(false)
 }
 
 pub fn read_directory_config(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<KnowledgeDirectoryConfigRecord, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
     if doc_type == KnowledgeType::Reference
-        && crate::unity_docs::managed_directory_exists(working_dir, path)?
+        && crate::unity_docs::managed_directory_exists(workspace_root, path)?
     {
-        return read_virtual_workspace_directory_config(working_dir, doc_type, path);
+        return read_virtual_workspace_directory_config(workspace_root, doc_type, path);
     }
-    read_directory_config_from_knowledge_root_internal(&knowledge_root(working_dir), doc_type, path)
+    read_directory_config_from_knowledge_root_internal(&knowledge_root(workspace_root), doc_type, path)
 }
 
 pub fn read_directory_config_from_root(
@@ -2546,7 +2546,7 @@ pub fn read_directory_config_from_root(
 }
 
 pub fn effective_child_directory_config(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     parent_path: Option<&str>,
 ) -> Result<KnowledgeDirectoryConfig, String> {
@@ -2554,11 +2554,11 @@ pub fn effective_child_directory_config(
         return Ok(default_directory_config_for_type(doc_type));
     };
 
-    if !directory_exists(working_dir, doc_type, parent_path)? {
+    if !directory_exists(workspace_root, doc_type, parent_path)? {
         return Ok(default_directory_config_for_type(doc_type));
     }
 
-    let parent = read_directory_config(working_dir, doc_type, parent_path)?;
+    let parent = read_directory_config(workspace_root, doc_type, parent_path)?;
     if parent.config.inherit_to_children {
         Ok(child_directory_config_from_parent(doc_type, &parent.config))
     } else {
@@ -2574,14 +2574,14 @@ fn default_directory_search_access() -> DirectorySearchAccess {
 }
 
 pub fn effective_directory_search_access_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<DirectorySearchAccess, String> {
     let normalized_path = normalize_relative_directory_path(path)?;
-    if directory_exists(working_dir, doc_type, &normalized_path)? {
-        let record = read_directory_config(working_dir, doc_type, &normalized_path)?;
+    if directory_exists(workspace_root, doc_type, &normalized_path)? {
+        let record = read_directory_config(workspace_root, doc_type, &normalized_path)?;
         return Ok(directory_search_access_from_record(&record));
     }
 
@@ -2597,7 +2597,7 @@ pub fn effective_directory_search_access_with_app_root(
 }
 
 pub fn effective_document_search_access_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     path: &str,
@@ -2606,7 +2606,7 @@ pub fn effective_document_search_access_with_app_root(
         return Ok(default_directory_search_access());
     };
     effective_directory_search_access_with_app_root(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         &parent_path,
@@ -2634,12 +2634,12 @@ fn sync_title_after_path_change(doc: &mut KnowledgeDocument, new_path: &str) -> 
 }
 
 pub fn default_document_create_patch(
-    working_dir: &str,
+    workspace_root: &str,
     _doc_type: KnowledgeType,
     path: &str,
 ) -> Result<KnowledgeDocumentPatch, String> {
     let normalized_path = normalize_relative_path(path)?;
-    let _ = working_dir;
+    let _ = workspace_root;
 
     Ok(KnowledgeDocumentPatch {
         title: Some(default_document_title_from_path(&normalized_path)?),
@@ -2651,11 +2651,11 @@ pub fn default_document_create_patch(
 }
 
 pub fn create_directory(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<String, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let relative_path = normalize_relative_directory_path(path)?;
     if doc_type == KnowledgeType::Reference
@@ -2663,7 +2663,7 @@ pub fn create_directory(
     {
         return Err("Unity 托管参考目录由导入流程维护。".to_string());
     }
-    let target = knowledge_root(working_dir)
+    let target = knowledge_root(workspace_root)
         .join(doc_type.as_str())
         .join(&relative_path);
     std::fs::create_dir_all(&target).map_err(|e| {
@@ -2736,18 +2736,18 @@ pub fn merge_directory_config_patch(
 }
 
 fn write_directory_config_record(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     config: KnowledgeDirectoryConfig,
     external_sources: Vec<KnowledgeExternalSource>,
 ) -> Result<KnowledgeDirectoryConfigRecord, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let dir_path = normalize_relative_directory_path(path)?;
-    let target_dir = type_root(working_dir, doc_type).join(&dir_path);
+    let target_dir = type_root(workspace_root, doc_type).join(&dir_path);
     let managed_virtual_directory = doc_type == KnowledgeType::Reference
-        && crate::unity_docs::managed_directory_exists(working_dir, &dir_path)?;
+        && crate::unity_docs::managed_directory_exists(workspace_root, &dir_path)?;
     if !target_dir.is_dir() && !managed_virtual_directory {
         return Err(format!("Knowledge directory not found: {}", dir_path));
     }
@@ -2758,7 +2758,7 @@ fn write_directory_config_record(
         );
     }
 
-    let (config_file, config_rel) = directory_config_path(working_dir, doc_type, &dir_path)?;
+    let (config_file, config_rel) = directory_config_path(workspace_root, doc_type, &dir_path)?;
     if let Some(parent) = config_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -2790,7 +2790,7 @@ fn write_directory_config_record(
         .unwrap_or_else(now_millis);
     let parent_config = relative_parent_directory(&dir_path)
         .as_deref()
-        .map(|parent_path| read_directory_config(working_dir, doc_type, parent_path))
+        .map(|parent_path| read_directory_config(workspace_root, doc_type, parent_path))
         .transpose()?;
     let (_, inject_mode_source, ai_config_source) =
         inherited_directory_config_and_sources(doc_type, parent_config.as_ref());
@@ -2832,23 +2832,23 @@ fn write_directory_config_record(
 }
 
 pub fn update_directory_config(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     config: KnowledgeDirectoryConfig,
 ) -> Result<KnowledgeDirectoryConfigRecord, String> {
     let dir_path = normalize_relative_directory_path(path)?;
-    let (config_file, _) = directory_config_path(working_dir, doc_type, &dir_path)?;
+    let (config_file, _) = directory_config_path(workspace_root, doc_type, &dir_path)?;
     let external_sources = if config_file.is_file() {
         read_stored_directory_config(&config_file)?.external_sources
     } else {
         Vec::new()
     };
-    write_directory_config_record(working_dir, doc_type, &dir_path, config, external_sources)
+    write_directory_config_record(workspace_root, doc_type, &dir_path, config, external_sources)
 }
 
 pub fn update_directory_external_sources(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     external_sources: Vec<KnowledgeExternalSource>,
@@ -2856,9 +2856,9 @@ pub fn update_directory_external_sources(
     if doc_type != KnowledgeType::Reference {
         return Err("Directory external sources are only supported for reference".to_string());
     }
-    let existing = read_directory_config(working_dir, doc_type, path)?;
+    let existing = read_directory_config(workspace_root, doc_type, path)?;
     write_directory_config_record(
-        working_dir,
+        workspace_root,
         doc_type,
         &existing.path,
         existing.config,
@@ -2981,15 +2981,15 @@ pub fn apply_document_content_edits(
 }
 
 pub fn edit_document(
-    working_dir: &str,
+    workspace_root: &str,
     path: &str,
     doc_type_hint: Option<KnowledgeType>,
     patch: KnowledgeDocumentPatch,
 ) -> Result<KnowledgeDocument, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let mut doc = locate_document(
-        working_dir,
+        workspace_root,
         &KnowledgeUpdateRequest {
             op: KnowledgeUpdateOp::Edit,
             path: path.to_string(),
@@ -3088,9 +3088,9 @@ pub fn edit_document(
     ensure_summary_state(&mut doc);
     ensure_maintenance_rules(&mut doc);
     ensure_skill_defaults(&mut doc);
-    let saved = save_document(working_dir, doc)?;
+    let saved = save_document(workspace_root, doc)?;
     if saved.doc_type != old_type || saved.path != old_path {
-        let old_file = document_path(working_dir, old_type, &old_path)?;
+        let old_file = document_path(workspace_root, old_type, &old_path)?;
         if old_file.is_file() {
             let _ = std::fs::remove_file(old_file);
         }
@@ -3645,12 +3645,12 @@ pub fn ensure_directory_path(path: &str) -> Result<String, String> {
 }
 
 pub fn move_directory(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     source_path: &str,
     target_path: &str,
 ) -> Result<String, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let source_rel = normalize_relative_directory_path(source_path)?;
     let target_rel = normalize_relative_directory_path(target_path)?;
@@ -3661,7 +3661,7 @@ pub fn move_directory(
         return Err("Knowledge directory cannot be moved into its own descendant".to_string());
     }
 
-    let type_root = type_root(working_dir, doc_type);
+    let type_root = type_root(workspace_root, doc_type);
     let source_dir = type_root.join(&source_rel);
     if !source_dir.is_dir() {
         return Err(format!("Knowledge directory not found: {}", source_rel));
@@ -3727,7 +3727,7 @@ pub fn move_directory(
             format!("{}/{}", target_rel, relative_str)
         };
 
-        let doc = load_document_by_path(working_dir, doc_type, &old_doc_path)?;
+        let doc = load_document_by_path(workspace_root, doc_type, &old_doc_path)?;
         if doc.read_only {
             return Err(format!(
                 "Cannot move knowledge directory because '{}' is read-only",
@@ -3750,7 +3750,7 @@ pub fn move_directory(
 
     for (old_doc_path, new_doc_path) in documents {
         update_document(
-            working_dir,
+            workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateMeta,
                 path: old_doc_path,
@@ -3842,22 +3842,22 @@ pub fn move_directory(
 }
 
 pub fn delete_directory(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<String, String> {
-    delete_directory_internal(working_dir, doc_type, path, false)
+    delete_directory_internal(workspace_root, doc_type, path, false)
 }
 
 fn load_document_for_directory_delete(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     rel_path: &str,
 ) -> Result<KnowledgeDocument, String> {
-    match load_document_by_path(working_dir, doc_type, rel_path) {
+    match load_document_by_path(workspace_root, doc_type, rel_path) {
         Ok(document) => Ok(document),
         Err(load_error) => {
-            let file_path = document_path(working_dir, doc_type, rel_path)?;
+            let file_path = document_path(workspace_root, doc_type, rel_path)?;
             let raw = read_raw_document(&file_path)?;
             let mut document = parse_document(&raw, None).map_err(|parse_error| {
                 format!(
@@ -3865,7 +3865,7 @@ fn load_document_for_directory_delete(
                     rel_path, load_error, parse_error
                 )
             })?;
-            resolve_document_inheritance(Some(working_dir), &mut document)?;
+            resolve_document_inheritance(Some(workspace_root), &mut document)?;
             ensure_maintenance_rules(&mut document);
             validate_document(&document)?;
             Ok(document)
@@ -3874,15 +3874,15 @@ fn load_document_for_directory_delete(
 }
 
 fn delete_directory_internal(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     allow_read_only_documents: bool,
 ) -> Result<String, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let target_rel = normalize_relative_directory_path(path)?;
-    let type_root = type_root(working_dir, doc_type);
+    let type_root = type_root(workspace_root, doc_type);
     let target_dir = type_root.join(&target_rel);
     if !target_dir.is_dir() {
         return Err(format!("Knowledge directory not found: {}", target_rel));
@@ -3924,7 +3924,7 @@ fn delete_directory_internal(
             .map_err(|e| format!("Failed to resolve directory delete path: {}", e))?
             .to_string_lossy()
             .replace('\\', "/");
-        let doc = load_document_for_directory_delete(working_dir, doc_type, &doc_path)?;
+        let doc = load_document_for_directory_delete(workspace_root, doc_type, &doc_path)?;
         if doc.read_only && !allow_read_only_documents {
             return Err(format!(
                 "Cannot delete knowledge directory because '{}' is read-only",
@@ -3955,12 +3955,12 @@ fn delete_directory_internal(
 }
 
 pub fn delete_directory_config_sidecars(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<(), String> {
     let dir_path = normalize_relative_directory_path(path)?;
-    let type_root = type_root(working_dir, doc_type);
+    let type_root = type_root(workspace_root, doc_type);
     let (current_config_path, _) = directory_config_path_in_type_root(&type_root, &dir_path)?;
     let (legacy_config_path, _) = legacy_directory_config_path_in_type_root(&type_root, &dir_path)?;
 
@@ -3986,11 +3986,11 @@ pub fn delete_directory_config_sidecars(
 }
 
 pub fn delete_external_reference_directory(
-    working_dir: &str,
+    workspace_root: &str,
     path: &str,
 ) -> Result<String, String> {
     let target_rel = normalize_relative_directory_path(path)?;
-    let record = read_directory_config(working_dir, KnowledgeType::Reference, &target_rel)?;
+    let record = read_directory_config(workspace_root, KnowledgeType::Reference, &target_rel)?;
     if record.external_sources.is_empty() {
         return Err("Reference directory is not bound to an external source".to_string());
     }
@@ -4005,7 +4005,7 @@ pub fn delete_external_reference_directory(
                 .to_string(),
         );
     }
-    delete_directory_internal(working_dir, KnowledgeType::Reference, &target_rel, true)
+    delete_directory_internal(workspace_root, KnowledgeType::Reference, &target_rel, true)
 }
 
 pub fn read_document_from_file(path: &Path) -> Result<KnowledgeDocument, String> {
@@ -4025,17 +4025,17 @@ pub fn read_document_from_file(path: &Path) -> Result<KnowledgeDocument, String>
 }
 
 pub fn load_document_by_path(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     rel_path: &str,
 ) -> Result<KnowledgeDocument, String> {
     let normalized_path = normalize_relative_path(rel_path)?;
     if doc_type == KnowledgeType::Reference {
-        if let Some(document) = unity_docs::load_managed_document(working_dir, &normalized_path)? {
+        if let Some(document) = unity_docs::load_managed_document(workspace_root, &normalized_path)? {
             return Ok(document);
         }
     }
-    let path = document_path(working_dir, doc_type, &normalized_path)?;
+    let path = document_path(workspace_root, doc_type, &normalized_path)?;
     if !path.is_file() {
         return Err(format!(
             "Knowledge document not found: {}/{}",
@@ -4051,7 +4051,7 @@ pub fn load_document_by_path(
         )
     })?;
     let mut document = parse_document(&content, Some(&normalized_path))?;
-    resolve_document_inheritance(Some(working_dir), &mut document)?;
+    resolve_document_inheritance(Some(workspace_root), &mut document)?;
     ensure_maintenance_rules(&mut document);
     validate_document(&document)?;
     Ok(document)
@@ -4267,12 +4267,12 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 }
 
 fn should_skip_workspace_managed_reference_dir(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     type_root: &Path,
     candidate_path: &Path,
 ) -> bool {
-    if doc_type != KnowledgeType::Reference || !crate::unity_docs::has_managed_store(working_dir) {
+    if doc_type != KnowledgeType::Reference || !crate::unity_docs::has_managed_store(workspace_root) {
         return false;
     }
     let Ok(relative) = candidate_path.strip_prefix(type_root) else {
@@ -4308,14 +4308,14 @@ fn collect_directories_from_root(
 }
 
 pub fn load_document_by_id(
-    working_dir: &str,
+    workspace_root: &str,
     id: &str,
 ) -> Result<Option<KnowledgeDocument>, String> {
     for doc_type in KnowledgeType::all() {
-        let items = list_documents(working_dir, Some(doc_type), None)?;
+        let items = list_documents(workspace_root, Some(doc_type), None)?;
         for item in items {
             if item.id == id {
-                return load_document_by_path(working_dir, doc_type, &item.path).map(Some);
+                return load_document_by_path(workspace_root, doc_type, &item.path).map(Some);
             }
         }
     }
@@ -4323,20 +4323,20 @@ pub fn load_document_by_id(
 }
 
 pub fn load_document_by_path_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     rel_path: &str,
 ) -> Result<KnowledgeDocument, String> {
     let normalized_path = normalize_relative_path(rel_path)?;
     if doc_type == KnowledgeType::Reference {
-        if let Some(document) = unity_docs::load_managed_document(working_dir, &normalized_path)? {
+        if let Some(document) = unity_docs::load_managed_document(workspace_root, &normalized_path)? {
             return Ok(document);
         }
     }
-    let workspace_path = document_path(working_dir, doc_type, &normalized_path)?;
+    let workspace_path = document_path(workspace_root, doc_type, &normalized_path)?;
     if workspace_path.is_file() {
-        return load_document_by_path(working_dir, doc_type, &normalized_path);
+        return load_document_by_path(workspace_root, doc_type, &normalized_path);
     }
 
     if let Some(app_root) = app_knowledge_dir {
@@ -4356,13 +4356,13 @@ pub fn load_document_by_path_with_app_root(
 }
 
 pub fn list_documents_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
 ) -> Result<Vec<KnowledgeListItem>, String> {
     Ok(
-        load_documents_with_app_root(working_dir, app_knowledge_dir, doc_type, path_prefix)?
+        load_documents_with_app_root(workspace_root, app_knowledge_dir, doc_type, path_prefix)?
             .into_iter()
             .map(document_to_list_item)
             .collect(),
@@ -4370,14 +4370,14 @@ pub fn list_documents_with_app_root(
 }
 
 pub fn list_documents_with_app_root_excluding_prefixes(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
     excluded_prefixes: &[(KnowledgeType, String)],
 ) -> Result<Vec<KnowledgeListItem>, String> {
     Ok(load_documents_with_app_root_excluding_prefixes(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         path_prefix,
@@ -4389,13 +4389,13 @@ pub fn list_documents_with_app_root_excluding_prefixes(
 }
 
 pub fn load_documents_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
 ) -> Result<Vec<KnowledgeDocument>, String> {
     load_documents_with_app_root_excluding_prefixes(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         path_prefix,
@@ -4404,14 +4404,14 @@ pub fn load_documents_with_app_root(
 }
 
 pub fn load_documents_with_app_root_excluding_prefixes(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
     excluded_prefixes: &[(KnowledgeType, String)],
 ) -> Result<Vec<KnowledgeDocument>, String> {
-    ensure_knowledge_roots(working_dir)?;
-    ensure_memory_builtin_documents(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
+    ensure_memory_builtin_documents(workspace_root)?;
 
     let mut documents = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -4419,20 +4419,20 @@ pub fn load_documents_with_app_root_excluding_prefixes(
         .map(|value| vec![value])
         .unwrap_or_else(|| KnowledgeType::all().to_vec());
     if types.iter().any(|value| *value == KnowledgeType::Reference) {
-        unity_docs::ensure_managed_store_available(working_dir)?;
+        unity_docs::ensure_managed_store_available(workspace_root)?;
     }
     let normalized_prefix = path_prefix.map(normalize_relative_prefix).transpose()?;
     let normalized_exclusions = normalize_excluded_prefixes(excluded_prefixes)?;
-    let workspace_knowledge_root = knowledge_root(working_dir);
+    let workspace_knowledge_root = knowledge_root(workspace_root);
 
     for ty in types {
-        let root = type_root(working_dir, ty);
+        let root = type_root(workspace_root, ty);
         if root.is_dir() {
             let relative_paths = WalkDir::new(&root)
                 .into_iter()
                 .filter_entry(|entry| {
                     !should_skip_workspace_managed_reference_dir(
-                        working_dir,
+                        workspace_root,
                         ty,
                         &root,
                         entry.path(),
@@ -4452,7 +4452,7 @@ pub fn load_documents_with_app_root_excluding_prefixes(
                         .to_string_lossy()
                         .replace('\\', "/");
                     if ty == KnowledgeType::Reference
-                        && unity_docs::has_managed_store(working_dir)
+                        && unity_docs::has_managed_store(workspace_root)
                         && unity_docs::is_unity_reference_managed_relative_path(&relative_path)
                     {
                         return None;
@@ -4487,7 +4487,7 @@ pub fn load_documents_with_app_root_excluding_prefixes(
             )
         {
             for doc in
-                unity_docs::list_managed_documents(working_dir, normalized_prefix.as_deref())?
+                unity_docs::list_managed_documents(workspace_root, normalized_prefix.as_deref())?
             {
                 if path_is_excluded(ty, &doc.path, &normalized_exclusions) {
                     continue;
@@ -4527,7 +4527,7 @@ pub fn load_documents_with_app_root_excluding_prefixes(
 }
 
 pub fn read_document_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     path: &str,
@@ -4535,13 +4535,13 @@ pub fn read_document_with_app_root(
 ) -> Result<KnowledgeReadResult, String> {
     let normalized_path = normalize_relative_path(path)?;
     let document = load_document_by_path_with_app_root(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         &normalized_path,
     )?;
     let file_path = resolve_document_file_path_with_app_root(
-        working_dir,
+        workspace_root,
         app_knowledge_dir,
         doc_type,
         &normalized_path,
@@ -4549,19 +4549,19 @@ pub fn read_document_with_app_root(
     .ok();
     let file_metadata = file_path
         .as_deref()
-        .map(|value| build_document_file_metadata(Some(working_dir), value, &document));
+        .map(|value| build_document_file_metadata(Some(workspace_root), value, &document));
     build_read_result(document, part, file_metadata)
 }
 
 pub fn read_directory_config_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<KnowledgeDirectoryConfigRecord, String> {
     let normalized_path = normalize_relative_directory_path(path)?;
-    if directory_exists(working_dir, doc_type, &normalized_path)? {
-        return read_directory_config(working_dir, doc_type, &normalized_path);
+    if directory_exists(workspace_root, doc_type, &normalized_path)? {
+        return read_directory_config(workspace_root, doc_type, &normalized_path);
     }
 
     if let Some(app_root) = app_knowledge_dir {
@@ -4580,22 +4580,22 @@ pub fn read_directory_config_with_app_root(
 }
 
 pub fn list_documents(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: Option<KnowledgeType>,
     path_prefix: Option<&str>,
 ) -> Result<Vec<KnowledgeListItem>, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
     let mut items = Vec::new();
     let types: Vec<_> = doc_type
         .map(|value| vec![value])
         .unwrap_or_else(|| KnowledgeType::all().to_vec());
     if types.iter().any(|value| *value == KnowledgeType::Reference) {
-        unity_docs::ensure_managed_store_available(working_dir)?;
+        unity_docs::ensure_managed_store_available(workspace_root)?;
     }
     let normalized_prefix = path_prefix.map(normalize_relative_prefix).transpose()?;
 
     for ty in types {
-        let root = type_root(working_dir, ty);
+        let root = type_root(workspace_root, ty);
         if !root.is_dir() {
             continue;
         }
@@ -4603,7 +4603,7 @@ pub fn list_documents(
         for entry in WalkDir::new(&root)
             .into_iter()
             .filter_entry(|entry| {
-                !should_skip_workspace_managed_reference_dir(working_dir, ty, &root, entry.path())
+                !should_skip_workspace_managed_reference_dir(workspace_root, ty, &root, entry.path())
             })
             .filter_map(Result::ok)
         {
@@ -4616,12 +4616,12 @@ pub fn list_documents(
             };
             let relative_path = relative_path.to_string_lossy().replace('\\', "/");
             if ty == KnowledgeType::Reference
-                && unity_docs::has_managed_store(working_dir)
+                && unity_docs::has_managed_store(workspace_root)
                 && unity_docs::is_unity_reference_managed_relative_path(&relative_path)
             {
                 continue;
             }
-            let Ok(doc) = load_document_by_path(working_dir, ty, &relative_path) else {
+            let Ok(doc) = load_document_by_path(workspace_root, ty, &relative_path) else {
                 continue;
             };
             if let Some(prefix) = normalized_prefix.as_ref() {
@@ -4634,7 +4634,7 @@ pub fn list_documents(
 
         if ty == KnowledgeType::Reference {
             for doc in
-                unity_docs::list_managed_documents(working_dir, normalized_prefix.as_deref())?
+                unity_docs::list_managed_documents(workspace_root, normalized_prefix.as_deref())?
             {
                 items.push(document_to_list_item(doc));
             }
@@ -4651,13 +4651,13 @@ pub fn list_documents(
     Ok(items)
 }
 
-pub fn list_directories(working_dir: &str, doc_type: KnowledgeType) -> Result<Vec<String>, String> {
-    ensure_knowledge_roots(working_dir)?;
+pub fn list_directories(workspace_root: &str, doc_type: KnowledgeType) -> Result<Vec<String>, String> {
+    ensure_knowledge_roots(workspace_root)?;
     if doc_type == KnowledgeType::Reference {
-        crate::unity_docs::ensure_managed_store_available(working_dir)?;
+        crate::unity_docs::ensure_managed_store_available(workspace_root)?;
     }
 
-    let type_root = knowledge_root(working_dir).join(doc_type.as_str());
+    let type_root = knowledge_root(workspace_root).join(doc_type.as_str());
     let mut directories = Vec::new();
     if type_root.is_dir() {
         for entry in WalkDir::new(&type_root)
@@ -4665,7 +4665,7 @@ pub fn list_directories(working_dir: &str, doc_type: KnowledgeType) -> Result<Ve
             .into_iter()
             .filter_entry(|entry| {
                 !should_skip_workspace_managed_reference_dir(
-                    working_dir,
+                    workspace_root,
                     doc_type,
                     &type_root,
                     entry.path(),
@@ -4687,7 +4687,7 @@ pub fn list_directories(working_dir: &str, doc_type: KnowledgeType) -> Result<Ve
         }
     }
     if doc_type == KnowledgeType::Reference {
-        directories.extend(crate::unity_docs::list_managed_directories(working_dir)?);
+        directories.extend(crate::unity_docs::list_managed_directories(workspace_root)?);
     }
 
     directories.sort();
@@ -4696,14 +4696,14 @@ pub fn list_directories(working_dir: &str, doc_type: KnowledgeType) -> Result<Ve
 }
 
 pub fn list_directories_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
 ) -> Result<Vec<String>, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     let mut directories = std::collections::BTreeSet::new();
-    for directory in list_directories(working_dir, doc_type)? {
+    for directory in list_directories(workspace_root, doc_type)? {
         directories.insert(directory);
     }
     if let Some(app_root) = app_knowledge_dir {
@@ -4714,23 +4714,23 @@ pub fn list_directories_with_app_root(
 }
 
 pub fn list_directory_configs(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
 ) -> Result<Vec<KnowledgeDirectoryConfigRecord>, String> {
-    let directories = list_directories(working_dir, doc_type)?;
+    let directories = list_directories(workspace_root, doc_type)?;
     let mut records = Vec::with_capacity(directories.len());
     for directory in directories {
-        records.push(read_directory_config(working_dir, doc_type, &directory)?);
+        records.push(read_directory_config(workspace_root, doc_type, &directory)?);
     }
     Ok(records)
 }
 
 pub fn list_reference_external_directory_bindings(
-    working_dir: &str,
+    workspace_root: &str,
 ) -> Result<Vec<KnowledgeExternalDirectoryBinding>, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
-    let reference_root = type_root(working_dir, KnowledgeType::Reference);
+    let reference_root = type_root(workspace_root, KnowledgeType::Reference);
     if !reference_root.is_dir() {
         return Ok(Vec::new());
     }
@@ -4772,10 +4772,10 @@ pub fn list_reference_external_directory_bindings(
 }
 
 pub fn find_reference_directory_by_external_provider(
-    working_dir: &str,
+    workspace_root: &str,
     provider: KnowledgeSourceProvider,
 ) -> Result<Option<KnowledgeDirectoryConfigRecord>, String> {
-    let directories = list_directory_configs(working_dir, KnowledgeType::Reference)?;
+    let directories = list_directory_configs(workspace_root, KnowledgeType::Reference)?;
     Ok(directories.into_iter().find(|record| {
         record
             .external_sources
@@ -4785,15 +4785,15 @@ pub fn find_reference_directory_by_external_provider(
 }
 
 pub fn list_directory_configs_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
 ) -> Result<Vec<KnowledgeDirectoryConfigRecord>, String> {
-    let directories = list_directories_with_app_root(working_dir, app_knowledge_dir, doc_type)?;
+    let directories = list_directories_with_app_root(workspace_root, app_knowledge_dir, doc_type)?;
     let mut records = Vec::with_capacity(directories.len());
     for directory in directories {
         records.push(read_directory_config_with_app_root(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             doc_type,
             &directory,
@@ -4803,12 +4803,12 @@ pub fn list_directory_configs_with_app_root(
 }
 
 pub fn list_directory_configs_with_app_root_excluding_prefixes(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     excluded_prefixes: &[String],
 ) -> Result<Vec<KnowledgeDirectoryConfigRecord>, String> {
-    let directories = list_directories_with_app_root(working_dir, app_knowledge_dir, doc_type)?;
+    let directories = list_directories_with_app_root(workspace_root, app_knowledge_dir, doc_type)?;
     let normalized_exclusions = excluded_prefixes
         .iter()
         .map(|prefix| normalize_relative_prefix(prefix))
@@ -4820,7 +4820,7 @@ pub fn list_directory_configs_with_app_root_excluding_prefixes(
     let mut records = Vec::with_capacity(filtered.len());
     for directory in filtered {
         records.push(read_directory_config_with_app_root(
-            working_dir,
+            workspace_root,
             app_knowledge_dir,
             doc_type,
             &directory,
@@ -5035,7 +5035,7 @@ fn extract_snippet(text: &str, query: &str, terms: &[String]) -> String {
 }
 
 pub fn query_documents(
-    working_dir: &str,
+    workspace_root: &str,
     query: &str,
     types: Option<&[KnowledgeType]>,
     limit: usize,
@@ -5046,9 +5046,9 @@ pub fn query_documents(
         .unwrap_or_else(|| KnowledgeType::all().to_vec());
 
     for ty in query_types {
-        let docs = list_documents(working_dir, Some(ty), None)?;
+        let docs = list_documents(workspace_root, Some(ty), None)?;
         for item in docs {
-            let Ok(doc) = load_document_by_path(working_dir, ty, &item.path) else {
+            let Ok(doc) = load_document_by_path(workspace_root, ty, &item.path) else {
                 continue;
             };
             let Some((score, snippet, matched_section, matched_terms)) =
@@ -5127,13 +5127,13 @@ pub fn save_document_to_path(
 }
 
 pub fn save_document(
-    working_dir: &str,
+    workspace_root: &str,
     mut document: KnowledgeDocument,
 ) -> Result<KnowledgeDocument, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
     document.path = normalize_relative_path(&document.path)?;
     sync_title_with_document_path(&mut document)?;
-    resolve_document_inheritance(Some(working_dir), &mut document)?;
+    resolve_document_inheritance(Some(workspace_root), &mut document)?;
     apply_external_source_defaults(&mut document);
     apply_read_only_policy(&mut document);
     ensure_summary_state(&mut document);
@@ -5141,7 +5141,7 @@ pub fn save_document(
     ensure_skill_defaults(&mut document);
     validate_document(&document)?;
 
-    let path = document_path(working_dir, document.doc_type, &document.path)?;
+    let path = document_path(workspace_root, document.doc_type, &document.path)?;
     write_document_file(&path, document)
 }
 
@@ -5348,11 +5348,11 @@ fn write_document_preserving_layout(
 }
 
 fn locate_document(
-    working_dir: &str,
+    workspace_root: &str,
     request: &KnowledgeUpdateRequest,
 ) -> Result<KnowledgeDocument, String> {
     if let Some(id) = request.id.as_ref() {
-        if let Some(doc) = load_document_by_id(working_dir, id)? {
+        if let Some(doc) = load_document_by_id(workspace_root, id)? {
             return Ok(doc);
         }
     }
@@ -5360,14 +5360,14 @@ fn locate_document(
         .doc_type
         .or_else(|| guess_type_from_path(&request.path))
         .ok_or_else(|| "knowledge update requires type or a type-prefixed path".to_string())?;
-    load_document_by_path(working_dir, doc_type, &request.path)
+    load_document_by_path(workspace_root, doc_type, &request.path)
 }
 
 pub fn update_document(
-    working_dir: &str,
+    workspace_root: &str,
     request: KnowledgeUpdateRequest,
 ) -> Result<KnowledgeDocument, String> {
-    ensure_knowledge_roots(working_dir)?;
+    ensure_knowledge_roots(workspace_root)?;
 
     match request.op {
         KnowledgeUpdateOp::Create => {
@@ -5452,10 +5452,10 @@ pub fn update_document(
             }
             ensure_maintenance_rules(&mut doc);
             ensure_skill_defaults(&mut doc);
-            save_document(working_dir, doc)
+            save_document(workspace_root, doc)
         }
         KnowledgeUpdateOp::Edit => edit_document(
-            working_dir,
+            workspace_root,
             &request.path,
             request.doc_type,
             KnowledgeDocumentPatch {
@@ -5483,11 +5483,11 @@ pub fn update_document(
             },
         ),
         KnowledgeUpdateOp::Delete => {
-            let doc = locate_document(working_dir, &request)?;
+            let doc = locate_document(workspace_root, &request)?;
             if doc.read_only {
                 return Err("Cannot delete a read-only knowledge document".to_string());
             }
-            let path = document_path(working_dir, doc.doc_type, &doc.path)?;
+            let path = document_path(workspace_root, doc.doc_type, &doc.path)?;
             std::fs::remove_file(&path).map_err(|e| {
                 format!(
                     "Failed to delete knowledge document '{}': {}",
@@ -5498,7 +5498,7 @@ pub fn update_document(
             Ok(doc)
         }
         KnowledgeUpdateOp::UpdateMeta => {
-            let mut doc = locate_document(working_dir, &request)?;
+            let mut doc = locate_document(workspace_root, &request)?;
             if doc.read_only
                 && (is_read_only_locked_by_source(&doc) || request.read_only != Some(false))
             {
@@ -5571,9 +5571,9 @@ pub fn update_document(
             ensure_summary_state(&mut doc);
             ensure_maintenance_rules(&mut doc);
             ensure_skill_defaults(&mut doc);
-            let saved = save_document(working_dir, doc)?;
+            let saved = save_document(workspace_root, doc)?;
             if saved.doc_type != old_type || saved.path != old_path {
-                let old_file = document_path(working_dir, old_type, &old_path)?;
+                let old_file = document_path(workspace_root, old_type, &old_path)?;
                 if old_file.is_file() {
                     let _ = std::fs::remove_file(old_file);
                 }
@@ -5581,7 +5581,7 @@ pub fn update_document(
             Ok(saved)
         }
         KnowledgeUpdateOp::UpdateSummary => {
-            let mut doc = locate_document(working_dir, &request)?;
+            let mut doc = locate_document(workspace_root, &request)?;
             if doc.read_only {
                 return Err("Cannot update a read-only knowledge document".to_string());
             }
@@ -5590,7 +5590,7 @@ pub fn update_document(
             doc.updated_at = now_millis();
             validate_document(&doc)?;
 
-            let path = document_path(working_dir, doc.doc_type, &doc.path)?;
+            let path = document_path(workspace_root, doc.doc_type, &doc.path)?;
             let raw = read_raw_document(&path)?;
             let (_, body) = split_frontmatter(&raw)?;
             let updated_body = if doc.doc_type == KnowledgeType::Memory {
@@ -5611,7 +5611,7 @@ pub fn update_document(
             Ok(doc)
         }
         KnowledgeUpdateOp::UpdateBody => {
-            let mut doc = locate_document(working_dir, &request)?;
+            let mut doc = locate_document(workspace_root, &request)?;
             if doc.read_only {
                 return Err("Cannot update a read-only knowledge document".to_string());
             }
@@ -5622,7 +5622,7 @@ pub fn update_document(
             doc.updated_at = now_millis();
             validate_document(&doc)?;
 
-            let path = document_path(working_dir, doc.doc_type, &doc.path)?;
+            let path = document_path(workspace_root, doc.doc_type, &doc.path)?;
             let raw = read_raw_document(&path)?;
             let (_, body) = split_frontmatter(&raw)?;
             let updated_body = if doc.doc_type == KnowledgeType::Memory {
@@ -5637,7 +5637,7 @@ pub fn update_document(
             Ok(doc)
         }
         KnowledgeUpdateOp::UpdateRules => {
-            let mut doc = locate_document(working_dir, &request)?;
+            let mut doc = locate_document(workspace_root, &request)?;
             if doc.read_only {
                 return Err("Cannot update a read-only knowledge document".to_string());
             }
@@ -5646,7 +5646,7 @@ pub fn update_document(
             doc.updated_at = now_millis();
             validate_document(&doc)?;
 
-            let path = document_path(working_dir, doc.doc_type, &doc.path)?;
+            let path = document_path(workspace_root, doc.doc_type, &doc.path)?;
             let raw = read_raw_document(&path)?;
             let (_, body) = split_frontmatter(&raw)?;
             let updated_body = if doc.doc_type == KnowledgeType::Memory {
@@ -5670,17 +5670,17 @@ pub fn update_document(
 }
 
 pub fn read_document(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     part: &str,
 ) -> Result<KnowledgeReadResult, String> {
     let normalized_path = normalize_relative_path(path)?;
-    let document = load_document_by_path(working_dir, doc_type, &normalized_path)?;
-    let file_path = document_path(working_dir, doc_type, &normalized_path).ok();
+    let document = load_document_by_path(workspace_root, doc_type, &normalized_path)?;
+    let file_path = document_path(workspace_root, doc_type, &normalized_path).ok();
     let file_metadata = file_path
         .as_deref()
-        .map(|value| build_document_file_metadata(Some(working_dir), value, &document));
+        .map(|value| build_document_file_metadata(Some(workspace_root), value, &document));
     build_read_result(document, part, file_metadata)
 }
 
@@ -5700,12 +5700,12 @@ pub fn read_document_from_root(
 }
 
 pub fn read_document_part(
-    working_dir: &str,
+    workspace_root: &str,
     doc_type: KnowledgeType,
     path: &str,
     part: &str,
 ) -> Result<String, String> {
-    let document = load_document_by_path(working_dir, doc_type, path)?;
+    let document = load_document_by_path(workspace_root, doc_type, path)?;
     let resolved_part = normalize_read_part(part)?;
     Ok(match resolved_part {
         "full" => render_document_body(&document)?,
@@ -5759,12 +5759,12 @@ fn build_read_result(
 }
 
 fn resolve_document_file_path_with_app_root(
-    working_dir: &str,
+    workspace_root: &str,
     app_knowledge_dir: Option<&PathBuf>,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<PathBuf, String> {
-    let workspace_path = document_path(working_dir, doc_type, path)?;
+    let workspace_path = document_path(workspace_root, doc_type, path)?;
     if workspace_path.is_file() {
         return Ok(workspace_path);
     }
@@ -5780,7 +5780,7 @@ fn resolve_document_file_path_with_app_root(
 }
 
 fn build_document_file_metadata(
-    working_dir: Option<&str>,
+    workspace_root: Option<&str>,
     file_path: &Path,
     document: &KnowledgeDocument,
 ) -> KnowledgeDocumentFileMetadata {
@@ -5796,7 +5796,7 @@ fn build_document_file_metadata(
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|value| value.as_millis().min(i64::MAX as u128) as i64);
-    let (last_commit_author, last_commit_at) = working_dir
+    let (last_commit_author, last_commit_at) = workspace_root
         .and_then(|value| read_last_commit_metadata(value, file_path))
         .unwrap_or((None, None));
 
@@ -5833,10 +5833,10 @@ fn estimate_tokens_from_metadata_text(text: &str) -> u64 {
 }
 
 fn read_last_commit_metadata(
-    working_dir: &str,
+    workspace_root: &str,
     file_path: &Path,
 ) -> Option<(Option<String>, Option<i64>)> {
-    let trimmed_working_dir = working_dir.trim();
+    let trimmed_working_dir = workspace_root.trim();
     if trimmed_working_dir.is_empty() {
         return None;
     }
@@ -6037,14 +6037,14 @@ mod tests {
     #[test]
     fn read_document_part_modes_return_expected_sections() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.explicit_maintenance_rules = true;
         doc.maintenance_rules = Some("Keep only durable notes".to_string());
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let full = read_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/core-loop.md",
             "full",
@@ -6061,7 +6061,7 @@ mod tests {
         assert!(full.document.explicit_maintenance_rules);
 
         let summary = read_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/core-loop.md",
             "summary",
@@ -6074,7 +6074,7 @@ mod tests {
         assert!(!summary.document.explicit_maintenance_rules);
 
         let body = read_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/core-loop.md",
             "body",
@@ -6091,11 +6091,11 @@ mod tests {
     #[test]
     fn read_document_rejects_unknown_part() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
 
         let error = read_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/core-loop.md",
             "auto",
@@ -6286,16 +6286,16 @@ Body content
     #[test]
     fn legacy_scope_frontmatter_is_ignored() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let doc = sample_doc();
         let raw = render_document(&doc)
             .expect("render")
             .replace("title: Core Loop\n", "title: Core Loop\nscope: external\n");
 
         let parsed = parse_document(&raw, Some("gameplay/core-loop.md")).expect("parse");
-        save_document(&working_dir, parsed).expect("save legacy scope doc");
+        save_document(&workspace_root, parsed).expect("save legacy scope doc");
         let rewritten = std::fs::read_to_string(
-            document_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            document_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .expect("document path"),
         )
         .expect("read rewritten doc");
@@ -6431,10 +6431,10 @@ Body content
     #[test]
     fn update_body_preserves_meta() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateBody,
                 path: "gameplay/core-loop.md".to_string(),
@@ -6446,7 +6446,7 @@ Body content
         .expect("update");
         assert_eq!(updated.body, "New body");
         let reread =
-            load_document_by_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            load_document_by_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .unwrap();
         assert_eq!(reread.summary.as_deref(), Some("Short summary"));
     }
@@ -6454,17 +6454,17 @@ Body content
     #[test]
     fn update_body_rewrites_malformed_document_with_canonical_content_section() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let raw = render_document(&sample_doc())
             .expect("render")
             .replace("## Content\nBody content\n", "# 输出方式\n- 直接给结论\n");
-        let path = document_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+        let path = document_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
             .expect("document path");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
         std::fs::write(&path, raw).expect("write malformed document");
 
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateBody,
                 path: "gameplay/core-loop.md".to_string(),
@@ -6481,7 +6481,7 @@ Body content
         assert!(rewritten.contains("## Content\n# 交付方式\n- 先给结论\n- 再补依据\n"));
 
         let reread =
-            load_document_by_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            load_document_by_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .expect("reload");
         assert_eq!(reread.summary.as_deref(), Some("Short summary"));
         assert_eq!(reread.body, "# 交付方式\n- 先给结论\n- 再补依据");
@@ -6490,11 +6490,11 @@ Body content
     #[test]
     fn update_memory_body_rewrites_document_with_comment_blocks() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_memory_doc()).expect("save memory");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_memory_doc()).expect("save memory");
 
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateBody,
                 path: MEMORY_USER_PREFERENCE_PATH.to_string(),
@@ -6509,7 +6509,7 @@ Body content
 
         let raw = std::fs::read_to_string(
             document_path(
-                &working_dir,
+                &workspace_root,
                 KnowledgeType::Memory,
                 MEMORY_USER_PREFERENCE_PATH,
             )
@@ -6525,15 +6525,15 @@ Body content
     #[test]
     fn save_document_preserves_disabled_summary_and_rules_in_frontmatter_cache() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.summary_enabled = false;
         doc.explicit_maintenance_rules = false;
         doc.maintenance_rules = Some("Keep only durable notes".to_string());
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let raw = std::fs::read_to_string(
-            document_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md").unwrap(),
+            document_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md").unwrap(),
         )
         .expect("read raw");
         assert!(raw.contains("summaryCache: Short summary"));
@@ -6542,7 +6542,7 @@ Body content
         assert!(!raw.contains("## Maintenance Rules"));
 
         let reread =
-            load_document_by_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            load_document_by_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .expect("reload");
         assert!(!reread.summary_enabled);
         assert_eq!(reread.summary.as_deref(), Some("Short summary"));
@@ -6556,14 +6556,14 @@ Body content
     #[test]
     fn update_meta_preserves_cached_summary_and_rules_when_switches_turn_off() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.explicit_maintenance_rules = true;
         doc.maintenance_rules = Some("Keep only durable notes".to_string());
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateMeta,
                 path: "gameplay/core-loop.md".to_string(),
@@ -6584,7 +6584,7 @@ Body content
         );
 
         let reread =
-            load_document_by_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            load_document_by_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .expect("reload");
         assert!(!reread.summary_enabled);
         assert_eq!(reread.summary.as_deref(), Some("Short summary"));
@@ -6598,9 +6598,9 @@ Body content
     #[test]
     fn create_memory_document_defaults_to_auto_with_rules() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let created = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::Create,
                 path: "project-understanding.md".to_string(),
@@ -6625,16 +6625,16 @@ Body content
     #[test]
     fn directory_config_uses_sibling_locus_meta_path() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("memory")
                 .join("project-structure"),
         )
         .unwrap();
 
         let saved = update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             "project-structure",
             sample_directory_config(),
@@ -6642,12 +6642,12 @@ Body content
         .expect("save config");
 
         assert_eq!(saved.config_path, "project-structure.locus-meta");
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("memory")
             .join("project-structure.locus-meta")
             .is_file());
         let raw = std::fs::read_to_string(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("memory")
                 .join("project-structure.locus-meta"),
         )
@@ -6664,23 +6664,23 @@ Body content
     #[test]
     fn reference_directory_external_sources_are_preserved_across_config_updates() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("reference")
                 .join("feishu-knowledge-base"),
         )
         .unwrap();
 
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "feishu-knowledge-base",
             sample_directory_config(),
         )
         .expect("save reference config");
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "feishu-knowledge-base",
             vec![KnowledgeExternalSource {
@@ -6695,7 +6695,7 @@ Body content
         let mut updated = sample_directory_config();
         updated.summary = "Updated summary".to_string();
         let record = update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "feishu-knowledge-base",
             updated,
@@ -6714,7 +6714,7 @@ Body content
         );
 
         let raw = std::fs::read_to_string(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("reference")
                 .join("feishu-knowledge-base.locus-meta"),
         )
@@ -6725,21 +6725,21 @@ Body content
     #[test]
     fn directory_external_sources_are_restricted_to_reference() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         for (doc_type, path) in [
             (KnowledgeType::Design, "combat"),
             (KnowledgeType::Memory, "project-structure"),
             (KnowledgeType::Skill, "workflows"),
         ] {
-            std::fs::create_dir_all(type_root(&working_dir, doc_type).join(path))
+            std::fs::create_dir_all(type_root(&workspace_root, doc_type).join(path))
                 .expect("create directory");
 
-            update_directory_config(&working_dir, doc_type, path, sample_directory_config())
+            update_directory_config(&workspace_root, doc_type, path, sample_directory_config())
                 .expect("save config");
 
             let error = update_directory_external_sources(
-                &working_dir,
+                &workspace_root,
                 doc_type,
                 path,
                 vec![KnowledgeExternalSource {
@@ -6761,13 +6761,13 @@ Body content
     #[test]
     fn find_reference_directory_by_external_provider_returns_matching_directory() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         for path in ["unity-official-docs", "feishu-knowledge-base"] {
-            std::fs::create_dir_all(knowledge_root(&working_dir).join("reference").join(path))
+            std::fs::create_dir_all(knowledge_root(&workspace_root).join("reference").join(path))
                 .expect("create reference directory");
             update_directory_config(
-                &working_dir,
+                &workspace_root,
                 KnowledgeType::Reference,
                 path,
                 sample_directory_config(),
@@ -6776,7 +6776,7 @@ Body content
         }
 
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "unity-official-docs",
             vec![KnowledgeExternalSource {
@@ -6788,7 +6788,7 @@ Body content
         )
         .expect("bind unity source");
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "feishu-knowledge-base",
             vec![KnowledgeExternalSource {
@@ -6801,7 +6801,7 @@ Body content
         .expect("bind feishu source");
 
         let matched = find_reference_directory_by_external_provider(
-            &working_dir,
+            &workspace_root,
             KnowledgeSourceProvider::Unity,
         )
         .expect("find unity directory")
@@ -6818,13 +6818,13 @@ Body content
     #[test]
     fn list_reference_external_directory_bindings_returns_only_bound_directories() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         for path in ["example-reference", "unity-official-docs", "notes"] {
-            std::fs::create_dir_all(knowledge_root(&working_dir).join("reference").join(path))
+            std::fs::create_dir_all(knowledge_root(&workspace_root).join("reference").join(path))
                 .expect("create reference directory");
             update_directory_config(
-                &working_dir,
+                &workspace_root,
                 KnowledgeType::Reference,
                 path,
                 sample_directory_config(),
@@ -6833,7 +6833,7 @@ Body content
         }
 
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "example-reference",
             vec![KnowledgeExternalSource {
@@ -6845,7 +6845,7 @@ Body content
         )
         .expect("bind local folder source");
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "unity-official-docs",
             vec![KnowledgeExternalSource {
@@ -6858,7 +6858,7 @@ Body content
         .expect("bind unity source");
 
         let bindings =
-            list_reference_external_directory_bindings(&working_dir).expect("list bindings");
+            list_reference_external_directory_bindings(&workspace_root).expect("list bindings");
 
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].path, "example-reference");
@@ -6876,24 +6876,24 @@ Body content
     #[test]
     fn delete_external_reference_directory_allows_local_folder_read_only_documents() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("reference")
                 .join("example-reference")
                 .join("gameplay"),
         )
         .expect("create external reference directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "example-reference",
             sample_directory_config(),
         )
         .expect("save reference config");
         update_directory_external_sources(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "example-reference",
             vec![KnowledgeExternalSource {
@@ -6916,21 +6916,21 @@ Body content
             source_id: Some("example-reference".to_string()),
             sync_enabled: false,
         });
-        save_document(&working_dir, doc).expect("save external doc");
+        save_document(&workspace_root, doc).expect("save external doc");
 
         let regular_delete_error =
-            delete_directory(&working_dir, KnowledgeType::Reference, "example-reference")
+            delete_directory(&workspace_root, KnowledgeType::Reference, "example-reference")
                 .expect_err("regular delete should reject read-only external docs");
         assert!(regular_delete_error.contains("read-only"));
 
-        delete_external_reference_directory(&working_dir, "example-reference")
+        delete_external_reference_directory(&workspace_root, "example-reference")
             .expect("delete external directory");
 
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("reference")
             .join("example-reference")
             .exists());
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("reference")
             .join("example-reference.locus-meta")
             .exists());
@@ -6939,8 +6939,8 @@ Body content
     #[test]
     fn read_directory_config_defaults_legacy_inject_mode_to_excerpt() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        let root = knowledge_root(&working_dir).join("design");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        let root = knowledge_root(&workspace_root).join("design");
         std::fs::create_dir_all(root.join("combat")).unwrap();
         std::fs::write(
             root.join("combat.meta"),
@@ -6948,7 +6948,7 @@ Body content
         )
         .unwrap();
 
-        let config = read_directory_config(&working_dir, KnowledgeType::Design, "combat")
+        let config = read_directory_config(&workspace_root, KnowledgeType::Design, "combat")
             .expect("read legacy config");
         assert_eq!(config.config.version, 4);
         assert_eq!(config.config.inject_mode, KnowledgeInjectMode::Excerpt);
@@ -6961,18 +6961,18 @@ Body content
     #[test]
     fn read_directory_config_inherits_direct_parent_rules_when_missing_local_meta() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        let root = knowledge_root(&working_dir).join("design");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        let root = knowledge_root(&workspace_root).join("design");
         std::fs::create_dir_all(root.join("combat").join("notes")).unwrap();
 
         let mut parent = sample_directory_config();
         parent.summary = "父目录摘要".to_string();
         parent.inject_mode = KnowledgeInjectMode::Path;
         parent.maintenance_rules = "- Inherit stable combat structure rules".to_string();
-        update_directory_config(&working_dir, KnowledgeType::Design, "combat", parent)
+        update_directory_config(&workspace_root, KnowledgeType::Design, "combat", parent)
             .expect("save parent config");
 
-        let config = read_directory_config(&working_dir, KnowledgeType::Design, "combat/notes")
+        let config = read_directory_config(&workspace_root, KnowledgeType::Design, "combat/notes")
             .expect("read child config");
         assert!(!config.exists);
         assert_eq!(config.config_path, "combat/notes.locus-meta");
@@ -7018,16 +7018,16 @@ Body content
     #[test]
     fn read_directory_config_falls_back_when_parent_disables_inheritance() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        let root = knowledge_root(&working_dir).join("design");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        let root = knowledge_root(&workspace_root).join("design");
         std::fs::create_dir_all(root.join("combat").join("notes")).unwrap();
 
         let mut parent = sample_directory_config();
         parent.inherit_to_children = false;
-        update_directory_config(&working_dir, KnowledgeType::Design, "combat", parent)
+        update_directory_config(&workspace_root, KnowledgeType::Design, "combat", parent)
             .expect("save parent config");
 
-        let config = read_directory_config(&working_dir, KnowledgeType::Design, "combat/notes")
+        let config = read_directory_config(&workspace_root, KnowledgeType::Design, "combat/notes")
             .expect("read child config");
         assert!(!config.exists);
         assert_eq!(config.config.summary, "");
@@ -7063,10 +7063,10 @@ Body content
     #[test]
     fn default_document_create_patch_uses_memory_root_defaults() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         let patch = default_document_create_patch(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             "project-context.md",
         )
@@ -7084,18 +7084,18 @@ Body content
     #[test]
     fn default_document_create_patch_inherits_direct_parent_rules() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        let root = knowledge_root(&working_dir).join("design");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        let root = knowledge_root(&workspace_root).join("design");
         std::fs::create_dir_all(root.join("combat")).unwrap();
 
         let mut parent = sample_directory_config();
         parent.maintenance_rules =
             "- Record combat child docs with verified constraints".to_string();
-        update_directory_config(&working_dir, KnowledgeType::Design, "combat", parent)
+        update_directory_config(&workspace_root, KnowledgeType::Design, "combat", parent)
             .expect("save parent config");
 
         let patch = default_document_create_patch(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "combat/core-loop.md",
         )
@@ -7112,11 +7112,11 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_seeds_builtin_memory_defaults() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
-        ensure_memory_builtin_documents(&working_dir).expect("seed builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("seed builtins");
 
-        let docs = list_documents(&working_dir, Some(KnowledgeType::Memory), None).expect("list");
+        let docs = list_documents(&workspace_root, Some(KnowledgeType::Memory), None).expect("list");
         let paths = docs.iter().map(|doc| doc.path.as_str()).collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&MEMORY_PROJECT_MISTAKE_NOTE_PATH));
@@ -7124,7 +7124,7 @@ Body content
         assert!(!paths.contains(&"project-understanding.md"));
 
         let user_pref = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_PATH,
         )
@@ -7134,11 +7134,11 @@ Body content
         assert!(user_pref.body.is_empty());
 
         let directories =
-            list_directories(&working_dir, KnowledgeType::Memory).expect("list directories");
+            list_directories(&workspace_root, KnowledgeType::Memory).expect("list directories");
         assert!(directories.contains(&"unity-project-understanding".to_string()));
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             "unity-project-understanding",
         )
@@ -7161,16 +7161,16 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_updates_builtin_directory_rules_for_seed_v4() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         create_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
         .expect("create builtin memory directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
             KnowledgeDirectoryConfig {
@@ -7192,12 +7192,12 @@ Body content
             },
         )
         .expect("seed old builtin directory rules");
-        write_memory_builtin_seed_version(&working_dir, 4).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 4).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
@@ -7212,16 +7212,16 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_preserves_custom_memory_directory_rules() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         create_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
         .expect("create builtin memory directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
             KnowledgeDirectoryConfig {
@@ -7243,12 +7243,12 @@ Body content
             },
         )
         .expect("seed custom builtin directory rules");
-        write_memory_builtin_seed_version(&working_dir, 4).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 4).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
@@ -7260,16 +7260,16 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_updates_builtin_directory_inject_mode_for_seed_v5() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         create_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
         .expect("create builtin memory directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
             KnowledgeDirectoryConfig {
@@ -7291,12 +7291,12 @@ Body content
             },
         )
         .expect("seed old builtin directory inject mode");
-        write_memory_builtin_seed_version(&working_dir, 5).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 5).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
@@ -7307,7 +7307,7 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_updates_builtin_doc_rules_for_seed_v6() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         for (id, path, title, rules) in [
             (
@@ -7324,7 +7324,7 @@ Body content
             ),
         ] {
             save_document(
-                &working_dir,
+                &workspace_root,
                 KnowledgeDocument {
                     id: id.to_string(),
                     doc_type: KnowledgeType::Memory,
@@ -7356,12 +7356,12 @@ Body content
             )
             .expect("seed old builtin doc");
         }
-        write_memory_builtin_seed_version(&working_dir, 6).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 6).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let mistake_note = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_PROJECT_MISTAKE_NOTE_PATH,
         )
@@ -7373,7 +7373,7 @@ Body content
         );
 
         let user_preference = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_PATH,
         )
@@ -7388,10 +7388,10 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_preserves_custom_builtin_doc_rules() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         save_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeDocument {
                 id: "kd_builtin_memory_project_mistake_note".to_string(),
                 doc_type: KnowledgeType::Memory,
@@ -7422,12 +7422,12 @@ Body content
             },
         )
         .expect("save custom builtin doc");
-        write_memory_builtin_seed_version(&working_dir, 6).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 6).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let mistake_note = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_PROJECT_MISTAKE_NOTE_PATH,
         )
@@ -7441,10 +7441,10 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_renames_legacy_builtin_paths() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         save_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeDocument {
                 id: "kd_builtin_memory_user_preference".to_string(),
                 doc_type: KnowledgeType::Memory,
@@ -7476,10 +7476,10 @@ Body content
         )
         .expect("save legacy builtin doc");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         assert!(!document_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_LEGACY_PATH
         )
@@ -7487,7 +7487,7 @@ Body content
         .is_file());
 
         let migrated = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_PATH,
         )
@@ -7499,10 +7499,10 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_promotes_user_preference_to_rule_in_seed_v8() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         save_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeDocument {
                 id: "kd_builtin_memory_user_preference".to_string(),
                 doc_type: KnowledgeType::Memory,
@@ -7533,12 +7533,12 @@ Body content
             },
         )
         .expect("save v8 builtin doc");
-        write_memory_builtin_seed_version(&working_dir, 8).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 8).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let migrated = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_PATH,
         )
@@ -7550,16 +7550,16 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_updates_builtin_rules_for_seed_v9() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         create_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
         .expect("create builtin memory directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
             KnowledgeDirectoryConfig {
@@ -7599,7 +7599,7 @@ Body content
             ),
         ] {
             save_document(
-                &working_dir,
+                &workspace_root,
                 KnowledgeDocument {
                     id: id.to_string(),
                     doc_type: KnowledgeType::Memory,
@@ -7631,12 +7631,12 @@ Body content
             )
             .expect("seed v9 builtin doc");
         }
-        write_memory_builtin_seed_version(&working_dir, 9).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 9).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
@@ -7647,7 +7647,7 @@ Body content
         );
 
         let mistake_note = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_PROJECT_MISTAKE_NOTE_PATH,
         )
@@ -7658,7 +7658,7 @@ Body content
         );
 
         let user_preference = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_USER_PREFERENCE_PATH,
         )
@@ -7672,16 +7672,16 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_updates_builtin_summary_for_seed_v10() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         create_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
         .expect("create builtin memory directory");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
             KnowledgeDirectoryConfig {
@@ -7703,12 +7703,12 @@ Body content
             },
         )
         .expect("seed v10 builtin directory summary");
-        write_memory_builtin_seed_version(&working_dir, 10).expect("write old seed version");
+        write_memory_builtin_seed_version(&workspace_root, 10).expect("write old seed version");
 
-        ensure_memory_builtin_documents(&working_dir).expect("upgrade builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("upgrade builtins");
 
         let directory = read_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             MEMORY_UNITY_PROJECT_UNDERSTANDING_PATH,
         )
@@ -7726,10 +7726,10 @@ Body content
     #[test]
     fn ensure_memory_builtin_documents_migrates_legacy_project_understanding() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         save_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeDocument {
                 id: "kd_custom_project_understanding".to_string(),
                 doc_type: KnowledgeType::Memory,
@@ -7761,17 +7761,17 @@ Body content
         )
         .expect("save existing");
 
-        ensure_memory_builtin_documents(&working_dir).expect("seed builtins");
+        ensure_memory_builtin_documents(&workspace_root).expect("seed builtins");
 
         assert!(load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             "project-understanding.md"
         )
         .is_err());
 
         let migrated = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Memory,
             "unity-project-understanding/overview.md",
         )
@@ -7780,16 +7780,16 @@ Body content
         assert_eq!(migrated.title, "overview");
         assert_eq!(migrated.body, "已有内容");
 
-        let docs = list_documents(&working_dir, Some(KnowledgeType::Memory), None).expect("list");
+        let docs = list_documents(&workspace_root, Some(KnowledgeType::Memory), None).expect("list");
         assert_eq!(docs.len(), 3);
     }
 
     #[test]
     fn create_design_document_defaults_to_summary_disabled() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let created = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::Create,
                 path: "gameplay/core-loop.md".to_string(),
@@ -7811,13 +7811,13 @@ Body content
     #[test]
     fn update_meta_can_unlock_local_read_only_document() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.read_only = true;
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateMeta,
                 path: "gameplay/core-loop.md".to_string(),
@@ -7834,13 +7834,13 @@ Body content
     #[test]
     fn edit_document_syncs_default_title_when_file_name_changes() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.title = "core-loop".to_string();
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let updated = edit_document(
-            &working_dir,
+            &workspace_root,
             "gameplay/core-loop.md",
             Some(KnowledgeType::Design),
             KnowledgeDocumentPatch {
@@ -7857,16 +7857,16 @@ Body content
     #[test]
     fn edit_document_applies_partial_section_replacements() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.body = "alpha beta alpha".to_string();
         doc.explicit_maintenance_rules = true;
         doc.inherit_ai_config = false;
         doc.maintenance_rules = Some("- Keep old facts".to_string());
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let updated = edit_document(
-            &working_dir,
+            &workspace_root,
             "gameplay/core-loop.md",
             Some(KnowledgeType::Design),
             KnowledgeDocumentPatch {
@@ -7899,13 +7899,13 @@ Body content
     #[test]
     fn edit_document_rejects_ambiguous_partial_replacement() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let mut doc = sample_doc();
         doc.body = "alpha\nbeta\nalpha".to_string();
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
         let error = edit_document(
-            &working_dir,
+            &workspace_root,
             "gameplay/core-loop.md",
             Some(KnowledgeType::Design),
             KnowledgeDocumentPatch {
@@ -7927,11 +7927,11 @@ Body content
     #[test]
     fn update_meta_syncs_title_when_file_name_changes() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
 
         let updated = update_document(
-            &working_dir,
+            &workspace_root,
             KnowledgeUpdateRequest {
                 op: KnowledgeUpdateOp::UpdateMeta,
                 path: "gameplay/core-loop.md".to_string(),
@@ -7949,10 +7949,10 @@ Body content
     #[test]
     fn move_directory_updates_nested_document_paths() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("design")
                 .join("gameplay")
                 .join("notes"),
@@ -7960,7 +7960,7 @@ Body content
         .unwrap();
 
         let moved = move_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay",
             "systems/gameplay",
@@ -7968,11 +7968,11 @@ Body content
         .expect("move directory");
 
         assert_eq!(moved, "systems/gameplay");
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay")
             .exists());
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("design")
             .join("systems")
             .join("gameplay")
@@ -7980,7 +7980,7 @@ Body content
             .is_dir());
 
         let reread = load_document_by_path(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "systems/gameplay/core-loop.md",
         )
@@ -7991,24 +7991,24 @@ Body content
     #[test]
     fn move_directory_moves_sidecar_config_and_allows_nested_locus_meta_files() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("design")
                 .join("gameplay")
                 .join("notes"),
         )
         .unwrap();
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay",
             sample_directory_config(),
         )
         .expect("save root config");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/notes",
             sample_directory_config(),
@@ -8016,23 +8016,23 @@ Body content
         .expect("save nested config");
 
         move_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay",
             "systems/gameplay",
         )
         .expect("move directory");
 
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay.locus-meta")
             .exists());
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("design")
             .join("systems")
             .join("gameplay.locus-meta")
             .is_file());
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("design")
             .join("systems")
             .join("gameplay")
@@ -8043,11 +8043,11 @@ Body content
     #[test]
     fn move_directory_rejects_descendant_target() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save");
 
         let result = move_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay",
             "gameplay/archive",
@@ -8059,67 +8059,67 @@ Body content
     #[test]
     fn delete_directory_removes_nested_documents_and_folders() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         let mut root_doc = sample_doc();
         root_doc.path = "gameplay/core-loop.md".to_string();
-        save_document(&working_dir, root_doc).expect("save root doc");
+        save_document(&workspace_root, root_doc).expect("save root doc");
 
         let mut nested_doc = sample_doc();
         nested_doc.id = "kd_nested".to_string();
         nested_doc.path = "gameplay/notes/archive.md".to_string();
         nested_doc.title = "Archive".to_string();
-        save_document(&working_dir, nested_doc).expect("save nested doc");
+        save_document(&workspace_root, nested_doc).expect("save nested doc");
 
         let deleted =
-            delete_directory(&working_dir, KnowledgeType::Design, "gameplay").expect("delete");
+            delete_directory(&workspace_root, KnowledgeType::Design, "gameplay").expect("delete");
 
         assert_eq!(deleted, "gameplay");
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay")
             .exists());
-        let remaining = list_documents(&working_dir, Some(KnowledgeType::Design), None).unwrap();
+        let remaining = list_documents(&workspace_root, Some(KnowledgeType::Design), None).unwrap();
         assert!(remaining.is_empty());
     }
 
     #[test]
     fn delete_directory_removes_sidecar_config_files() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         let mut doc = sample_doc();
         doc.path = "gameplay/core-loop.md".to_string();
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
         std::fs::create_dir_all(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("design")
                 .join("gameplay")
                 .join("notes"),
         )
         .unwrap();
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay",
             sample_directory_config(),
         )
         .expect("save root config");
         update_directory_config(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Design,
             "gameplay/notes",
             sample_directory_config(),
         )
         .expect("save nested config");
 
-        delete_directory(&working_dir, KnowledgeType::Design, "gameplay").expect("delete");
+        delete_directory(&workspace_root, KnowledgeType::Design, "gameplay").expect("delete");
 
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay.locus-meta")
             .exists());
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay")
             .exists());
@@ -8128,18 +8128,18 @@ Body content
     #[test]
     fn delete_directory_rejects_read_only_documents() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
         let mut doc = sample_doc();
         doc.read_only = true;
-        save_document(&working_dir, doc).expect("save");
+        save_document(&workspace_root, doc).expect("save");
 
-        let result = delete_directory(&working_dir, KnowledgeType::Design, "gameplay");
+        let result = delete_directory(&workspace_root, KnowledgeType::Design, "gameplay");
 
         assert!(result
             .expect_err("delete should fail")
             .contains("read-only"));
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("design")
             .join("gameplay")
             .join("core-loop.md")
@@ -8149,9 +8149,9 @@ Body content
     #[test]
     fn delete_directory_tolerates_document_path_mismatch() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
-        let file_path = knowledge_root(&working_dir)
+        let file_path = knowledge_root(&workspace_root)
             .join("reference")
             .join("unity-official-docs")
             .join("manual")
@@ -8171,14 +8171,14 @@ Body content
         save_document_to_path(&file_path, doc).expect("save mismatched reference doc");
 
         let deleted = delete_directory(
-            &working_dir,
+            &workspace_root,
             KnowledgeType::Reference,
             "unity-official-docs",
         )
         .expect("delete mismatched directory");
 
         assert_eq!(deleted, "unity-official-docs");
-        assert!(!knowledge_root(&working_dir)
+        assert!(!knowledge_root(&workspace_root)
             .join("reference")
             .join("unity-official-docs")
             .exists());
@@ -8187,9 +8187,9 @@ Body content
     #[test]
     fn delete_directory_still_rejects_mismatched_read_only_documents() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
-        let file_path = knowledge_root(&working_dir)
+        let file_path = knowledge_root(&workspace_root)
             .join("reference")
             .join("example-reference")
             .join("manual")
@@ -8208,11 +8208,11 @@ Body content
         });
         save_document_to_path(&file_path, doc).expect("save mismatched read-only doc");
 
-        let error = delete_directory(&working_dir, KnowledgeType::Reference, "example-reference")
+        let error = delete_directory(&workspace_root, KnowledgeType::Reference, "example-reference")
             .expect_err("delete should still reject read-only doc");
 
         assert!(error.contains("read-only"));
-        assert!(knowledge_root(&working_dir)
+        assert!(knowledge_root(&workspace_root)
             .join("reference")
             .join("example-reference")
             .exists());
@@ -8221,7 +8221,7 @@ Body content
     #[test]
     fn list_documents_with_app_root_prefers_workspace_over_app() {
         let workspace = TempDir::new().unwrap();
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let app = TempDir::new().unwrap();
         let app_root = app.path().join("knowledge");
         std::fs::create_dir_all(app_root.join("skill")).unwrap();
@@ -8238,7 +8238,7 @@ Body content
         .expect("save app doc");
 
         let app_items = list_documents_with_app_root(
-            &working_dir,
+            &workspace_root,
             Some(&app_root),
             Some(KnowledgeType::Skill),
             None,
@@ -8250,7 +8250,7 @@ Body content
         assert_eq!(app_items[0].storage_source, KnowledgeStorageSource::App);
 
         let app_read = read_document_with_app_root(
-            &working_dir,
+            &workspace_root,
             Some(&app_root),
             KnowledgeType::Skill,
             "shared.md",
@@ -8267,10 +8267,10 @@ Body content
         workspace_doc.doc_type = KnowledgeType::Skill;
         workspace_doc.path = "shared.md".to_string();
         workspace_doc.title = "Shared".to_string();
-        save_document(&working_dir, workspace_doc).expect("save workspace doc");
+        save_document(&workspace_root, workspace_doc).expect("save workspace doc");
 
         let merged_items = list_documents_with_app_root(
-            &working_dir,
+            &workspace_root,
             Some(&app_root),
             Some(KnowledgeType::Skill),
             None,
@@ -8285,7 +8285,7 @@ Body content
         );
 
         let workspace_read = read_document_with_app_root(
-            &working_dir,
+            &workspace_root,
             Some(&app_root),
             KnowledgeType::Skill,
             "shared.md",
@@ -8301,13 +8301,13 @@ Body content
     #[test]
     fn read_directory_config_with_app_root_marks_app_directory_read_only() {
         let workspace = TempDir::new().unwrap();
-        let working_dir = workspace.path().to_string_lossy().to_string();
+        let workspace_root = workspace.path().to_string_lossy().to_string();
         let app = TempDir::new().unwrap();
         let app_root = app.path().join("knowledge");
         std::fs::create_dir_all(app_root.join("reference").join("unity")).unwrap();
 
         let record = read_directory_config_with_app_root(
-            &working_dir,
+            &workspace_root,
             Some(&app_root),
             KnowledgeType::Reference,
             "unity",
@@ -8321,15 +8321,15 @@ Body content
     #[test]
     fn load_documents_with_app_root_excluding_prefixes_skips_matching_subtree() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
 
-        save_document(&working_dir, sample_doc()).expect("save design doc");
+        save_document(&workspace_root, sample_doc()).expect("save design doc");
 
         let unity_doc = sample_unity_bundle_doc();
-        save_document(&working_dir, unity_doc).expect("save unity managed doc");
+        save_document(&workspace_root, unity_doc).expect("save unity managed doc");
 
         let documents = load_documents_with_app_root_excluding_prefixes(
-            &working_dir,
+            &workspace_root,
             None,
             None,
             None,
@@ -8349,16 +8349,16 @@ Body content
     #[test]
     fn list_documents_reports_rendered_byte_size() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
+        let workspace_root = temp.path().to_string_lossy().to_string();
         let doc = sample_doc();
 
-        save_document(&working_dir, doc).expect("save design doc");
+        save_document(&workspace_root, doc).expect("save design doc");
         let saved =
-            load_document_by_path(&working_dir, KnowledgeType::Design, "gameplay/core-loop.md")
+            load_document_by_path(&workspace_root, KnowledgeType::Design, "gameplay/core-loop.md")
                 .expect("load saved doc");
         let expected_size = rendered_document_size_bytes(&saved).expect("rendered size");
 
-        let listed = list_documents(&working_dir, Some(KnowledgeType::Design), None)
+        let listed = list_documents(&workspace_root, Some(KnowledgeType::Design), None)
             .expect("list design docs");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].byte_size, Some(expected_size));
@@ -8367,10 +8367,10 @@ Body content
     #[test]
     fn load_documents_with_app_root_excluding_prefixes_skips_bundle_scan_for_fully_excluded_root() {
         let temp = TempDir::new().unwrap();
-        let working_dir = temp.path().to_string_lossy().to_string();
-        save_document(&working_dir, sample_doc()).expect("save design doc");
+        let workspace_root = temp.path().to_string_lossy().to_string();
+        save_document(&workspace_root, sample_doc()).expect("save design doc");
 
-        let managed_store_path = crate::unity_docs::managed_store_path(&working_dir);
+        let managed_store_path = crate::unity_docs::managed_store_path(&workspace_root);
         std::fs::create_dir_all(
             managed_store_path
                 .parent()
@@ -8408,10 +8408,10 @@ Body content
         )
         .expect("seed managed directory row");
         drop(conn);
-        std::fs::create_dir_all(knowledge_root(&working_dir).join("reference"))
+        std::fs::create_dir_all(knowledge_root(&workspace_root).join("reference"))
             .expect("create reference root");
         std::fs::write(
-            knowledge_root(&working_dir)
+            knowledge_root(&workspace_root)
                 .join("reference")
                 .join("unity_reference_docs_manifest.json"),
             r#"{
@@ -8426,7 +8426,7 @@ Body content
         .expect("write managed manifest");
 
         let documents = load_documents_with_app_root_excluding_prefixes(
-            &working_dir,
+            &workspace_root,
             None,
             None,
             None,
