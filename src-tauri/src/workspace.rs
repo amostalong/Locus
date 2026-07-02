@@ -153,16 +153,8 @@ fn extract_unity_yaml_scalar(content: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Read the Unity `ProjectSettings.asset` from a Unity project root and
-/// return a stable seed derived from `productGUID` / `cloudProjectId`.
-///
-/// `unity_root` MUST point at a directory containing `ProjectSettings/`
-/// (i.e. the resolved Unity project root, NOT a generic workspace root).
-/// When the user picks a non-Unity workspace root, `load_or_create_workspace`
-/// still resolves `unity_root` internally before calling this — callers do
-/// not have to do it themselves.
-fn unity_workspace_seed(unity_root: &str) -> Option<String> {
-    let settings_path = Path::new(unity_root)
+fn unity_workspace_seed(dir: &str) -> Option<String> {
+    let settings_path = Path::new(dir)
         .join("ProjectSettings")
         .join("ProjectSettings.asset");
     let content = std::fs::read_to_string(&settings_path).ok()?;
@@ -190,328 +182,17 @@ fn random_workspace_id() -> String {
     format!("workspace-{}", uuid::Uuid::new_v4().simple())
 }
 
-/// Generate a workspace_id. `unity_root` is the resolved Unity project root
-/// (so the seed is stable across `slg_gameclient/` ↔ `slg_gameclient/Project`
-/// workspace_root reshuffles — it always hashes the Unity GUID, never the
-/// outer directory).
-fn generated_workspace_id(unity_root: &str) -> String {
-    unity_workspace_seed(unity_root)
+fn generated_workspace_id(dir: &str) -> String {
+    unity_workspace_seed(dir)
         .map(|seed| workspace_id_from_seed(&seed))
         .unwrap_or_else(random_workspace_id)
 }
 
-/// Migrate `Locus/config.json` from the legacy `<unity_root>/Locus/` location
-/// to the new `<workspace_root>/Locus/` location, if needed.
-///
-/// Trigger conditions (X strategy — user-approved automatic migration):
-///   - `<workspace_root>/Locus/config.json` does not exist, AND
-///   - `<workspace_root>` ≠ `<unity_root>` (otherwise nothing to migrate — the
-///     legacy location IS the canonical location for the "老用户无感" path),
-///   - AND `<unity_root>/Locus/config.json` exists.
-///
-/// Behaviour:
-///   - `fs::rename` first (atomic on the same volume).
-///   - Fall back to copy + delete on cross-volume rename failures.
-///   - On success: write a marker at `<workspace_root>/Locus/.migration.json`
-///     recording the source path so users can audit / undo manually.
-///   - On any failure: log a warning and return Ok — the caller will create
-///     a fresh config at the new location anyway.
-///
-/// `load_or_create_workspace` calls this before deciding whether to create
-/// a new workspace_id, so existing users keep their session history.
-pub(crate) fn migrate_workspace_config_from_unity_root(
-    workspace_root: &str,
-    unity_root: &str,
-) -> Result<(), String> {
-    if workspace_root == unity_root {
-        // Same path — no migration needed (also covers the empty / first-launch case).
-        return Ok(());
-    }
-
-    let new_path = workspace_config_path(workspace_root);
-    if new_path.exists() {
-        // Already migrated (or written by an earlier run).
-        return Ok(());
-    }
-
-    let legacy_path = workspace_config_path(unity_root);
-    if !legacy_path.exists() {
-        // Nothing to migrate.
-        return Ok(());
-    }
-
-    eprintln!(
-        "[Workspace] migrating config: {} -> {}",
-        legacy_path.display(),
-        new_path.display()
-    );
-
-    // Ensure the destination directory exists (workspace_root/Locus/).
-    if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create destination Locus dir: {}", e))?;
-    }
-
-    // Try rename first; fall back to copy + delete on cross-volume failures.
-    match std::fs::rename(&legacy_path, &new_path) {
-        Ok(()) => {}
-        Err(rename_err) => {
-            eprintln!(
-                "[Workspace] rename failed ({}), falling back to copy",
-                rename_err
-            );
-            std::fs::copy(&legacy_path, &new_path).map_err(|e| {
-                format!(
-                    "Failed to copy legacy config from {} to {}: {}",
-                    legacy_path.display(),
-                    new_path.display(),
-                    e
-                )
-            })?;
-            if let Err(remove_err) = std::fs::remove_file(&legacy_path) {
-                eprintln!(
-                    "[Workspace] warning: copied config but failed to remove legacy file ({}); user should clean up manually",
-                    remove_err
-                );
-            }
-        }
-    }
-
-    // Record the migration in a marker file inside the new Locus dir so users
-    // (and CI) can verify the migration happened.
-    let marker_path = new_path
-        .parent()
-        .map(|p| p.join(".migration.json"))
-        .unwrap_or_else(|| new_path.clone());
-    let marker = serde_json::json!({
-        "migrated_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        "source_path": legacy_path.to_string_lossy(),
-        "destination_path": new_path.to_string_lossy(),
-        "schema": "workspace-config-migration/v1",
-    });
-    if let Ok(json) = serde_json::to_string_pretty(&marker) {
-        let _ = std::fs::write(&marker_path, json);
-    }
-
-    Ok(())
-}
-
-/// Migrate `Locus/knowledge/` (the entire knowledge base directory) from the
-/// legacy `<unity_root>/Locus/knowledge/` location to the new
-/// `<workspace_root>/Locus/knowledge/` location, if needed.
-///
-/// Trigger conditions (X strategy — user-approved automatic migration):
-///   - `<workspace_root>` ≠ `<unity_root>` (老用户无感 fast path),
-///   - AND `<workspace_root>/Locus/knowledge/` does not exist,
-///   - AND `<unity_root>/Locus/knowledge/` exists.
-///
-/// Behaviour:
-///   - `fs::rename` first (atomic on the same volume).
-///   - Fall back to recursive copy + delete on cross-volume rename failures.
-///   - On success: write a marker at
-///     `<workspace_root>/Locus/.knowledge-migration.json` recording the
-///     source path / file count / bytes so users can audit / undo manually.
-///   - On any failure: log a warning and return Ok — the caller will create
-///     a fresh empty knowledge base at the new location on demand.
-///
-/// The old `<unity_root>/Locus/knowledge/` directory is left in place as a
-/// backup (Locus never deletes user data automatically).
-///
-/// This must be called from `set_working_dir` / `set_workspace` after the
-/// workspace_root has been resolved but before any knowledge operation is
-/// performed, so existing users keep their knowledge base across the
-/// `workspace_root` ↔ `unity_root` reshape.
-pub(crate) fn migrate_workspace_knowledge_from_unity_root(
-    workspace_root: &str,
-    unity_root: &str,
-) -> Result<(), String> {
-    if workspace_root == unity_root {
-        // Same path — no migration needed (covers the "老用户无感" fast path).
-        return Ok(());
-    }
-
-    let new_path = Path::new(workspace_root).join("Locus").join("knowledge");
-    if new_path.exists() {
-        // Already migrated (or a fresh knowledge base was created).
-        return Ok(());
-    }
-
-    let legacy_path = Path::new(unity_root).join("Locus").join("knowledge");
-    if !legacy_path.exists() {
-        // Nothing to migrate.
-        return Ok(());
-    }
-
-    eprintln!(
-        "[Workspace] migrating knowledge base: {} -> {}",
-        legacy_path.display(),
-        new_path.display()
-    );
-
-    // Ensure the destination parent directory exists (workspace_root/Locus/).
-    if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create destination Locus dir: {}", e))?;
-    }
-
-    // Try rename first; fall back to recursive copy + remove on cross-volume
-    // rename failures.
-    match std::fs::rename(&legacy_path, &new_path) {
-        Ok(()) => {}
-        Err(rename_err) => {
-            eprintln!(
-                "[Workspace] rename failed ({}), falling back to recursive copy",
-                rename_err
-            );
-            copy_dir_recursive(&legacy_path, &new_path).map_err(|e| {
-                format!(
-                    "Failed to copy legacy knowledge from {} to {}: {}",
-                    legacy_path.display(),
-                    new_path.display(),
-                    e
-                )
-            })?;
-            if let Err(remove_err) = std::fs::remove_dir_all(&legacy_path) {
-                eprintln!(
-                    "[Workspace] warning: copied knowledge but failed to remove legacy directory ({}); user should clean up manually",
-                    remove_err
-                );
-            }
-        }
-    }
-
-    // Record the migration in a marker file alongside the config marker so
-    // users (and CI) can verify the migration happened.
-    let marker_path = new_path
-        .parent()
-        .map(|p| p.join(".knowledge-migration.json"))
-        .unwrap_or_else(|| new_path.clone());
-    let (file_count, total_bytes) = walk_dir_stats(&new_path);
-    let marker = serde_json::json!({
-        "migrated_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        "source_path": legacy_path.to_string_lossy(),
-        "destination_path": new_path.to_string_lossy(),
-        "file_count": file_count,
-        "bytes": total_bytes,
-        "schema": "workspace-knowledge-migration/v1",
-    });
-    if let Ok(json) = serde_json::to_string_pretty(&marker) {
-        let _ = std::fs::write(&marker_path, json);
-    }
-
-    Ok(())
-}
-
-/// Recursively copy a directory tree. Used as a fallback when
-/// `fs::rename` fails across volumes.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let file_name = entry.file_name();
-        let dest_path = dst.join(&file_name);
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry_path, &dest_path)?;
-        } else if file_type.is_symlink() {
-            // Re-create the symlink at the destination.
-            let target = std::fs::read_link(&entry_path)?;
-            copy_symlink(&target, &dest_path)?;
-        } else {
-            std::fs::copy(&entry_path, &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
-/// Re-create a symlink at the destination. On Windows, `symlink_file` is
-/// the standard API; on Unix, `symlink` is used instead. This fallback
-/// exists because knowledge bases are very rarely symlinked, but if they
-/// are, we want a best-effort copy.
-#[cfg(windows)]
-fn copy_symlink(target: &Path, dest: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, dest)
-}
-
-#[cfg(unix)]
-fn copy_symlink(target: &Path, dest: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, dest)
-}
-
-#[cfg(not(any(windows, unix)))]
-fn copy_symlink(_target: &Path, _dest: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "symlink copy is not supported on this platform",
-    ))
-}
-
-/// Count files and total bytes under a directory. Returns (count, bytes).
-fn walk_dir_stats(root: &Path) -> (u64, u64) {
-    let mut count = 0u64;
-    let mut bytes = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                count += 1;
-                if let Ok(meta) = entry.metadata() {
-                    bytes += meta.len();
-                }
-            }
-        }
-    }
-    (count, bytes)
-}
-
-/// Load (or create) the workspace_id for a given `(workspace_root, unity_root)`
-/// pair.
-///
-/// - `workspace_root`: the canonical user-selected root. `Locus/config.json`
-///   lives here. Knowledge / skill / memory are anchored here.
-/// - `unity_root`: the resolved Unity project root. Used as the seed for the
-///   workspace_id (`productGUID` hash) so the id is stable when the user
-///   reorganises the parent directory.
-///
-/// If the legacy `<unity_root>/Locus/config.json` exists but the new
-/// `<workspace_root>/Locus/config.json` does not, this function
-/// auto-migrates the file (see `migrate_workspace_config_from_unity_root`).
-pub fn load_or_create_workspace(workspace_root: &str, unity_root: &str) -> Result<String, String> {
-    // 1. Auto-migrate legacy config.json if the workspace_root differs from
-    //    the unity_root (X strategy).
-    if let Err(e) = migrate_workspace_config_from_unity_root(workspace_root, unity_root) {
-        eprintln!("[Workspace] migration warning: {}", e);
-    }
-
-    // 1b. Auto-migrate the legacy knowledge base (`Locus/knowledge/`) so
-    //     users that picked a Unity project before, then switched to a
-    //     non-Unity parent directory, do not lose their knowledge data.
-    if let Err(e) = migrate_workspace_knowledge_from_unity_root(workspace_root, unity_root) {
-        eprintln!("[Workspace] knowledge migration warning: {}", e);
-    }
-
-    let config_path = workspace_config_path(workspace_root);
+pub fn load_or_create_workspace(dir: &str) -> Result<String, String> {
+    let config_path = workspace_config_path(dir);
     let mut should_write_config = !config_path.exists();
 
-    match read_workspace_config(workspace_root) {
+    match read_workspace_config(dir) {
         Ok(cfg) if !cfg.workspace_id.is_empty() => {
             return Ok(cfg.workspace_id);
         }
@@ -526,21 +207,16 @@ pub fn load_or_create_workspace(workspace_root: &str, unity_root: &str) -> Resul
         }
     }
 
-    // Seed is derived from unity_root (the Unity project GUID), so the id is
-    // stable even when workspace_root moves around.
-    let workspace_id = generated_workspace_id(unity_root);
+    let workspace_id = generated_workspace_id(dir);
     if should_write_config {
         write_workspace_config(
-            workspace_root,
+            dir,
             &WorkspaceConfig {
                 workspace_id: workspace_id.clone(),
             },
         )?;
     }
-    eprintln!(
-        "[Workspace] resolved workspace {} at workspace_root={} (unity_root={})",
-        workspace_id, workspace_root, unity_root
-    );
+    eprintln!("[Workspace] resolved workspace {} at {}", workspace_id, dir);
     Ok(workspace_id)
 }
 
@@ -707,9 +383,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        generated_workspace_id, load_or_create_workspace, migrate_workspace_knowledge_from_unity_root,
-        read_workspace_config, resolve_unity_project_path, ResolveUnityResult, Workspace,
-        WorkspaceConfig,
+        generated_workspace_id, load_or_create_workspace, read_workspace_config,
+        resolve_unity_project_path, ResolveUnityResult, Workspace, WorkspaceConfig,
     };
 
     fn write_project_settings(root: &tempfile::TempDir, body: &str) {
@@ -792,11 +467,9 @@ mod tests {
             "PlayerSettings:\n  companyName: OpenAI\n  productName: Locus\n  applicationIdentifier:\n    Standalone: com.openai.locus\n",
         );
 
-        let path = dir.path().to_string_lossy().to_string();
-        // Tempdir IS the Unity project root — workspace_root == unity_root.
-        let first = load_or_create_workspace(&path, &path).unwrap();
-        let second = load_or_create_workspace(&path, &path).unwrap();
-        let cfg = read_workspace_config(&path).unwrap();
+        let first = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
+        let second = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
+        let cfg = read_workspace_config(&dir.path().to_string_lossy()).unwrap();
 
         assert!(first.starts_with("workspace-"));
         assert_eq!(first, second);
@@ -811,77 +484,11 @@ mod tests {
             "PlayerSettings:\n  productGUID: 2d9a8f42f0da40f2a22b9c4c93ce7d34\n",
         );
 
-        let path = dir.path().to_string_lossy().to_string();
-        let workspace_id = load_or_create_workspace(&path, &path).unwrap();
-        let cfg = read_workspace_config(&path).unwrap();
+        let workspace_id = load_or_create_workspace(&dir.path().to_string_lossy()).unwrap();
+        let cfg = read_workspace_config(&dir.path().to_string_lossy()).unwrap();
 
         assert!(workspace_id.starts_with("unity-"));
         assert_eq!(cfg.workspace_id, workspace_id);
-    }
-
-    #[test]
-    fn load_or_create_workspace_auto_migrates_legacy_unity_root_config() {
-        // Simulate the "user upgraded from P1 — config.json lives at the
-        // legacy <unity_root>/Locus/ location" case. After the call, the
-        // config should live at <workspace_root>/Locus/config.json, and a
-        // migration marker should be present.
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace_root = tmp.path().join("ws_root");
-        let unity_root = workspace_root.join("Project");
-        std::fs::create_dir_all(unity_root.join("ProjectSettings")).unwrap();
-        std::fs::write(
-            unity_root.join("ProjectSettings").join("ProjectSettings.asset"),
-            "PlayerSettings:\n  productGUID: aaaaaaaa111122223333444455556666\n",
-        )
-        .unwrap();
-
-        // Pre-seed a legacy config at <unity_root>/Locus/config.json.
-        let legacy_config_path = unity_root.join("Locus").join("config.json");
-        std::fs::create_dir_all(legacy_config_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &legacy_config_path,
-            r#"{"workspace_id":"legacy-id-aaa"}"#,
-        )
-        .unwrap();
-
-        let ws_str = workspace_root.to_string_lossy().to_string();
-        let un_str = unity_root.to_string_lossy().to_string();
-        let id = load_or_create_workspace(&ws_str, &un_str).unwrap();
-
-        // Same id (auto-migrated from the legacy file, not regenerated).
-        assert_eq!(id, "legacy-id-aaa");
-        // Config now lives at workspace_root/Locus/.
-        let new_path = workspace_root.join("Locus").join("config.json");
-        assert!(new_path.exists(), "config should be migrated to workspace_root");
-        let cfg = read_workspace_config(&ws_str).unwrap();
-        assert_eq!(cfg.workspace_id, "legacy-id-aaa");
-        // Marker file records the migration.
-        let marker = workspace_root.join("Locus").join(".migration.json");
-        assert!(marker.exists(), "migration marker should be written");
-        // Legacy file removed.
-        assert!(!legacy_config_path.exists(), "legacy config should be moved, not copied");
-    }
-
-    #[test]
-    fn load_or_create_workspace_noop_when_workspace_root_equals_unity_root() {
-        // The "legacy" path where workspace_root == unity_root (老用户无感).
-        // In this case no migration should happen even if legacy-style config
-        // exists at that single location.
-        let tmp = tempfile::tempdir().unwrap();
-        write_project_settings(
-            &tmp,
-            "PlayerSettings:\n  productGUID: bbbbbbbb111122223333444455556666\n",
-        );
-        let path = tmp.path().to_string_lossy().to_string();
-        let id = load_or_create_workspace(&path, &path).unwrap();
-
-        assert!(id.starts_with("unity-"));
-        // No migration marker when workspace_root == unity_root.
-        let marker = tmp.path().join("Locus").join(".migration.json");
-        assert!(
-            !marker.exists(),
-            "no migration marker should be written when workspace_root == unity_root"
-        );
     }
 
     // ------------------------------------------------------------------
@@ -1009,110 +616,6 @@ mod tests {
             ResolveUnityResult::NotFound,
             "noise dirs (node_modules/.git/Library) must be skipped by BFS"
         );
-    }
-
-    // ------------------------------------------------------------------
-    // Knowledge base migration (P4 of workspace_root vs unity_root)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn migrate_knowledge_renames_legacy_knowledge_dir() {
-        // Simulate the "user upgraded from a Unity-root workflow and is
-        // now picking a non-Unity parent directory" case. The legacy
-        // `<unity_root>/Locus/knowledge/` tree should be moved (renamed)
-        // to `<workspace_root>/Locus/knowledge/`, with a marker file
-        // recording the source.
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace_root = tmp.path().join("ws_root");
-        let unity_root = workspace_root.join("Project");
-        std::fs::create_dir_all(unity_root.join("ProjectSettings")).unwrap();
-
-        // Pre-seed a knowledge base at the legacy location with a couple
-        // of nested files.
-        let legacy_kb = unity_root.join("Locus").join("knowledge");
-        std::fs::create_dir_all(legacy_kb.join("design")).unwrap();
-        std::fs::write(legacy_kb.join("design").join("intro.md"), b"# intro\n").unwrap();
-        std::fs::write(legacy_kb.join("README.md"), b"# kb\n").unwrap();
-
-        let ws_str = workspace_root.to_string_lossy().to_string();
-        let un_str = unity_root.to_string_lossy().to_string();
-        migrate_workspace_knowledge_from_unity_root(&ws_str, &un_str).unwrap();
-
-        // Knowledge base now lives at workspace_root/Locus/knowledge/
-        let new_kb = workspace_root.join("Locus").join("knowledge");
-        assert!(new_kb.is_dir(), "knowledge should be migrated to workspace_root");
-        assert!(new_kb.join("design").join("intro.md").is_file());
-        assert!(new_kb.join("README.md").is_file());
-        // Legacy directory removed (Locus auto-moves, not copies).
-        assert!(!legacy_kb.exists(), "legacy knowledge dir should be moved");
-        // Marker file records the migration.
-        let marker = workspace_root.join("Locus").join(".knowledge-migration.json");
-        assert!(marker.exists(), "knowledge migration marker should be written");
-    }
-
-    #[test]
-    fn migrate_knowledge_noop_when_workspace_root_equals_unity_root() {
-        // The "老用户无感" fast path — workspace_root == unity_root means
-        // the legacy location IS the canonical location, so no migration
-        // should happen and no marker should be written.
-        let tmp = tempfile::tempdir().unwrap();
-        let kb = tmp.path().join("Locus").join("knowledge");
-        std::fs::create_dir_all(&kb).unwrap();
-        std::fs::write(kb.join("note.md"), b"hello").unwrap();
-
-        let path = tmp.path().to_string_lossy().to_string();
-        migrate_workspace_knowledge_from_unity_root(&path, &path).unwrap();
-
-        assert!(kb.join("note.md").is_file(), "kb file should be untouched");
-        let marker = tmp.path().join("Locus").join(".knowledge-migration.json");
-        assert!(
-            !marker.exists(),
-            "no knowledge migration marker should be written when workspace_root == unity_root"
-        );
-    }
-
-    #[test]
-    fn migrate_knowledge_noop_when_destination_already_exists() {
-        // If the new location already has a knowledge base, leave both
-        // alone (don't overwrite user data). The caller (set_workspace)
-        // is expected to ask the user how to merge if both exist.
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace_root = tmp.path().join("ws_root");
-        let unity_root = workspace_root.join("Project");
-        std::fs::create_dir_all(unity_root.join("ProjectSettings")).unwrap();
-
-        // Pre-seed both locations.
-        std::fs::create_dir_all(unity_root.join("Locus").join("knowledge")).unwrap();
-        std::fs::write(unity_root.join("Locus").join("knowledge").join("legacy.md"), b"old").unwrap();
-        std::fs::create_dir_all(workspace_root.join("Locus").join("knowledge")).unwrap();
-        std::fs::write(workspace_root.join("Locus").join("knowledge").join("new.md"), b"new").unwrap();
-
-        let ws_str = workspace_root.to_string_lossy().to_string();
-        let un_str = unity_root.to_string_lossy().to_string();
-        migrate_workspace_knowledge_from_unity_root(&ws_str, &un_str).unwrap();
-
-        // Both kept — no data lost on either side.
-        assert!(unity_root.join("Locus").join("knowledge").join("legacy.md").is_file());
-        assert!(workspace_root.join("Locus").join("knowledge").join("new.md").is_file());
-        // No marker because nothing was migrated.
-        let marker = workspace_root.join("Locus").join(".knowledge-migration.json");
-        assert!(!marker.exists());
-    }
-
-    #[test]
-    fn migrate_knowledge_noop_when_legacy_missing() {
-        // No legacy knowledge base — nothing to migrate, no marker.
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace_root = tmp.path().join("ws_root");
-        let unity_root = workspace_root.join("Project");
-        std::fs::create_dir_all(&unity_root).unwrap();
-
-        let ws_str = workspace_root.to_string_lossy().to_string();
-        let un_str = unity_root.to_string_lossy().to_string();
-        migrate_workspace_knowledge_from_unity_root(&ws_str, &un_str).unwrap();
-
-        let marker = workspace_root.join("Locus").join(".knowledge-migration.json");
-        assert!(!marker.exists());
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ impl AgentInstance {
         };
 
         let (connected, actual_status, _) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return ExecutedToolResult::from_tool_result(ToolResult {
                 output: "Unity Editor not connected".to_string(),
@@ -94,7 +94,7 @@ impl AgentInstance {
             .filter(|value| !value.is_empty());
 
         let capture =
-            match crate::unity_bridge::capture_viewport(&self.unity_root, target, window_title)
+            match crate::unity_bridge::capture_viewport(&self.working_dir, target, window_title)
                 .await
             {
                 Ok(capture) => capture,

@@ -307,12 +307,12 @@ fn knowledge_proposal_target_path(path: &str) -> Result<String, String> {
 }
 
 fn snapshot_knowledge_target(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: KnowledgeType,
     target: &str,
 ) -> Result<Option<KnowledgeDocument>, String> {
     let rel_path = knowledge_proposal_target_path(target)?;
-    match knowledge_store::load_document_by_path(workspace_root, doc_type, &rel_path) {
+    match knowledge_store::load_document_by_path(working_dir, doc_type, &rel_path) {
         Ok(doc) => Ok(Some(doc)),
         Err(err) if err.contains("not found") => Ok(None),
         Err(err) => Err(err),
@@ -320,7 +320,7 @@ fn snapshot_knowledge_target(
 }
 
 fn restore_knowledge_target(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: KnowledgeType,
     backup: &Option<KnowledgeDocument>,
     target: &str,
@@ -328,10 +328,10 @@ fn restore_knowledge_target(
     let rel_path = knowledge_proposal_target_path(target)?;
     match backup {
         Some(doc) => {
-            knowledge_store::save_document(workspace_root, doc.clone())?;
+            knowledge_store::save_document(working_dir, doc.clone())?;
         }
         None => {
-            let path = knowledge_store::document_path(workspace_root, doc_type, &rel_path)?;
+            let path = knowledge_store::document_path(working_dir, doc_type, &rel_path)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -349,17 +349,17 @@ fn restore_knowledge_target(
 }
 
 fn apply_knowledge_target(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: KnowledgeType,
     target: &str,
     draft: &str,
 ) -> Result<KnowledgeDocument, String> {
     let rel_path = knowledge_proposal_target_path(target)?;
-    match knowledge_store::load_document_by_path(workspace_root, doc_type, &rel_path) {
+    match knowledge_store::load_document_by_path(working_dir, doc_type, &rel_path) {
         Ok(mut doc) => {
             doc.body = draft.to_string();
             doc.updated_at = current_unix_millis();
-            knowledge_store::save_document(workspace_root, doc)
+            knowledge_store::save_document(working_dir, doc)
         }
         Err(err) if err.contains("not found") => {
             let now = current_unix_millis();
@@ -392,7 +392,7 @@ fn apply_knowledge_target(
                 created_at: now,
                 updated_at: now,
             };
-            knowledge_store::save_document(workspace_root, doc)
+            knowledge_store::save_document(working_dir, doc)
         }
         Err(err) => Err(err),
     }
@@ -496,9 +496,8 @@ pub async fn get_agent_rendered_env_prompt(
         .get(&agent_id)
         .cloned()
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let unity_root = workspace.unity_root.read().await.clone();
-    let workspace_root = workspace.workspace_root.read().await.clone();
-    let workspace_id = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let workspace_id = if working_dir.trim().is_empty() {
         None
     } else {
         workspace.workspace_id.read().await.clone()
@@ -511,8 +510,7 @@ pub async fn get_agent_rendered_env_prompt(
         false,
         registry_snapshot,
         tool_registry.inner().clone(),
-        workspace_root,
-        unity_root,
+        working_dir,
         raw_store.inner().clone(),
         workspace_id,
         "__agent-preview__".to_string(),
@@ -543,9 +541,8 @@ pub async fn get_agent_system_prompt_stats(
         .get(&agent_id)
         .cloned()
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let unity_root = workspace.unity_root.read().await.clone();
-    let workspace_root = workspace.workspace_root.read().await.clone();
-    let workspace_id = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let workspace_id = if working_dir.trim().is_empty() {
         None
     } else {
         workspace.workspace_id.read().await.clone()
@@ -558,8 +555,7 @@ pub async fn get_agent_system_prompt_stats(
         false,
         registry_snapshot,
         tool_registry.inner().clone(),
-        workspace_root,
-        unity_root,
+        working_dir,
         raw_store.inner().clone(),
         workspace_id,
         "__agent-preview__".to_string(),
@@ -715,9 +711,8 @@ pub async fn list_agent_injected_items(
         .get(&agent_id)
         .cloned()
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let unity_root = workspace.unity_root.read().await.clone();
-    let workspace_root = workspace.workspace_root.read().await.clone();
-    let workspace_id = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let workspace_id = if working_dir.trim().is_empty() {
         None
     } else {
         workspace.workspace_id.read().await.clone()
@@ -732,8 +727,7 @@ pub async fn list_agent_injected_items(
         false,
         registry_snapshot,
         tool_registry.inner().clone(),
-        workspace_root,
-        unity_root,
+        working_dir,
         raw_store.inner().clone(),
         workspace_id,
         "__agent-preview__".to_string(),
@@ -758,7 +752,7 @@ pub async fn create_session(
     workspace: State<'_, Arc<Workspace>>,
     store: State<'_, Arc<SessionStore>>,
 ) -> Result<String, AppError> {
-    let cwd = workspace.workspace_root.read().await.clone();
+    let cwd = workspace.path.read().await.clone();
     let ws_id = if cwd.trim().is_empty() {
         None
     } else {
@@ -859,8 +853,7 @@ pub async fn chat(
     undo_manager: State<'_, crate::UndoManagerHandle>,
 ) -> Result<ChatLaunch, AppError> {
     let registry_snapshot = registry.snapshot().await;
-    let unity_root = workspace.unity_root.read().await.clone();
-    let cwd = workspace.workspace_root.read().await.clone();
+    let cwd = workspace.path.read().await.clone();
     let ws_id = if cwd.trim().is_empty() {
         None
     } else {
@@ -1042,7 +1035,6 @@ pub async fn chat(
         reg,
         tools,
         cwd,
-        unity_root,
         raw,
         ws_id,
         selected_model,
@@ -1584,7 +1576,7 @@ pub async fn undo_latest_conversation_turn(
     workspace: State<'_, Arc<Workspace>>,
     store: State<'_, Arc<SessionStore>>,
 ) -> Result<SessionDetail, AppError> {
-    let workspace_root = workspace.workspace_root.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let deleted = store
         .truncate_latest_conversation_turn(&session_id)
         .map_err(AppError::from)?;
@@ -1599,7 +1591,7 @@ pub async fn undo_latest_conversation_turn(
     let detail = store.load_session(&session_id).map_err(AppError::from)?;
     super::emit_session_content_changed(
         &app_handle,
-        &workspace_root,
+        &working_dir,
         &session_id,
         "undo_latest_conversation_turn",
     );
@@ -1614,7 +1606,7 @@ pub async fn rollback_session_to_message(
     workspace: State<'_, Arc<Workspace>>,
     store: State<'_, Arc<SessionStore>>,
 ) -> Result<SessionDetail, AppError> {
-    let workspace_root = workspace.workspace_root.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     store
         .truncate_after_message(&session_id, &message_id)
         .map_err(AppError::from)?;
@@ -1622,7 +1614,7 @@ pub async fn rollback_session_to_message(
     let detail = store.load_session(&session_id).map_err(AppError::from)?;
     super::emit_session_content_changed(
         &app_handle,
-        &workspace_root,
+        &working_dir,
         &session_id,
         "rollback_session_to_message",
     );
@@ -1635,7 +1627,7 @@ pub async fn list_sessions(
     workspace: State<'_, Arc<Workspace>>,
     active_tasks: State<'_, ActiveTasks>,
 ) -> Result<Vec<SessionSummary>, AppError> {
-    let cwd = workspace.workspace_root.read().await.clone();
+    let cwd = workspace.path.read().await.clone();
     let ws_id = if cwd.trim().is_empty() {
         None
     } else {
@@ -1670,7 +1662,7 @@ pub async fn list_archived_sessions(
     store: State<'_, Arc<SessionStore>>,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<Vec<SessionSummary>, AppError> {
-    let cwd = workspace.workspace_root.read().await.clone();
+    let cwd = workspace.path.read().await.clone();
     let ws_id = if cwd.trim().is_empty() {
         None
     } else {
@@ -2116,8 +2108,8 @@ pub async fn apply_knowledge_proposal(
         .into());
     }
 
-    let workspace_root = workspace.workspace_root.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Err("No working directory selected.".into());
     }
 
@@ -2153,7 +2145,7 @@ pub async fn apply_knowledge_proposal(
 
     let mut knowledge_backups = HashMap::new();
     for (doc_type, target) in &proposal_targets {
-        let backup = snapshot_knowledge_target(&workspace_root, *doc_type, target)?;
+        let backup = snapshot_knowledge_target(&working_dir, *doc_type, target)?;
         knowledge_backups.insert(target.clone(), backup);
     }
 
@@ -2178,7 +2170,7 @@ pub async fn apply_knowledge_proposal(
             apply_error = Some(format!("Missing knowledge backup for {}", item.target));
             break;
         }
-        if let Err(err) = apply_knowledge_target(&workspace_root, doc_type, &item.target, &item.draft)
+        if let Err(err) = apply_knowledge_target(&working_dir, doc_type, &item.target, &item.draft)
         {
             apply_error = Some(err);
             break;
@@ -2188,7 +2180,7 @@ pub async fn apply_knowledge_proposal(
     if apply_error.is_none() {
         if let Err(error) = super::knowledge::reconcile_and_emit_knowledge_changed(
             &app_handle,
-            &workspace_root,
+            &working_dir,
             knowledge_index_state.inner().clone(),
             "apply_knowledge_proposal",
         )
@@ -2219,7 +2211,7 @@ pub async fn apply_knowledge_proposal(
             for (doc_type, target) in proposal_targets.iter().rev() {
                 let backup = knowledge_backups.get(target).cloned().unwrap_or(None);
                 if let Err(rollback_error) =
-                    restore_knowledge_target(&workspace_root, *doc_type, &backup, target)
+                    restore_knowledge_target(&working_dir, *doc_type, &backup, target)
                 {
                     rollback_errors.push(format!(
                         "knowledge rollback failed for {}: {}",
@@ -2262,8 +2254,8 @@ pub async fn save_raw_context(
     workspace: State<'_, Arc<Workspace>>,
     registry: State<'_, AgentDefRegistryState>,
 ) -> Result<String, AppError> {
-    let workspace_root = workspace.workspace_root.read().await.clone();
-    let project_config = load_export_project_config(&workspace_root);
+    let working_dir = workspace.path.read().await.clone();
+    let project_config = load_export_project_config(&working_dir);
     let usage = store.get_token_usage(&session_id).ok();
     let raw_markdown = {
         let raw = raw_store.lock().await;
@@ -2319,7 +2311,7 @@ pub async fn save_raw_context(
 
 #[derive(Debug, Clone)]
 struct ExportProjectConfig {
-    workspace_root: String,
+    working_dir: String,
     knowledge_enabled: bool,
     full_text_search_enabled: bool,
     semantic_search_enabled: bool,
@@ -2331,8 +2323,8 @@ struct ExportEnabledTool {
     description: String,
 }
 
-fn load_export_project_config(workspace_root: &str) -> Option<ExportProjectConfig> {
-    let trimmed = workspace_root.trim();
+fn load_export_project_config(working_dir: &str) -> Option<ExportProjectConfig> {
+    let trimmed = working_dir.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -2350,7 +2342,7 @@ fn load_export_project_config(workspace_root: &str) -> Option<ExportProjectConfi
             .is_some();
 
     Some(ExportProjectConfig {
-        workspace_root: trimmed.to_string(),
+        working_dir: trimmed.to_string(),
         knowledge_enabled,
         full_text_search_enabled: knowledge_enabled,
         semantic_search_enabled: knowledge_enabled,
@@ -2370,7 +2362,7 @@ const EMPTY_EXPORT_FIELD: &str = "empty";
 fn append_project_config_markdown(out: &mut String, project_config: Option<&ExportProjectConfig>) {
     out.push_str("## Current Project Configuration\n\n");
     if let Some(config) = project_config {
-        out.push_str(&format!("- **Workspace:** `{}`\n", config.workspace_root));
+        out.push_str(&format!("- **Workspace:** `{}`\n", config.working_dir));
         out.push_str(&format!(
             "- **Knowledge:** {}\n",
             format_enabled_state(config.knowledge_enabled)
@@ -3074,7 +3066,7 @@ mod tests {
         append_project_config_markdown(
             &mut out,
             Some(&ExportProjectConfig {
-                workspace_root: "F:/Proj".to_string(),
+                working_dir: "F:/Proj".to_string(),
                 knowledge_enabled: true,
                 full_text_search_enabled: false,
                 semantic_search_enabled: true,

@@ -540,13 +540,9 @@ export function useAppBootstrap() {
   }
 
   // -- Workspace management --
-  //
-  // The post-switch prelude (clearing warmup, resetting subscriptions, etc.)
-  // is shared between `applyWorkingDir` (legacy String-returning path) and
-  // `applyWorkspacePath` (new structured-result path that the workspace
-  // picker UI uses). Both funnels call `runWorkspaceSwitchPostlude`
-  // after the workspace has been committed.
-  function runWorkspaceSwitchPrelude(path: string) {
+  async function applyWorkingDir(path: string) {
+    const switchStartedAt = workspaceSwitchNowMs();
+    console.info(`[workspace-switch] phase=apply_start target=${path}`);
     clearWarmup(); // invalidate warmup cache for previous workingDir
     lastAutoOpenedLexicalProgressRun = "";
     resetSystemNotificationState();
@@ -555,55 +551,38 @@ export function useAppBootstrap() {
     _wpAsset = null;
     _wpAgent = null;
     _wpSettings = null;
-    console.info(`[workspace-switch] phase=apply_start target=${path}`);
-  }
-
-  async function runWorkspaceSwitchPostlude(path: string) {
-    chatStore.newChat({ persistSelection: false });
-    console.info(`[workspace-switch] phase=new_chat_done target=${path}`);
-    await Promise.all([
-      measureWorkspaceSwitchAsync("refresh_sessions", () => chatStore.refreshSessions(), {
-        target: path,
-      }),
-      measureWorkspaceSwitchAsync("load_recent_dirs", () => projectStore.loadRecentDirs(), {
-        target: path,
-      }),
-      measureWorkspaceSwitchAsync("load_agents", () => agentStore.loadAgents(), {
-        target: path,
-      }),
-      measureWorkspaceSwitchAsync(
-        "check_unity_connection",
-        () => projectStore.checkUnityConnection(),
-        { target: path },
-      ),
-      measureWorkspaceSwitchAsync("check_unity_plugin", () => projectStore.checkUnityPlugin(), {
-        target: path,
-      }),
-      measureWorkspaceSwitchAsync("load_asset_db_status", () => projectStore.loadAssetDbStatus(), {
-        target: path,
-      }),
-      measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target: path }),
-      measureWorkspaceSwitchAsync("load_workspace_model_override", () => modelStore.loadWorkspaceDefaults(), { target: path }),
-    ]);
-  }
-
-  /**
-   * Switch the workspace using the legacy String-returning IPC. Kept for
-   * back-compat with call sites that do not need the structured result
-   * (notably the persisted `working_dir.txt` re-load on app startup).
-   * The P5/P6 refactor path is `applyWorkspacePath` + the resolve /
-   * picker flow that lives in App.vue.
-   */
-  async function applyWorkingDir(path: string) {
-    const switchStartedAt = workspaceSwitchNowMs();
-    runWorkspaceSwitchPrelude(path);
     try {
       await measureWorkspaceSwitchAsync(
         "set_working_dir",
         () => projectStore.setWorkingDir(path),
         { target: path },
       );
-      await runWorkspaceSwitchPostlude(path);
+      chatStore.newChat({ persistSelection: false });
+      console.info(`[workspace-switch] phase=new_chat_done target=${path}`);
+      await Promise.all([
+        measureWorkspaceSwitchAsync("refresh_sessions", () => chatStore.refreshSessions(), {
+          target: path,
+        }),
+        measureWorkspaceSwitchAsync("load_recent_dirs", () => projectStore.loadRecentDirs(), {
+          target: path,
+        }),
+        measureWorkspaceSwitchAsync("load_agents", () => agentStore.loadAgents(), {
+          target: path,
+        }),
+        measureWorkspaceSwitchAsync(
+          "check_unity_connection",
+          () => projectStore.checkUnityConnection(),
+          { target: path },
+        ),
+        measureWorkspaceSwitchAsync("check_unity_plugin", () => projectStore.checkUnityPlugin(), {
+          target: path,
+        }),
+        measureWorkspaceSwitchAsync("load_asset_db_status", () => projectStore.loadAssetDbStatus(), {
+          target: path,
+        }),
+        measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target: path }),
+        measureWorkspaceSwitchAsync("load_workspace_model_override", () => modelStore.loadWorkspaceDefaults(), { target: path }),
+      ]);
     } finally {
       console.info(
         `[workspace-switch] phase=apply_done elapsed_ms=${Math.round(
@@ -611,54 +590,6 @@ export function useAppBootstrap() {
         )} target=${path}`,
       );
     }
-  }
-
-  /**
-   * Switch the workspace using the new structured IPC. The caller is
-   * expected to have already resolved any `Picker` case via
-   * `projectStore.resolveUnityProjectPath` and to forward the chosen
-   * candidate here. The `resolutionKind` is informational — it
-   * surfaces in the structured result and in the workspace-switch
-   * trace logs.
-   */
-  async function applyWorkspacePath(
-    path: string,
-    resolutionKind: "exact" | "walkedUp" | "pickerSelected" = "exact",
-  ): Promise<Awaited<ReturnType<typeof projectStore.setWorkspace>>> {
-    const switchStartedAt = workspaceSwitchNowMs();
-    runWorkspaceSwitchPrelude(path);
-    let result: Awaited<ReturnType<typeof projectStore.setWorkspace>> | null = null;
-    try {
-      result = await measureWorkspaceSwitchAsync(
-        "set_workspace",
-        () => projectStore.setWorkspace(path),
-        { target: path, resolution_kind: resolutionKind },
-      );
-      if (result.migration) {
-        console.info(
-          `[Locus] knowledge base migrated during workspace switch: ${result.migration.fileCount} files, ${result.migration.bytes} bytes`,
-        );
-      }
-      await runWorkspaceSwitchPostlude(path);
-      return result;
-    } finally {
-      console.info(
-        `[workspace-switch] phase=apply_done elapsed_ms=${Math.round(
-          workspaceSwitchNowMs() - switchStartedAt,
-        )} target=${path} resolution_kind=${resolutionKind}`,
-      );
-    }
-  }
-
-  /**
-   * Resolve a user-selected directory against the back-end's
-   * Unity-project discovery rules. Returns the same discriminated
-   * union that `projectStore.resolveUnityProjectPath` returns
-   * (`resolved` | `picker` | `notFound`). Pure helper — no state
-   * mutation.
-   */
-  async function resolveWorkspace(path: string) {
-    return projectStore.resolveUnityProjectPath(path);
   }
 
   // -- Settings callbacks --
@@ -705,8 +636,6 @@ export function useAppBootstrap() {
     registerListeners,
     cleanup,
     applyWorkingDir,
-    applyWorkspacePath,
-    resolveWorkspace,
     refreshAfterSettings,
     onOnboardingCompleted,
   };

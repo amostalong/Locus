@@ -48,7 +48,7 @@ const MAX_KNOWLEDGE_PAGE_SIZE: usize = 500;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeChangedEvent {
-    pub workspace_root: String,
+    pub working_dir: String,
     pub source: String,
     pub changed_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,10 +87,10 @@ pub struct KnowledgeListPageResponse {
     pub next_cursor: Option<String>,
 }
 
-pub(crate) fn emit_knowledge_changed(app_handle: &AppHandle, workspace_root: &str, source: &str) {
+pub(crate) fn emit_knowledge_changed(app_handle: &AppHandle, working_dir: &str, source: &str) {
     emit_knowledge_changed_with_target(
         app_handle,
-        workspace_root,
+        working_dir,
         source,
         KnowledgeChangedTarget::default(),
     );
@@ -98,12 +98,12 @@ pub(crate) fn emit_knowledge_changed(app_handle: &AppHandle, workspace_root: &st
 
 pub(crate) fn emit_knowledge_changed_with_target(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     source: &str,
     target: KnowledgeChangedTarget,
 ) {
     let payload = KnowledgeChangedEvent {
-        workspace_root: workspace_root.to_string(),
+        working_dir: working_dir.to_string(),
         source: source.to_string(),
         changed_at: chrono::Utc::now().timestamp_millis(),
         doc_type: target.doc_type.map(|value| value.as_str().to_string()),
@@ -123,23 +123,23 @@ pub(crate) fn emit_knowledge_changed_with_target(
 
 pub(crate) async fn reconcile_and_emit_knowledge_changed(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     source: &str,
 ) -> Result<(), AppError> {
-    if workspace_root.trim().is_empty() {
+    if working_dir.trim().is_empty() {
         return Ok(());
     }
 
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
     knowledge_index::reconcile_workspace(
-        workspace_root,
+        working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         knowledge_index_state,
     )
     .await
     .map_err(AppError::from)?;
-    emit_knowledge_changed(app_handle, workspace_root, source);
+    emit_knowledge_changed(app_handle, working_dir, source);
     Ok(())
 }
 
@@ -160,14 +160,14 @@ fn remove_shadowed_documents_for_path(
 
 async fn restore_visible_document_for_path(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<(), AppError> {
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
     let Ok(document) = knowledge_store::load_document_by_path_with_app_root(
-        workspace_root,
+        working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         doc_type,
         path,
@@ -182,7 +182,7 @@ async fn restore_visible_document_for_path(
     )?;
     knowledge_index::upsert_document(
         knowledge_index_state,
-        workspace_root,
+        working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         document,
     )
@@ -192,14 +192,14 @@ async fn restore_visible_document_for_path(
 
 pub(crate) async fn sync_visible_document_for_path(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     doc_type: KnowledgeType,
     path: &str,
 ) -> Result<(), AppError> {
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
     match knowledge_store::load_document_by_path_with_app_root(
-        workspace_root,
+        working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         doc_type,
         path,
@@ -213,7 +213,7 @@ pub(crate) async fn sync_visible_document_for_path(
             )?;
             knowledge_index::upsert_document(
                 knowledge_index_state,
-                workspace_root,
+                working_dir,
                 app_knowledge_dir.0.as_ref().as_ref(),
                 document,
             )
@@ -229,7 +229,7 @@ pub(crate) async fn sync_visible_document_for_path(
 
 pub(crate) async fn sync_visible_documents_for_paths_and_emit(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     source: &str,
     targets: &[(KnowledgeType, String)],
@@ -237,20 +237,20 @@ pub(crate) async fn sync_visible_documents_for_paths_and_emit(
     for (doc_type, path) in targets {
         sync_visible_document_for_path(
             app_handle,
-            workspace_root,
+            working_dir,
             knowledge_index_state.clone(),
             *doc_type,
             path,
         )
         .await?;
     }
-    emit_knowledge_changed(app_handle, workspace_root, source);
+    emit_knowledge_changed(app_handle, working_dir, source);
     Ok(())
 }
 
 pub(crate) async fn sync_visible_documents_for_prefix(
     app_handle: &AppHandle,
-    workspace_root: &str,
+    working_dir: &str,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     doc_type: KnowledgeType,
     path_prefix: &str,
@@ -258,7 +258,7 @@ pub(crate) async fn sync_visible_documents_for_prefix(
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
     let app_root = app_knowledge_dir.0.as_ref().as_ref();
     let visible_documents = knowledge_store::load_documents_with_app_root(
-        workspace_root,
+        working_dir,
         app_root,
         Some(doc_type),
         Some(path_prefix),
@@ -280,7 +280,7 @@ pub(crate) async fn sync_visible_documents_for_prefix(
         )?;
         knowledge_index::upsert_document(
             knowledge_index_state.clone(),
-            workspace_root,
+            working_dir,
             app_root,
             document,
         )
@@ -348,8 +348,8 @@ impl Default for SkillConfig {
     }
 }
 
-fn skill_config_path(workspace_root: &str) -> std::path::PathBuf {
-    std::path::Path::new(workspace_root)
+fn skill_config_path(working_dir: &str) -> std::path::PathBuf {
+    std::path::Path::new(working_dir)
         .join("Library")
         .join("Locus")
         .join("skill_config.json")
@@ -390,8 +390,8 @@ fn normalize_skill_config_key(rel_path: &str, source: Option<&str>) -> String {
     normalized
 }
 
-pub fn load_skill_config(workspace_root: &str) -> std::collections::HashMap<String, SkillConfig> {
-    let path = skill_config_path(workspace_root);
+pub fn load_skill_config(working_dir: &str) -> std::collections::HashMap<String, SkillConfig> {
+    let path = skill_config_path(working_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => std::collections::HashMap::new(),
@@ -399,10 +399,10 @@ pub fn load_skill_config(workspace_root: &str) -> std::collections::HashMap<Stri
 }
 
 pub fn save_skill_config(
-    workspace_root: &str,
+    working_dir: &str,
     map: &std::collections::HashMap<String, SkillConfig>,
 ) -> Result<(), String> {
-    let path = skill_config_path(workspace_root);
+    let path = skill_config_path(working_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -419,8 +419,8 @@ pub async fn get_skill_config(
     source: Option<String>,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<SkillConfig, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let map = load_skill_config(&workspace_root);
+    let working_dir = workspace.path.read().await.clone();
+    let map = load_skill_config(&working_dir);
     let key = normalize_skill_config_key(&rel_path, source.as_deref());
     Ok(map.get(&key).cloned().unwrap_or_default())
 }
@@ -436,8 +436,8 @@ pub async fn set_skill_config(
     inject_mode: Option<KnowledgeInjectMode>,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let mut map = load_skill_config(&workspace_root);
+    let working_dir = workspace.path.read().await.clone();
+    let mut map = load_skill_config(&working_dir);
     let key = normalize_skill_config_key(&rel_path, source.as_deref());
     let existing = map.get(&key).cloned().unwrap_or_default();
     // Omitted fields keep their stored override state instead of pinning the
@@ -454,15 +454,15 @@ pub async fn set_skill_config(
     let fallback = super::skill::fallback_command_name_for_skill_ref(&key);
     let config = super::skill::normalize_and_validate_skill_config(&config, &fallback)?;
     map.insert(key, config);
-    save_skill_config(&workspace_root, &map).map_err(Into::into)
+    save_skill_config(&working_dir, &map).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn get_all_skill_configs(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<std::collections::HashMap<String, SkillConfig>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    Ok(load_skill_config(&workspace_root))
+    let working_dir = workspace.path.read().await.clone();
+    Ok(load_skill_config(&working_dir))
 }
 
 fn parse_knowledge_type(value: &str) -> Result<KnowledgeType, String> {
@@ -801,7 +801,7 @@ fn merge_document_create_patch(
 }
 
 fn ensure_parent_directory_allows_create(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: KnowledgeType,
     parent_path: Option<&str>,
     kind: KnowledgeTargetKind,
@@ -810,16 +810,16 @@ fn ensure_parent_directory_allows_create(
         return Ok(());
     };
 
-    let parent_dir = knowledge_store::knowledge_root(workspace_root)
+    let parent_dir = knowledge_store::knowledge_root(working_dir)
         .join(doc_type.as_str())
         .join(parent_path);
     if !parent_dir.is_dir()
-        && !knowledge_store::directory_exists(workspace_root, doc_type, parent_path)?
+        && !knowledge_store::directory_exists(working_dir, doc_type, parent_path)?
     {
         return Ok(());
     }
 
-    let parent = knowledge_store::read_directory_config(workspace_root, doc_type, parent_path)?;
+    let parent = knowledge_store::read_directory_config(working_dir, doc_type, parent_path)?;
     match kind {
         KnowledgeTargetKind::Document if !parent.config.allow_create_documents => Err(format!(
             "Knowledge directory '{}' does not allow creating child documents",
@@ -834,7 +834,7 @@ fn ensure_parent_directory_allows_create(
 }
 
 pub(crate) fn execute_knowledge_read_request(
-    workspace_root: &str,
+    working_dir: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     request: KnowledgeReadRequest,
 ) -> Result<KnowledgeReadResponse, String> {
@@ -859,7 +859,7 @@ pub(crate) fn execute_knowledge_read_request(
             if requested_type == Some(KnowledgeType::Skill) {
                 let virtual_path = normalize_knowledge_directory_path(&request.path)?;
                 if let Some(result) = super::skill::read_skill_package_document_sync(
-                    workspace_root,
+                    working_dir,
                     &virtual_path,
                     requested_part,
                 )? {
@@ -875,7 +875,7 @@ pub(crate) fn execute_knowledge_read_request(
                 resolve_knowledge_document_target(request.doc_type, &request.path)?;
             if doc_type == KnowledgeType::Skill {
                 if let Some(result) = super::skill::read_skill_package_document_sync(
-                    workspace_root,
+                    working_dir,
                     &normalized_path,
                     requested_part,
                 )? {
@@ -886,9 +886,9 @@ pub(crate) fn execute_knowledge_read_request(
                     });
                 }
             }
-            ensure_memory_builtins_for_type(workspace_root, Some(doc_type))?;
+            ensure_memory_builtins_for_type(working_dir, Some(doc_type))?;
             let result = knowledge_store::read_document_with_app_root(
-                workspace_root,
+                working_dir,
                 app_knowledge_dir,
                 doc_type,
                 &normalized_path,
@@ -905,7 +905,7 @@ pub(crate) fn execute_knowledge_read_request(
                 resolve_knowledge_directory_target(request.doc_type, &request.path)?;
             if doc_type == KnowledgeType::Skill {
                 if let Some(result) =
-                    super::skill::read_skill_package_directory_sync(workspace_root, &normalized_path)?
+                    super::skill::read_skill_package_directory_sync(working_dir, &normalized_path)?
                 {
                     return Ok(KnowledgeReadResponse {
                         kind: KnowledgeTargetKind::Directory,
@@ -915,7 +915,7 @@ pub(crate) fn execute_knowledge_read_request(
                 }
             }
             let result = knowledge_store::read_directory_config_with_app_root(
-                workspace_root,
+                working_dir,
                 app_knowledge_dir,
                 doc_type,
                 &normalized_path,
@@ -930,7 +930,7 @@ pub(crate) fn execute_knowledge_read_request(
 }
 
 pub(crate) fn execute_knowledge_create_request(
-    workspace_root: &str,
+    working_dir: &str,
     request: KnowledgeCreateRequest,
 ) -> Result<KnowledgeMutationResponse, String> {
     if request.path.trim().is_empty() {
@@ -950,24 +950,24 @@ pub(crate) fn execute_knowledge_create_request(
                         .to_string(),
                 );
             }
-            ensure_memory_builtins_for_type(workspace_root, Some(doc_type))?;
+            ensure_memory_builtins_for_type(working_dir, Some(doc_type))?;
             let parent_path = parent_directory_from_document_path(&normalized_path);
             ensure_parent_directory_allows_create(
-                workspace_root,
+                working_dir,
                 doc_type,
                 parent_path.as_deref(),
                 KnowledgeTargetKind::Document,
             )?;
             let mut document_patch = merge_document_create_patch(
                 knowledge_store::default_document_create_patch(
-                    workspace_root,
+                    working_dir,
                     doc_type,
                     &normalized_path,
                 )?,
                 document_patch,
             );
             let document = knowledge_store::update_document(
-                workspace_root,
+                working_dir,
                 KnowledgeUpdateRequest {
                     op: KnowledgeUpdateOp::Create,
                     path: normalized_path.clone(),
@@ -1013,15 +1013,15 @@ pub(crate) fn execute_knowledge_create_request(
             }
             let parent_path = parent_directory_from_directory_path(&normalized_path);
             ensure_parent_directory_allows_create(
-                workspace_root,
+                working_dir,
                 doc_type,
                 parent_path.as_deref(),
                 KnowledgeTargetKind::Directory,
             )?;
             let result_path =
-                knowledge_store::create_directory(workspace_root, doc_type, &normalized_path)?;
+                knowledge_store::create_directory(working_dir, doc_type, &normalized_path)?;
             let directory = Some(knowledge_store::read_directory_config(
-                workspace_root,
+                working_dir,
                 doc_type,
                 &result_path,
             )?);
@@ -1038,7 +1038,7 @@ pub(crate) fn execute_knowledge_create_request(
 }
 
 pub(crate) fn execute_knowledge_edit_request(
-    workspace_root: &str,
+    working_dir: &str,
     request: KnowledgeEditRequest,
 ) -> Result<KnowledgeMutationResponse, String> {
     if request.path.trim().is_empty() {
@@ -1052,10 +1052,10 @@ pub(crate) fn execute_knowledge_edit_request(
                 .ok_or_else(|| "knowledge_edit document requires 'document'.".to_string())?;
             let (doc_type, normalized_path) =
                 resolve_knowledge_document_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
-            ensure_memory_builtins_for_type(workspace_root, Some(doc_type))?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
+            ensure_memory_builtins_for_type(working_dir, Some(doc_type))?;
             let document = knowledge_store::edit_document(
-                workspace_root,
+                working_dir,
                 &normalized_path,
                 Some(doc_type),
                 document_patch,
@@ -1075,12 +1075,12 @@ pub(crate) fn execute_knowledge_edit_request(
                 .ok_or_else(|| "knowledge_edit directory requires 'config'.".to_string())?;
             let (doc_type, normalized_path) =
                 resolve_knowledge_directory_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
             let current =
-                knowledge_store::read_directory_config(workspace_root, doc_type, &normalized_path)?;
+                knowledge_store::read_directory_config(working_dir, doc_type, &normalized_path)?;
             let merged = merge_directory_config(doc_type, Some(current), &config_patch);
             let directory = knowledge_store::update_directory_config(
-                workspace_root,
+                working_dir,
                 doc_type,
                 &normalized_path,
                 merged,
@@ -1098,7 +1098,7 @@ pub(crate) fn execute_knowledge_edit_request(
 }
 
 pub(crate) fn execute_knowledge_move_request(
-    workspace_root: &str,
+    working_dir: &str,
     request: KnowledgeMoveRequest,
 ) -> Result<KnowledgeMutationResponse, String> {
     if request.path.trim().is_empty() {
@@ -1112,13 +1112,13 @@ pub(crate) fn execute_knowledge_move_request(
         KnowledgeTargetKind::Document => {
             let (doc_type, normalized_path) =
                 resolve_knowledge_document_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
-            ensure_memory_builtins_for_type(workspace_root, Some(doc_type))?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
+            ensure_memory_builtins_for_type(working_dir, Some(doc_type))?;
             let (_, normalized_target_path) =
                 resolve_knowledge_document_target(Some(doc_type), &request.new_path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_target_path)?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_target_path)?;
             let document = knowledge_store::edit_document(
-                workspace_root,
+                working_dir,
                 &normalized_path,
                 Some(doc_type),
                 KnowledgeDocumentPatch {
@@ -1138,12 +1138,12 @@ pub(crate) fn execute_knowledge_move_request(
         KnowledgeTargetKind::Directory => {
             let (doc_type, normalized_path) =
                 resolve_knowledge_directory_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
             let (_, normalized_target_path) =
                 resolve_knowledge_directory_target(Some(doc_type), &request.new_path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_target_path)?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_target_path)?;
             let result_path = knowledge_store::move_directory(
-                workspace_root,
+                working_dir,
                 doc_type,
                 &normalized_path,
                 &normalized_target_path,
@@ -1161,7 +1161,7 @@ pub(crate) fn execute_knowledge_move_request(
 }
 
 pub(crate) fn execute_knowledge_delete_request(
-    workspace_root: &str,
+    working_dir: &str,
     request: KnowledgeDeleteRequest,
 ) -> Result<KnowledgeMutationResponse, String> {
     if request.path.trim().is_empty() {
@@ -1172,10 +1172,10 @@ pub(crate) fn execute_knowledge_delete_request(
         KnowledgeTargetKind::Document => {
             let (doc_type, normalized_path) =
                 resolve_knowledge_document_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
-            ensure_memory_builtins_for_type(workspace_root, Some(doc_type))?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
+            ensure_memory_builtins_for_type(working_dir, Some(doc_type))?;
             let document = knowledge_store::update_document(
-                workspace_root,
+                working_dir,
                 KnowledgeUpdateRequest {
                     op: KnowledgeUpdateOp::Delete,
                     path: normalized_path.clone(),
@@ -1195,9 +1195,9 @@ pub(crate) fn execute_knowledge_delete_request(
         KnowledgeTargetKind::Directory => {
             let (doc_type, normalized_path) =
                 resolve_knowledge_directory_target(request.doc_type, &request.path)?;
-            ensure_skill_package_target_mutable(workspace_root, doc_type, &normalized_path)?;
+            ensure_skill_package_target_mutable(working_dir, doc_type, &normalized_path)?;
             let result_path =
-                knowledge_store::delete_directory(workspace_root, doc_type, &normalized_path)?;
+                knowledge_store::delete_directory(working_dir, doc_type, &normalized_path)?;
             Ok(KnowledgeMutationResponse {
                 kind: KnowledgeTargetKind::Directory,
                 doc_type,
@@ -1211,11 +1211,11 @@ pub(crate) fn execute_knowledge_delete_request(
 }
 
 fn ensure_memory_builtins_for_type(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: Option<KnowledgeType>,
 ) -> Result<(), String> {
     if matches!(doc_type, Some(KnowledgeType::Memory)) {
-        knowledge_store::ensure_memory_builtin_documents(workspace_root)?;
+        knowledge_store::ensure_memory_builtin_documents(working_dir)?;
     }
     Ok(())
 }
@@ -1224,14 +1224,14 @@ fn ensure_memory_builtins_for_type(
 // knowledge mutations must never write inside a package namespace, or they
 // would shadow package content with workspace files.
 fn ensure_skill_package_target_mutable(
-    workspace_root: &str,
+    working_dir: &str,
     doc_type: KnowledgeType,
     normalized_path: &str,
 ) -> Result<(), String> {
     if doc_type != KnowledgeType::Skill {
         return Ok(());
     }
-    super::skill::ensure_skill_package_virtual_path_mutable(workspace_root, normalized_path)
+    super::skill::ensure_skill_package_virtual_path_mutable(working_dir, normalized_path)
 }
 
 #[tauri::command]
@@ -1247,7 +1247,7 @@ pub async fn knowledge_query(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<Vec<KnowledgeSearchHit>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let lexical_query = lexical_query
         .or_else(|| query.clone())
         .map(|value| value.trim().to_string())
@@ -1288,7 +1288,7 @@ pub async fn knowledge_query(
     }
 
     knowledge_index::query_documents(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         lexical_query.as_deref(),
         semantic_query.as_deref(),
@@ -1306,11 +1306,11 @@ pub async fn knowledge_query(
 pub async fn knowledge_get_general_config(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<KnowledgeGeneralConfig, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let library_dir = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(&workspace_root)
+        knowledge_index::library_dir_for_working_dir(&working_dir)
     };
     Ok(knowledge_index::load_general_config(&library_dir))
 }
@@ -1322,16 +1322,16 @@ pub async fn knowledge_save_general_config(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeGeneralConfig, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let library_dir = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(&workspace_root)
+        knowledge_index::library_dir_for_working_dir(&working_dir)
     };
     knowledge_index::save_general_config(&library_dir, &config)?;
-    if !workspace_root.trim().is_empty() {
+    if !working_dir.trim().is_empty() {
         knowledge_index::reconcile_workspace(
-            &workspace_root,
+            &working_dir,
             app_knowledge_dir.0.as_ref().as_ref(),
             knowledge_index_state.inner().clone(),
         )
@@ -1344,11 +1344,11 @@ pub async fn knowledge_save_general_config(
 pub async fn knowledge_get_embedding_config(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<EmbeddingConfig, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let library_dir = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(&workspace_root)
+        knowledge_index::library_dir_for_working_dir(&working_dir)
     };
     Ok(knowledge_index::embedding::load_config(&library_dir))
 }
@@ -1360,11 +1360,11 @@ pub async fn knowledge_save_embedding_config(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<EmbeddingConfig, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let library_dir = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(&workspace_root)
+        knowledge_index::library_dir_for_working_dir(&working_dir)
     };
     knowledge_index::embedding::save_config(&library_dir, &config)?;
     let normalized_config = knowledge_index::embedding::load_config(&library_dir);
@@ -1376,9 +1376,9 @@ pub async fn knowledge_save_embedding_config(
         let restart_required = mgr.update_config(normalized_config.clone());
         let next_signature = mgr.backend_signature_json();
         let should_activate = normalized_config.enabled
-            && !workspace_root.trim().is_empty()
+            && !working_dir.trim().is_empty()
             && (restart_required || !mgr.is_ready());
-        let backfill_strategy = if normalized_config.enabled && !workspace_root.trim().is_empty() {
+        let backfill_strategy = if normalized_config.enabled && !working_dir.trim().is_empty() {
             if !previous_config.enabled || previous_signature != next_signature {
                 EmbeddingActivationBackfillStrategy::VectorOnly
             } else {
@@ -1393,7 +1393,7 @@ pub async fn knowledge_save_embedding_config(
     if should_activate {
         knowledge_index::activate_embedding_runtime(
             knowledge_index_state.inner().clone(),
-            &workspace_root,
+            &working_dir,
             app_knowledge_dir.0.as_ref().as_ref(),
             backfill_strategy,
         )
@@ -1411,10 +1411,10 @@ pub async fn knowledge_activate_embedding(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     knowledge_index::activate_embedding_runtime(
         knowledge_index_state.inner().clone(),
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         EmbeddingActivationBackfillStrategy::VectorOnly,
     )
@@ -1444,11 +1444,11 @@ pub async fn knowledge_test_embedding_runtime(
     app_handle: AppHandle,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<EmbeddingRuntimeTestResult, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let library_dir = if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(&workspace_root)
+        knowledge_index::library_dir_for_working_dir(&working_dir)
     };
     let config = knowledge_index::embedding::load_config(&library_dir);
 
@@ -1494,7 +1494,7 @@ pub async fn knowledge_download_local_embedding_model(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let model_storage_dir = super::resolve_runtime_storage_dir(&app_handle)?;
     match knowledge_index::download_local_embedding_model(
         knowledge_index_state.inner().clone(),
@@ -1506,7 +1506,7 @@ pub async fn knowledge_download_local_embedding_model(
         Ok(()) => {
             emit_knowledge_changed(
                 &app_handle,
-                &workspace_root,
+                &working_dir,
                 "knowledge_download_local_embedding_model",
             );
             Ok(())
@@ -1631,10 +1631,10 @@ pub async fn knowledge_rebuild_lexical_index(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<usize, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     knowledge_index::rebuild_lexical_index_runtime(
         knowledge_index_state.inner().clone(),
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
     )
     .await
@@ -1655,18 +1655,18 @@ pub async fn knowledge_get_overview(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeOverview, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Ok(KnowledgeOverview::default());
     }
     let started_at = Instant::now();
     eprintln!(
         "[KnowledgeCommand] knowledge_get_overview start workspace={}",
-        workspace_root
+        working_dir
     );
     let model_storage_dir = super::resolve_runtime_storage_dir(&app_handle)?;
     let overview = knowledge_index::build_overview(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         knowledge_index_state.inner().clone(),
         &model_storage_dir,
@@ -1675,7 +1675,7 @@ pub async fn knowledge_get_overview(
     .map_err(AppError::from)?;
     eprintln!(
         "[KnowledgeCommand] knowledge_get_overview finished workspace={} elapsed_ms={} total_documents={}",
-        workspace_root,
+        working_dir,
         started_at.elapsed().as_millis(),
         overview.total_document_count
     );
@@ -1688,9 +1688,9 @@ pub async fn knowledge_get_unity_reference_import_status(
     workspace: State<'_, Arc<Workspace>>,
     unity_reference_import_state: State<'_, UnityReferenceImportState>,
 ) -> Result<UnityReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     unity_docs::get_unity_reference_import_status(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         unity_reference_import_state.inner().0.clone(),
     )
@@ -1702,9 +1702,9 @@ pub async fn knowledge_get_unity_reference_import_status(
 pub async fn knowledge_find_unity_reference_directory(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<Option<KnowledgeDirectoryConfigRecord>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     knowledge_store::find_reference_directory_by_external_provider(
-        &workspace_root,
+        &working_dir,
         KnowledgeSourceProvider::Unity,
     )
     .map_err(Into::into)
@@ -1716,9 +1716,9 @@ pub async fn knowledge_cancel_unity_reference_import(
     workspace: State<'_, Arc<Workspace>>,
     unity_reference_import_state: State<'_, UnityReferenceImportState>,
 ) -> Result<UnityReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     unity_docs::cancel_unity_reference_import(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         unity_reference_import_state.inner().0.clone(),
     )
@@ -1732,9 +1732,9 @@ pub async fn knowledge_get_feishu_reference_import_status(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::get_feishu_reference_import_status(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         feishu_reference_import_state.inner().0.clone(),
     )
@@ -1748,9 +1748,9 @@ pub async fn knowledge_save_feishu_reference_config(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::save_feishu_reference_config(
-        &workspace_root,
+        &working_dir,
         config,
         feishu_reference_import_state.inner().0.clone(),
     )
@@ -1764,9 +1764,9 @@ pub async fn knowledge_test_feishu_reference_connection(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceConnectionTestResult, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::test_feishu_reference_connection(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         feishu_reference_import_state.inner().0.clone(),
     )
@@ -1779,9 +1779,9 @@ pub async fn knowledge_start_feishu_reference_oauth(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceOauthStartResult, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::start_feishu_reference_oauth(
-        workspace_root,
+        working_dir,
         feishu_reference_import_state.inner().0.clone(),
     )
     .await
@@ -1794,9 +1794,9 @@ pub async fn knowledge_cancel_feishu_reference_oauth_wait(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::cancel_feishu_reference_oauth_wait(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         feishu_reference_import_state.inner().0.clone(),
     )
@@ -1810,8 +1810,8 @@ pub async fn knowledge_list_feishu_reference_space_nodes(
     parent_node_token: Option<String>,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<Vec<FeishuReferenceNodeSummary>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    feishu_docs::list_feishu_reference_space_nodes(&workspace_root, space_id, parent_node_token)
+    let working_dir = workspace.path.read().await.clone();
+    feishu_docs::list_feishu_reference_space_nodes(&working_dir, space_id, parent_node_token)
         .await
         .map_err(Into::into)
 }
@@ -1822,9 +1822,9 @@ pub async fn knowledge_cancel_feishu_reference_import(
     workspace: State<'_, Arc<Workspace>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::cancel_feishu_reference_import(
-        &workspace_root,
+        &working_dir,
         target_path.as_deref(),
         feishu_reference_import_state.inner().0.clone(),
     )
@@ -1838,8 +1838,8 @@ pub async fn knowledge_read(
     workspace: State<'_, Arc<Workspace>>,
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
 ) -> Result<KnowledgeReadResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    execute_knowledge_read_request(&workspace_root, app_knowledge_dir.0.as_ref().as_ref(), request)
+    let working_dir = workspace.path.read().await.clone();
+    execute_knowledge_read_request(&working_dir, app_knowledge_dir.0.as_ref().as_ref(), request)
         .map_err(Into::into)
 }
 
@@ -1852,10 +1852,10 @@ pub async fn knowledge_import_unity_reference_docs(
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
     unity_reference_import_state: State<'_, UnityReferenceImportState>,
 ) -> Result<UnityReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     unity_docs::start_unity_reference_import(
         app_handle,
-        workspace_root,
+        working_dir,
         target_path,
         locale,
         knowledge_index_state.inner().clone(),
@@ -1873,10 +1873,10 @@ pub async fn knowledge_import_feishu_reference_docs(
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::start_feishu_reference_import(
         app_handle,
-        workspace_root,
+        working_dir,
         request,
         knowledge_index_state.inner().clone(),
         feishu_reference_import_state.inner().0.clone(),
@@ -1893,10 +1893,10 @@ pub async fn knowledge_delete_unity_reference_docs(
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
     unity_reference_import_state: State<'_, UnityReferenceImportState>,
 ) -> Result<UnityReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     unity_docs::delete_unity_reference_docs(
         app_handle,
-        workspace_root,
+        working_dir,
         target_path,
         knowledge_index_state.inner().clone(),
         unity_reference_import_state.inner().0.clone(),
@@ -1913,10 +1913,10 @@ pub async fn knowledge_delete_feishu_reference_docs(
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
     feishu_reference_import_state: State<'_, FeishuReferenceImportState>,
 ) -> Result<FeishuReferenceImportStatus, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     feishu_docs::delete_feishu_reference_docs(
         app_handle,
-        workspace_root,
+        working_dir,
         target_path,
         knowledge_index_state.inner().clone(),
         feishu_reference_import_state.inner().0.clone(),
@@ -1934,18 +1934,18 @@ pub async fn knowledge_list(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<Vec<KnowledgeListItem>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let parsed_type = doc_type.as_deref().map(parse_knowledge_type).transpose()?;
     let (resolved_type, resolved_prefix) =
         resolve_knowledge_path_filter(parsed_type, path_prefix.as_deref())?;
-    ensure_memory_builtins_for_type(&workspace_root, resolved_type)?;
+    ensure_memory_builtins_for_type(&working_dir, resolved_type)?;
     let started_at = Instant::now();
     eprintln!(
         "[KnowledgeCommand] knowledge_list start workspace={} doc_type={:?} path_prefix={:?}",
-        workspace_root, resolved_type, resolved_prefix
+        working_dir, resolved_type, resolved_prefix
     );
     let items = knowledge_index::list_cached_documents(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         resolved_type,
         resolved_prefix.as_deref(),
@@ -1956,7 +1956,7 @@ pub async fn knowledge_list(
     let mut items = items;
     if resolved_type.is_none() || resolved_type == Some(KnowledgeType::Skill) {
         let package_items = super::skill::list_skill_package_knowledge_items_sync_with_hidden(
-            &workspace_root,
+            &working_dir,
             resolved_prefix.as_deref(),
             include_hidden.unwrap_or(false),
         );
@@ -1971,24 +1971,24 @@ pub async fn knowledge_list(
     }
     let include_package_documents = resolved_type == Some(KnowledgeType::Skill)
         && super::skill::skill_package_path_prefix_targets_package_sync(
-            &workspace_root,
+            &working_dir,
             resolved_prefix.as_deref(),
         );
     if !include_hidden.unwrap_or(false) {
         items.retain(|item| {
             (item.inject_mode != KnowledgeInjectMode::None
                 || (include_package_documents && is_skill_package_item(item)))
-                && item_model_recall_allowed(&workspace_root, item).unwrap_or(false)
+                && item_model_recall_allowed(&working_dir, item).unwrap_or(false)
         });
     }
     enrich_knowledge_list_items(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         &mut items,
     );
     eprintln!(
         "[KnowledgeCommand] knowledge_list finished workspace={} elapsed_ms={} count={}",
-        workspace_root,
+        working_dir,
         started_at.elapsed().as_millis(),
         items.len()
     );
@@ -2035,21 +2035,21 @@ pub async fn knowledge_list_page(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeListPageResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let parsed_type = doc_type.as_deref().map(parse_knowledge_type).transpose()?;
     let (resolved_type, resolved_prefix) =
         resolve_knowledge_path_filter(parsed_type, path_prefix.as_deref())?;
-    ensure_memory_builtins_for_type(&workspace_root, resolved_type)?;
+    ensure_memory_builtins_for_type(&working_dir, resolved_type)?;
     let started_at = Instant::now();
     let resolved_limit = normalize_knowledge_page_limit(limit);
     let resolved_offset =
         decode_knowledge_page_cursor(cursor.as_deref()).map_err(AppError::from)?;
     eprintln!(
         "[KnowledgeCommand] knowledge_list_page start workspace={} doc_type={:?} path_prefix={:?} offset={} limit={}",
-        workspace_root, resolved_type, resolved_prefix, resolved_offset, resolved_limit
+        working_dir, resolved_type, resolved_prefix, resolved_offset, resolved_limit
     );
     let page = knowledge_index::list_cached_documents_page(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         resolved_type,
         resolved_prefix.as_deref(),
@@ -2061,13 +2061,13 @@ pub async fn knowledge_list_page(
     .map_err(AppError::from)?;
     let mut items = page.items;
     enrich_knowledge_list_items(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         &mut items,
     );
     eprintln!(
         "[KnowledgeCommand] knowledge_list_page finished workspace={} elapsed_ms={} count={} next_cursor={:?}",
-        workspace_root,
+        working_dir,
         started_at.elapsed().as_millis(),
         items.len(),
         page.next_offset
@@ -2079,21 +2079,21 @@ pub async fn knowledge_list_page(
 }
 
 fn enrich_knowledge_list_items(
-    workspace_root: &str,
+    working_dir: &str,
     app_root: Option<&std::path::PathBuf>,
     items: &mut [KnowledgeListItem],
 ) {
-    let library_dir = if workspace_root.trim().is_empty() {
+    let library_dir = if working_dir.trim().is_empty() {
         knowledge_index::no_workspace_library_dir()
     } else {
-        knowledge_index::library_dir_for_working_dir(workspace_root)
+        knowledge_index::library_dir_for_working_dir(working_dir)
     };
     let general_config = knowledge_index::load_general_config(&library_dir);
 
     for item in items {
         if item.byte_size.is_none() {
             if let Ok(document) = knowledge_store::load_document_by_path_with_app_root(
-                workspace_root,
+                working_dir,
                 app_root,
                 item.doc_type,
                 &item.path,
@@ -2102,7 +2102,7 @@ fn enrich_knowledge_list_items(
             }
         }
         if let Ok(access) = knowledge_store::effective_document_search_access_with_app_root(
-            workspace_root,
+            working_dir,
             app_root,
             item.doc_type,
             &item.path,
@@ -2121,17 +2121,17 @@ fn enrich_knowledge_list_items(
     }
 }
 
-fn item_model_recall_allowed(workspace_root: &str, item: &KnowledgeListItem) -> Result<bool, String> {
+fn item_model_recall_allowed(working_dir: &str, item: &KnowledgeListItem) -> Result<bool, String> {
     if item.doc_type != KnowledgeType::Skill {
         return Ok(true);
     }
     if is_skill_package_item(item)
-        && !super::skill::skill_package_virtual_path_exists_sync(workspace_root, &item.path)?
+        && !super::skill::skill_package_virtual_path_exists_sync(working_dir, &item.path)?
     {
         return Ok(false);
     }
     if let Some(allowed) =
-        super::skill::skill_package_virtual_path_allows_model_recall_sync(workspace_root, &item.path)?
+        super::skill::skill_package_virtual_path_allows_model_recall_sync(working_dir, &item.path)?
     {
         return Ok(allowed);
     }
@@ -2144,23 +2144,23 @@ pub async fn knowledge_list_directories(
     workspace: State<'_, Arc<Workspace>>,
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
 ) -> Result<Vec<String>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let parsed_type = parse_knowledge_type(&doc_type)?;
-    ensure_memory_builtins_for_type(&workspace_root, Some(parsed_type))?;
+    ensure_memory_builtins_for_type(&working_dir, Some(parsed_type))?;
     let started_at = Instant::now();
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directories start workspace={} doc_type={}",
-        workspace_root, doc_type
+        working_dir, doc_type
     );
     let directories = knowledge_store::list_directories_with_app_root(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         parsed_type,
     )
     .map_err(AppError::from)?;
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directories finished workspace={} doc_type={} elapsed_ms={} count={}",
-        workspace_root,
+        working_dir,
         doc_type,
         started_at.elapsed().as_millis(),
         directories.len()
@@ -2176,9 +2176,9 @@ pub async fn knowledge_list_directory_documents(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<Vec<KnowledgeListItem>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let parsed_type = parse_knowledge_type(&doc_type)?;
-    ensure_memory_builtins_for_type(&workspace_root, Some(parsed_type))?;
+    ensure_memory_builtins_for_type(&working_dir, Some(parsed_type))?;
     let normalized_path = path
         .trim()
         .trim_matches('/')
@@ -2198,10 +2198,10 @@ pub async fn knowledge_list_directory_documents(
     let started_at = Instant::now();
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directory_documents start workspace={} doc_type={} path={:?}",
-        workspace_root, doc_type, normalized_path
+        working_dir, doc_type, normalized_path
     );
     let mut items = knowledge_index::list_cached_directory_documents(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         parsed_type,
         normalized_path.as_deref(),
@@ -2210,13 +2210,13 @@ pub async fn knowledge_list_directory_documents(
     .await
     .map_err(AppError::from)?;
     enrich_knowledge_list_items(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         &mut items,
     );
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directory_documents finished workspace={} doc_type={} path={:?} elapsed_ms={} count={}",
-        workspace_root,
+        working_dir,
         doc_type,
         normalized_path,
         started_at.elapsed().as_millis(),
@@ -2235,9 +2235,9 @@ pub async fn knowledge_list_directory_documents_page(
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeListPageResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let parsed_type = parse_knowledge_type(&doc_type)?;
-    ensure_memory_builtins_for_type(&workspace_root, Some(parsed_type))?;
+    ensure_memory_builtins_for_type(&working_dir, Some(parsed_type))?;
     let normalized_path = path
         .trim()
         .trim_matches('/')
@@ -2260,10 +2260,10 @@ pub async fn knowledge_list_directory_documents_page(
         decode_knowledge_page_cursor(cursor.as_deref()).map_err(AppError::from)?;
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directory_documents_page start workspace={} doc_type={} path={:?} offset={} limit={}",
-        workspace_root, doc_type, normalized_path, resolved_offset, resolved_limit
+        working_dir, doc_type, normalized_path, resolved_offset, resolved_limit
     );
     let page = knowledge_index::list_cached_directory_documents_page(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         parsed_type,
         normalized_path.as_deref(),
@@ -2275,13 +2275,13 @@ pub async fn knowledge_list_directory_documents_page(
     .map_err(AppError::from)?;
     let mut items = page.items;
     enrich_knowledge_list_items(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         &mut items,
     );
     eprintln!(
         "[KnowledgeCommand] knowledge_list_directory_documents_page finished workspace={} doc_type={} path={:?} elapsed_ms={} count={} next_cursor={:?}",
-        workspace_root,
+        working_dir,
         doc_type,
         normalized_path,
         started_at.elapsed().as_millis(),
@@ -2298,8 +2298,8 @@ pub async fn knowledge_list_directory_documents_page(
 pub async fn knowledge_list_external_reference_directories(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<Vec<KnowledgeExternalDirectoryBinding>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    knowledge_store::list_reference_external_directory_bindings(&workspace_root)
+    let working_dir = workspace.path.read().await.clone();
+    knowledge_store::list_reference_external_directory_bindings(&working_dir)
         .map_err(AppError::from)
 }
 
@@ -2307,8 +2307,8 @@ pub async fn knowledge_list_external_reference_directories(
 pub async fn knowledge_list_unity_managed_directory_stats(
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<Vec<UnityManagedDirectoryStat>, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    unity_docs::list_managed_directory_stats(&workspace_root).map_err(AppError::from)
+    let working_dir = workspace.path.read().await.clone();
+    unity_docs::list_managed_directory_stats(&working_dir).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -2318,9 +2318,9 @@ pub async fn knowledge_create(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeMutationResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
-    let result = execute_knowledge_create_request(&workspace_root, request).map_err(AppError::from)?;
+    let result = execute_knowledge_create_request(&working_dir, request).map_err(AppError::from)?;
     match result.kind {
         KnowledgeTargetKind::Document => {
             if let Some(document) = result.document.clone() {
@@ -2332,19 +2332,19 @@ pub async fn knowledge_create(
                 )?;
                 knowledge_index::upsert_document(
                     knowledge_index_state.inner().clone(),
-                    &workspace_root,
+                    &working_dir,
                     app_knowledge_dir.0.as_ref().as_ref(),
                     document,
                 )
                 .await
                 .map_err(AppError::from)?;
             }
-            emit_knowledge_changed(&app_handle, &workspace_root, "knowledge_create");
+            emit_knowledge_changed(&app_handle, &working_dir, "knowledge_create");
         }
         KnowledgeTargetKind::Directory => {
             reconcile_and_emit_knowledge_changed(
                 &app_handle,
-                &workspace_root,
+                &working_dir,
                 knowledge_index_state.inner().clone(),
                 "knowledge_create",
             )
@@ -2361,9 +2361,9 @@ pub async fn knowledge_edit(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeMutationResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
-    let result = execute_knowledge_edit_request(&workspace_root, request).map_err(AppError::from)?;
+    let result = execute_knowledge_edit_request(&working_dir, request).map_err(AppError::from)?;
     match result.kind {
         KnowledgeTargetKind::Document => {
             if let Some(document) = result.document.clone() {
@@ -2376,7 +2376,7 @@ pub async fn knowledge_edit(
                 )?;
                 knowledge_index::upsert_document(
                     knowledge_index_state.inner().clone(),
-                    &workspace_root,
+                    &working_dir,
                     app_knowledge_dir.0.as_ref().as_ref(),
                     document.clone(),
                 )
@@ -2385,7 +2385,7 @@ pub async fn knowledge_edit(
                 if previous_path != document.path {
                     restore_visible_document_for_path(
                         &app_handle,
-                        &workspace_root,
+                        &working_dir,
                         knowledge_index_state.inner().clone(),
                         document.doc_type,
                         &previous_path,
@@ -2393,12 +2393,12 @@ pub async fn knowledge_edit(
                     .await?;
                 }
             }
-            emit_knowledge_changed(&app_handle, &workspace_root, "knowledge_edit");
+            emit_knowledge_changed(&app_handle, &working_dir, "knowledge_edit");
         }
         KnowledgeTargetKind::Directory => {
             reconcile_and_emit_knowledge_changed(
                 &app_handle,
-                &workspace_root,
+                &working_dir,
                 knowledge_index_state.inner().clone(),
                 "knowledge_edit",
             )
@@ -2415,9 +2415,9 @@ pub async fn knowledge_move(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeMutationResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let app_knowledge_dir: State<'_, AppKnowledgeDir> = app_handle.state();
-    let result = execute_knowledge_move_request(&workspace_root, request).map_err(AppError::from)?;
+    let result = execute_knowledge_move_request(&working_dir, request).map_err(AppError::from)?;
     match result.kind {
         KnowledgeTargetKind::Document => {
             if let Some(document) = result.document.clone() {
@@ -2430,7 +2430,7 @@ pub async fn knowledge_move(
                 )?;
                 knowledge_index::upsert_document(
                     knowledge_index_state.inner().clone(),
-                    &workspace_root,
+                    &working_dir,
                     app_knowledge_dir.0.as_ref().as_ref(),
                     document.clone(),
                 )
@@ -2438,19 +2438,19 @@ pub async fn knowledge_move(
                 .map_err(AppError::from)?;
                 restore_visible_document_for_path(
                     &app_handle,
-                    &workspace_root,
+                    &working_dir,
                     knowledge_index_state.inner().clone(),
                     document.doc_type,
                     &previous_path,
                 )
                 .await?;
             }
-            emit_knowledge_changed(&app_handle, &workspace_root, "knowledge_move");
+            emit_knowledge_changed(&app_handle, &working_dir, "knowledge_move");
         }
         KnowledgeTargetKind::Directory => {
             reconcile_and_emit_knowledge_changed(
                 &app_handle,
-                &workspace_root,
+                &working_dir,
                 knowledge_index_state.inner().clone(),
                 "knowledge_move",
             )
@@ -2467,8 +2467,8 @@ pub async fn knowledge_delete(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<KnowledgeMutationResponse, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let result = execute_knowledge_delete_request(&workspace_root, request).map_err(AppError::from)?;
+    let working_dir = workspace.path.read().await.clone();
+    let result = execute_knowledge_delete_request(&working_dir, request).map_err(AppError::from)?;
     match result.kind {
         KnowledgeTargetKind::Document => {
             if let Some(document) = result.document.clone() {
@@ -2479,19 +2479,19 @@ pub async fn knowledge_delete(
                 .map_err(AppError::from)?;
                 restore_visible_document_for_path(
                     &app_handle,
-                    &workspace_root,
+                    &working_dir,
                     knowledge_index_state.inner().clone(),
                     document.doc_type,
                     &result.path,
                 )
                 .await?;
             }
-            emit_knowledge_changed(&app_handle, &workspace_root, "knowledge_delete");
+            emit_knowledge_changed(&app_handle, &working_dir, "knowledge_delete");
         }
         KnowledgeTargetKind::Directory => {
             reconcile_and_emit_knowledge_changed(
                 &app_handle,
-                &workspace_root,
+                &working_dir,
                 knowledge_index_state.inner().clone(),
                 "knowledge_delete",
             )
@@ -2508,14 +2508,14 @@ pub async fn knowledge_delete_external_reference_directory(
     workspace: State<'_, Arc<Workspace>>,
     knowledge_index_state: State<'_, Arc<KnowledgeIndexState>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let (_, normalized_path) =
         resolve_knowledge_directory_target(Some(KnowledgeType::Reference), &path)?;
-    knowledge_store::delete_external_reference_directory(&workspace_root, &normalized_path)
+    knowledge_store::delete_external_reference_directory(&working_dir, &normalized_path)
         .map_err(AppError::from)?;
     reconcile_and_emit_knowledge_changed(
         &app_handle,
-        &workspace_root,
+        &working_dir,
         knowledge_index_state.inner().clone(),
         "knowledge_delete_external_reference_directory",
     )
@@ -2667,16 +2667,16 @@ fn validate_workspace_relative_path(file_path: &str) -> Result<(), AppError> {
 
 fn validate_workspace_path(
     file_path: &str,
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     validate_workspace_relative_path(file_path)?;
 
-    let full = std::path::Path::new(workspace_root).join(file_path);
+    let full = std::path::Path::new(working_dir).join(file_path);
     let canonical =
         dunce::canonicalize(&full).map_err(|e| format!("Failed to resolve path: {}", e))?;
 
     // Ensure the resolved path is still within the workspace
-    let ws_canonical = dunce::canonicalize(workspace_root)
+    let ws_canonical = dunce::canonicalize(working_dir)
         .map_err(|e| format!("Failed to resolve workspace: {}", e))?;
     if !canonical.starts_with(&ws_canonical) {
         return Err("Path resolves outside workspace".to_string().into());
@@ -2692,13 +2692,13 @@ fn is_absolute_local_path(file_path: &str) -> bool {
 
 fn resolve_openable_file_ref_path(
     file_path: &str,
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     if is_absolute_local_path(file_path) {
         return canonicalize_existing_path(std::path::Path::new(file_path));
     }
 
-    validate_workspace_path(file_path, workspace_root)
+    validate_workspace_path(file_path, working_dir)
 }
 
 /// Resolve a workspace-relative path for "show in folder" behavior.
@@ -2706,13 +2706,13 @@ fn resolve_openable_file_ref_path(
 /// existing parent directory within the workspace.
 fn resolve_workspace_reveal_path(
     file_path: &str,
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     validate_workspace_relative_path(file_path)?;
 
-    let workspace_canonical = dunce::canonicalize(workspace_root)
+    let workspace_canonical = dunce::canonicalize(working_dir)
         .map_err(|e| format!("Failed to resolve workspace: {}", e))?;
-    let full = std::path::Path::new(workspace_root).join(file_path);
+    let full = std::path::Path::new(working_dir).join(file_path);
 
     if full.exists() {
         let canonical =
@@ -2758,13 +2758,13 @@ fn resolve_absolute_reveal_path(file_path: &str) -> Result<std::path::PathBuf, A
 
 fn resolve_file_ref_reveal_path(
     file_path: &str,
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     if is_absolute_local_path(file_path) {
         return resolve_absolute_reveal_path(file_path);
     }
 
-    resolve_workspace_reveal_path(file_path, workspace_root)
+    resolve_workspace_reveal_path(file_path, working_dir)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2780,14 +2780,14 @@ fn canonicalize_existing_path(path: &std::path::Path) -> Result<std::path::PathB
 }
 
 fn resolve_knowledge_reveal_path(
-    workspace_root: &str,
+    working_dir: &str,
     app_knowledge_dir: Option<&std::path::PathBuf>,
     doc_type: KnowledgeType,
     kind: KnowledgeTargetKind,
     raw_path: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     if kind == KnowledgeTargetKind::Directory && raw_path.trim().is_empty() {
-        let workspace_root = knowledge_store::knowledge_root(workspace_root).join(doc_type.as_str());
+        let workspace_root = knowledge_store::knowledge_root(working_dir).join(doc_type.as_str());
         if workspace_root.is_dir() {
             return canonicalize_existing_path(&workspace_root);
         }
@@ -2812,7 +2812,7 @@ fn resolve_knowledge_reveal_path(
                             normalize_knowledge_directory_path(raw_path).map_err(AppError::from)?;
                         if let Some(package_path) =
                             super::skill::resolve_skill_package_document_path_sync_for_working_dir(
-                                workspace_root,
+                                working_dir,
                                 &virtual_path,
                             )
                             .map_err(AppError::from)?
@@ -2837,10 +2837,10 @@ fn resolve_knowledge_reveal_path(
 
     let workspace_path = match kind {
         KnowledgeTargetKind::Document => {
-            knowledge_store::document_path(workspace_root, doc_type, &normalized_path)
+            knowledge_store::document_path(working_dir, doc_type, &normalized_path)
                 .map_err(AppError::from)?
         }
-        KnowledgeTargetKind::Directory => knowledge_store::knowledge_root(workspace_root)
+        KnowledgeTargetKind::Directory => knowledge_store::knowledge_root(working_dir)
             .join(doc_type.as_str())
             .join(&normalized_path),
     };
@@ -2853,7 +2853,7 @@ fn resolve_knowledge_reveal_path(
             KnowledgeTargetKind::Document => {
                 if let Some(package_path) =
                     super::skill::resolve_skill_package_document_path_sync_for_working_dir(
-                        workspace_root,
+                        working_dir,
                         &normalized_path,
                     )
                     .map_err(AppError::from)?
@@ -2865,7 +2865,7 @@ fn resolve_knowledge_reveal_path(
                 if !normalized_path.contains('/') {
                     if let Ok(package_root) =
                         super::skill::resolve_skill_package_root_sync_for_working_dir(
-                            workspace_root,
+                            working_dir,
                             &normalized_path,
                         )
                     {
@@ -2880,12 +2880,12 @@ fn resolve_knowledge_reveal_path(
         && doc_type == KnowledgeType::Reference
         && unity_docs::is_unity_reference_managed_relative_path(&normalized_path)
     {
-        let bundle_path = unity_docs::managed_store_path(workspace_root);
+        let bundle_path = unity_docs::managed_store_path(working_dir);
         if bundle_path.is_file() {
             return canonicalize_existing_path(&bundle_path);
         }
 
-        let managed_root = knowledge_store::knowledge_root(workspace_root)
+        let managed_root = knowledge_store::knowledge_root(working_dir)
             .join(doc_type.as_str())
             .join(unity_docs::UNITY_REFERENCE_MANAGED_DIR);
         if managed_root.is_dir() {
@@ -2921,8 +2921,8 @@ pub async fn open_file_external(
     file_path: String,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let canonical = resolve_openable_file_ref_path(&file_path, &workspace_root)?;
+    let working_dir = workspace.path.read().await.clone();
+    let canonical = resolve_openable_file_ref_path(&file_path, &working_dir)?;
 
     if !canonical.exists() {
         return Err(format!("File not found: {}", file_path).into());
@@ -2936,8 +2936,8 @@ pub async fn reveal_workspace_file(
     file_path: String,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let reveal_path = resolve_file_ref_reveal_path(&file_path, &workspace_root)?;
+    let working_dir = workspace.path.read().await.clone();
+    let reveal_path = resolve_file_ref_reveal_path(&file_path, &working_dir)?;
     reveal_path_native(&reveal_path).map_err(Into::into)
 }
 
@@ -2947,10 +2947,10 @@ pub async fn knowledge_reveal_target(
     workspace: State<'_, Arc<Workspace>>,
     app_knowledge_dir: State<'_, AppKnowledgeDir>,
 ) -> Result<(), AppError> {
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     let doc_type = parse_knowledge_type(&request.doc_type).map_err(AppError::from)?;
     let reveal_path = resolve_knowledge_reveal_path(
-        &workspace_root,
+        &working_dir,
         app_knowledge_dir.0.as_ref().as_ref(),
         doc_type,
         request.kind,
@@ -3021,7 +3021,7 @@ fn markdown_image_path_from_file_url(source: &str) -> Option<std::path::PathBuf>
 
 fn resolve_markdown_image_path(
     source: &str,
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     let trimmed = source.trim();
     if trimmed.is_empty() {
@@ -3040,14 +3040,14 @@ fn resolve_markdown_image_path(
         return canonicalize_existing_path(std::path::Path::new(&normalized));
     }
 
-    if workspace_root.trim().is_empty() {
+    if working_dir.trim().is_empty() {
         return Err(AppError::new(
             "markdown_image.no_workspace",
             "A workspace is required for relative image paths",
         ));
     }
 
-    validate_workspace_path(&normalized, workspace_root)
+    validate_workspace_path(&normalized, working_dir)
 }
 
 #[tauri::command]
@@ -3056,8 +3056,8 @@ pub async fn resolve_markdown_image(
     workspace: State<'_, Arc<Workspace>>,
     binary_cache: State<'_, Arc<BinaryCache>>,
 ) -> Result<MarkdownImagePreview, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let canonical = resolve_markdown_image_path(&source, &workspace_root)?;
+    let working_dir = workspace.path.read().await.clone();
+    let canonical = resolve_markdown_image_path(&source, &working_dir)?;
     if !canonical.is_file() {
         return Err(AppError::new(
             "markdown_image.not_file",
@@ -3166,8 +3166,8 @@ pub async fn preview_workspace_file(
     line: Option<u32>,
     workspace: State<'_, Arc<Workspace>>,
 ) -> Result<WorkspaceFilePreview, AppError> {
-    let workspace_root = workspace.path.read().await.clone();
-    let canonical = match resolve_openable_file_ref_path(&file_path, &workspace_root) {
+    let working_dir = workspace.path.read().await.clone();
+    let canonical = match resolve_openable_file_ref_path(&file_path, &working_dir) {
         Ok(p) => p,
         Err(_) => {
             return Ok(WorkspaceFilePreview {
@@ -3319,17 +3319,17 @@ pub struct AgentToolLoadConfig {
     pub enabled: HashMap<String, bool>,
 }
 
-fn tool_load_config_path(workspace_root: &str, agent_id: &str) -> std::path::PathBuf {
+fn tool_load_config_path(working_dir: &str, agent_id: &str) -> std::path::PathBuf {
     let agent_id = canonical_agent_id(agent_id);
-    std::path::Path::new(workspace_root)
+    std::path::Path::new(working_dir)
         .join("Locus")
         .join("agent")
         .join(agent_id)
         .join("tool_load_config.json")
 }
 
-pub fn load_tool_load_config(workspace_root: &str, agent_id: &str) -> AgentToolLoadConfig {
-    let path = tool_load_config_path(workspace_root, agent_id);
+pub fn load_tool_load_config(working_dir: &str, agent_id: &str) -> AgentToolLoadConfig {
+    let path = tool_load_config_path(working_dir, agent_id);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => AgentToolLoadConfig::default(),
@@ -3337,11 +3337,11 @@ pub fn load_tool_load_config(workspace_root: &str, agent_id: &str) -> AgentToolL
 }
 
 fn save_tool_load_config(
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
     config: &AgentToolLoadConfig,
 ) -> Result<(), String> {
-    let path = tool_load_config_path(workspace_root, agent_id);
+    let path = tool_load_config_path(working_dir, agent_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -3368,13 +3368,13 @@ fn load_app_tool_load_config(
 
 pub fn merged_tool_load_config_for_agent(
     app_agent_dir: &Option<std::path::PathBuf>,
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
 ) -> AgentToolLoadConfig {
     let agent_id = canonical_agent_id(agent_id);
     let mut config = load_app_tool_load_config(app_agent_dir, agent_id);
-    if !workspace_root.trim().is_empty() {
-        let ws_config = load_tool_load_config(workspace_root, agent_id);
+    if !working_dir.trim().is_empty() {
+        let ws_config = load_tool_load_config(working_dir, agent_id);
         for (name, direct_load) in ws_config.direct_load {
             config.direct_load.insert(name, direct_load);
         }
@@ -3386,36 +3386,36 @@ pub fn merged_tool_load_config_for_agent(
 }
 
 pub fn save_tool_direct_load_override(
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
     tool_name: &str,
     direct_load: bool,
     default_direct_load: bool,
 ) -> Result<(), String> {
-    let mut config = load_tool_load_config(workspace_root, agent_id);
+    let mut config = load_tool_load_config(working_dir, agent_id);
     let key = tool_name.trim().to_string();
     if direct_load == default_direct_load {
         config.direct_load.remove(&key);
     } else {
         config.direct_load.insert(key, direct_load);
     }
-    save_tool_load_config(workspace_root, agent_id, &config)
+    save_tool_load_config(working_dir, agent_id, &config)
 }
 
 pub fn save_tool_enabled_override(
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
     tool_name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut config = load_tool_load_config(workspace_root, agent_id);
+    let mut config = load_tool_load_config(working_dir, agent_id);
     let key = tool_name.trim().to_string();
     if enabled {
         config.enabled.remove(&key);
     } else {
         config.enabled.insert(key, false);
     }
-    save_tool_load_config(workspace_root, agent_id, &config)
+    save_tool_load_config(working_dir, agent_id, &config)
 }
 
 /// Validates that `tool_name` is a built-in, non-meta tool configured for the
@@ -3473,15 +3473,15 @@ pub async fn set_agent_tool_direct_load(
     let def = registry
         .get(&agent_id)
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let workspace_root = workspace.path.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Err("No working directory selected".to_string().into());
     }
 
     let canonical = resolve_configurable_agent_tool(def, &tool_registry, &agent_id, &tool_name)?;
 
     save_tool_direct_load_override(
-        &workspace_root,
+        &working_dir,
         &agent_id,
         &canonical,
         direct_load,
@@ -3504,14 +3504,14 @@ pub async fn set_agent_tool_enabled(
     let def = registry
         .get(&agent_id)
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let workspace_root = workspace.path.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Err("No working directory selected".to_string().into());
     }
 
     let canonical = resolve_configurable_agent_tool(def, &tool_registry, &agent_id, &tool_name)?;
 
-    save_tool_enabled_override(&workspace_root, &agent_id, &canonical, enabled).map_err(Into::into)
+    save_tool_enabled_override(&working_dir, &agent_id, &canonical, enabled).map_err(Into::into)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3592,9 +3592,9 @@ impl AgentRuleFileEntry {
     }
 }
 
-fn rules_dir(workspace_root: &str, agent_id: &str) -> Result<std::path::PathBuf, String> {
+fn rules_dir(working_dir: &str, agent_id: &str) -> Result<std::path::PathBuf, String> {
     let agent_id = canonical_agent_id(agent_id);
-    let dir = std::path::Path::new(workspace_root)
+    let dir = std::path::Path::new(working_dir)
         .join("Locus")
         .join("agent")
         .join(agent_id)
@@ -3606,17 +3606,17 @@ fn rules_dir(workspace_root: &str, agent_id: &str) -> Result<std::path::PathBuf,
     Ok(dir)
 }
 
-fn rule_config_path(workspace_root: &str, agent_id: &str) -> std::path::PathBuf {
+fn rule_config_path(working_dir: &str, agent_id: &str) -> std::path::PathBuf {
     let agent_id = canonical_agent_id(agent_id);
-    std::path::Path::new(workspace_root)
+    std::path::Path::new(working_dir)
         .join("Locus")
         .join("agent")
         .join(agent_id)
         .join("rule_config.json")
 }
 
-pub fn load_rule_config(workspace_root: &str, agent_id: &str) -> AgentRuleConfig {
-    let path = rule_config_path(workspace_root, agent_id);
+pub fn load_rule_config(working_dir: &str, agent_id: &str) -> AgentRuleConfig {
+    let path = rule_config_path(working_dir, agent_id);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => AgentRuleConfig::new(),
@@ -3624,11 +3624,11 @@ pub fn load_rule_config(workspace_root: &str, agent_id: &str) -> AgentRuleConfig
 }
 
 fn save_rule_config(
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
     configs: &AgentRuleConfig,
 ) -> Result<(), String> {
-    let path = rule_config_path(workspace_root, agent_id);
+    let path = rule_config_path(working_dir, agent_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -3655,13 +3655,13 @@ fn load_app_rule_config(
 
 pub fn merged_rule_config_for_agent(
     app_agent_dir: &Option<std::path::PathBuf>,
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
 ) -> AgentRuleConfig {
     let agent_id = canonical_agent_id(agent_id);
     let mut configs = load_app_rule_config(app_agent_dir, agent_id);
-    if !workspace_root.trim().is_empty() {
-        let ws_configs = load_rule_config(workspace_root, agent_id);
+    if !working_dir.trim().is_empty() {
+        let ws_configs = load_rule_config(working_dir, agent_id);
         for (k, v) in ws_configs {
             configs.insert(k, v);
         }
@@ -3780,13 +3780,13 @@ fn scan_static_rules_dir(
 }
 
 fn scan_plugin_rule_sources(
-    workspace_root: &str,
+    working_dir: &str,
     configs: &std::collections::HashMap<String, RuleConfig>,
     items: &mut Vec<AgentRuleFileEntry>,
 ) {
     let mut seen_keys = std::collections::HashSet::new();
     let mut default_order = PLUGIN_RULE_DEFAULT_ORDER_BASE;
-    for source in crate::plugin::installed_rule_sources(workspace_root) {
+    for source in crate::plugin::installed_rule_sources(working_dir) {
         for (path, rel_path) in plugin_rule_file_paths(&source) {
             let key = plugin_rule_key(source.scope, &source.plugin_id, &rel_path);
             if !seen_keys.insert(key.clone()) {
@@ -3823,18 +3823,18 @@ fn scan_plugin_rule_sources(
 
 pub fn collect_agent_rule_files(
     app_agent_dir: &Option<std::path::PathBuf>,
-    workspace_root: &str,
+    working_dir: &str,
     agent_id: &str,
     create_project_dir: bool,
 ) -> Result<Vec<AgentRuleFileEntry>, String> {
     let agent_id = canonical_agent_id(agent_id).to_string();
-    let configs = merged_rule_config_for_agent(app_agent_dir, workspace_root, &agent_id);
+    let configs = merged_rule_config_for_agent(app_agent_dir, working_dir, &agent_id);
     let mut items = Vec::new();
     let mut seen_static_names = std::collections::HashSet::new();
 
-    if !workspace_root.trim().is_empty() {
+    if !working_dir.trim().is_empty() {
         if create_project_dir {
-            let project_dir = rules_dir(workspace_root, &agent_id)?;
+            let project_dir = rules_dir(working_dir, &agent_id)?;
             scan_static_rules_dir(
                 &agent_id,
                 &project_dir,
@@ -3844,7 +3844,7 @@ pub fn collect_agent_rule_files(
                 &mut items,
             );
         } else {
-            let project_dir = std::path::Path::new(workspace_root)
+            let project_dir = std::path::Path::new(working_dir)
                 .join("Locus")
                 .join("agent")
                 .join(&agent_id)
@@ -3862,7 +3862,7 @@ pub fn collect_agent_rule_files(
         }
     }
 
-    scan_plugin_rule_sources(workspace_root, &configs, &mut items);
+    scan_plugin_rule_sources(working_dir, &configs, &mut items);
 
     if let Some(app_dir) = app_agent_dir {
         let app_rules = app_dir.join(&agent_id).join("rule");
@@ -3889,8 +3889,8 @@ pub async fn list_rules(
     app_agent_dir: State<'_, crate::AppAgentDir>,
 ) -> Result<Vec<RuleItem>, AppError> {
     let agent_id = canonical_agent_id(&agent_id).to_string();
-    let workspace_root = workspace.path.read().await.clone();
-    let items = collect_agent_rule_files(app_agent_dir.0.as_ref(), &workspace_root, &agent_id, true)?
+    let working_dir = workspace.path.read().await.clone();
+    let items = collect_agent_rule_files(app_agent_dir.0.as_ref(), &working_dir, &agent_id, true)?
         .into_iter()
         .map(AgentRuleFileEntry::into_item)
         .collect();
@@ -3918,14 +3918,14 @@ pub async fn save_rule(
         format!("{}.md", file_name)
     };
 
-    let workspace_root = workspace.path.read().await.clone();
-    let dir = rules_dir(&workspace_root, &agent_id)?;
+    let working_dir = workspace.path.read().await.clone();
+    let dir = rules_dir(&working_dir, &agent_id)?;
     let path = dir.join(&file_name);
 
     let is_new = !path.is_file();
     std::fs::write(&path, &content).map_err(|e| format!("Failed to save rule: {}", e))?;
 
-    let mut configs = load_rule_config(&workspace_root, &agent_id);
+    let mut configs = load_rule_config(&working_dir, &agent_id);
     if is_new && !configs.contains_key(&file_name) {
         let max_order = configs.values().map(|c| c.order).max().unwrap_or(-1);
         configs.insert(
@@ -3935,7 +3935,7 @@ pub async fn save_rule(
                 order: max_order + 1,
             },
         );
-        save_rule_config(&workspace_root, &agent_id, &configs)?;
+        save_rule_config(&working_dir, &agent_id, &configs)?;
     }
 
     let title = extract_title_from_file(&path, &file_name);
@@ -3964,10 +3964,10 @@ pub async fn read_rule(
     app_agent_dir: State<'_, crate::AppAgentDir>,
 ) -> Result<String, AppError> {
     let agent_id = canonical_agent_id(&agent_id).to_string();
-    let workspace_root = workspace.path.read().await.clone();
+    let working_dir = workspace.path.read().await.clone();
     if file_name.starts_with(PLUGIN_RULE_KEY_PREFIX) {
         let entries =
-            collect_agent_rule_files(app_agent_dir.0.as_ref(), &workspace_root, &agent_id, false)?;
+            collect_agent_rule_files(app_agent_dir.0.as_ref(), &working_dir, &agent_id, false)?;
         if let Some(entry) = entries.into_iter().find(|entry| entry.key == file_name) {
             return std::fs::read_to_string(&entry.path)
                 .map_err(|e| format!("Failed to read rule: {}", e))
@@ -3978,7 +3978,7 @@ pub async fn read_rule(
     if file_name.contains("..") || file_name.contains('/') || file_name.contains('\\') {
         return Err("Invalid file name".to_string().into());
     }
-    let project_path = rules_dir(&workspace_root, &agent_id)?.join(&file_name);
+    let project_path = rules_dir(&working_dir, &agent_id)?.join(&file_name);
     if project_path.is_file() {
         return std::fs::read_to_string(&project_path)
             .map_err(|e| format!("Failed to read rule: {}", e))
@@ -4004,17 +4004,17 @@ pub async fn delete_rule(
     if file_name.contains("..") || file_name.contains('/') || file_name.contains('\\') {
         return Err("Invalid file name".to_string().into());
     }
-    let workspace_root = workspace.path.read().await.clone();
-    let dir = rules_dir(&workspace_root, &agent_id)?;
+    let working_dir = workspace.path.read().await.clone();
+    let dir = rules_dir(&working_dir, &agent_id)?;
     let path = dir.join(&file_name);
     if !path.is_file() {
         return Err(format!("Rule file not found: {}", file_name).into());
     }
     std::fs::remove_file(&path).map_err(|e| format!("Failed to delete rule: {}", e))?;
 
-    let mut configs = load_rule_config(&workspace_root, &agent_id);
+    let mut configs = load_rule_config(&working_dir, &agent_id);
     configs.remove(&file_name);
-    save_rule_config(&workspace_root, &agent_id, &configs)?;
+    save_rule_config(&working_dir, &agent_id, &configs)?;
     Ok(())
 }
 
@@ -4030,12 +4030,12 @@ pub async fn set_rule_enabled(
         return Err("Invalid rule key".to_string().into());
     }
     let agent_id = canonical_agent_id(&agent_id).to_string();
-    let workspace_root = workspace.path.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Err("No working directory selected".to_string().into());
     }
     let existing_entry =
-        collect_agent_rule_files(app_agent_dir.0.as_ref(), &workspace_root, &agent_id, false)?
+        collect_agent_rule_files(app_agent_dir.0.as_ref(), &working_dir, &agent_id, false)?
             .into_iter()
             .find(|entry| entry.key == file_name || entry.file_name == file_name);
     if existing_entry
@@ -4047,7 +4047,7 @@ pub async fn set_rule_enabled(
             .to_string()
             .into());
     }
-    let mut configs = load_rule_config(&workspace_root, &agent_id);
+    let mut configs = load_rule_config(&working_dir, &agent_id);
     let max_order = configs.values().map(|cfg| cfg.order).max().unwrap_or(-1);
     let cfg = configs.entry(file_name).or_insert_with(|| RuleConfig {
         enabled,
@@ -4057,7 +4057,7 @@ pub async fn set_rule_enabled(
             .unwrap_or(max_order.saturating_add(1)),
     });
     cfg.enabled = enabled;
-    save_rule_config(&workspace_root, &agent_id, &configs).map_err(Into::into)
+    save_rule_config(&working_dir, &agent_id, &configs).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -4068,13 +4068,13 @@ pub async fn set_rule_order(
     app_agent_dir: State<'_, crate::AppAgentDir>,
 ) -> Result<(), AppError> {
     let agent_id = canonical_agent_id(&agent_id).to_string();
-    let workspace_root = workspace.path.read().await.clone();
-    if workspace_root.trim().is_empty() {
+    let working_dir = workspace.path.read().await.clone();
+    if working_dir.trim().is_empty() {
         return Err("No working directory selected".to_string().into());
     }
     let entries =
-        collect_agent_rule_files(app_agent_dir.0.as_ref(), &workspace_root, &agent_id, false)?;
-    let mut configs = load_rule_config(&workspace_root, &agent_id);
+        collect_agent_rule_files(app_agent_dir.0.as_ref(), &working_dir, &agent_id, false)?;
+    let mut configs = load_rule_config(&working_dir, &agent_id);
     for (i, name) in file_names.iter().enumerate() {
         let default_enabled = entries
             .iter()
@@ -4087,7 +4087,7 @@ pub async fn set_rule_order(
         });
         cfg.order = i as i32;
     }
-    save_rule_config(&workspace_root, &agent_id, &configs).map_err(Into::into)
+    save_rule_config(&working_dir, &agent_id, &configs).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -4189,7 +4189,7 @@ mod tests {
     #[test]
     fn plugin_rules_default_enabled_and_keep_order_override() {
         let workspace = TempDir::new().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         write_plugin_rule(
             &workspace,
             "com.example.rules",
@@ -4198,7 +4198,7 @@ mod tests {
         );
 
         let listed =
-            collect_agent_rule_files(&None, &workspace_root, "dev", false).expect("collect rules");
+            collect_agent_rule_files(&None, &working_dir, "dev", false).expect("collect rules");
         let plugin_rule = listed
             .iter()
             .find(|item| item.plugin_id.as_deref() == Some("com.example.rules"))
@@ -4220,10 +4220,10 @@ mod tests {
                 order: 3,
             },
         );
-        save_rule_config(&workspace_root, "dev", &config).expect("save rule config");
+        save_rule_config(&working_dir, "dev", &config).expect("save rule config");
 
         let ordered =
-            collect_agent_rule_files(&None, &workspace_root, "dev", false).expect("collect ordered");
+            collect_agent_rule_files(&None, &working_dir, "dev", false).expect("collect ordered");
         let plugin_rule = ordered
             .iter()
             .find(|item| item.plugin_id.as_deref() == Some("com.example.rules"))
@@ -4235,12 +4235,12 @@ mod tests {
     #[test]
     fn resolve_workspace_reveal_path_returns_existing_file() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
         let file_path = temp.path().join("Assets").join("Player.cs");
         std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
         std::fs::write(&file_path, "class Player {}").unwrap();
 
-        let resolved = resolve_workspace_reveal_path("Assets/Player.cs", &workspace_root).unwrap();
+        let resolved = resolve_workspace_reveal_path("Assets/Player.cs", &working_dir).unwrap();
 
         assert_eq!(resolved, dunce::canonicalize(file_path).unwrap());
     }
@@ -4248,12 +4248,12 @@ mod tests {
     #[test]
     fn resolve_workspace_reveal_path_falls_back_to_existing_parent_directory() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
         let assets_dir = temp.path().join("Assets");
         std::fs::create_dir_all(&assets_dir).unwrap();
 
         let resolved =
-            resolve_workspace_reveal_path("Assets/DeletedFolder/Missing.prefab", &workspace_root)
+            resolve_workspace_reveal_path("Assets/DeletedFolder/Missing.prefab", &working_dir)
                 .unwrap();
 
         assert_eq!(resolved, dunce::canonicalize(assets_dir).unwrap());
@@ -4263,12 +4263,12 @@ mod tests {
     fn resolve_openable_file_ref_path_allows_absolute_file() {
         let workspace = TempDir::new().unwrap();
         let external = TempDir::new().unwrap();
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let file_path = external.path().join("locus-temp-test.txt");
         std::fs::write(&file_path, "external").unwrap();
 
         let resolved =
-            resolve_openable_file_ref_path(&file_path.to_string_lossy(), &workspace_root).unwrap();
+            resolve_openable_file_ref_path(&file_path.to_string_lossy(), &working_dir).unwrap();
 
         assert_eq!(resolved, dunce::canonicalize(file_path).unwrap());
     }
@@ -4277,10 +4277,10 @@ mod tests {
     fn resolve_file_ref_reveal_path_allows_absolute_directory() {
         let workspace = TempDir::new().unwrap();
         let external = TempDir::new().unwrap();
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
 
         let resolved =
-            resolve_file_ref_reveal_path(&external.path().to_string_lossy(), &workspace_root).unwrap();
+            resolve_file_ref_reveal_path(&external.path().to_string_lossy(), &working_dir).unwrap();
 
         assert_eq!(resolved, dunce::canonicalize(external.path()).unwrap());
     }
@@ -4289,11 +4289,11 @@ mod tests {
     fn resolve_file_ref_reveal_path_falls_back_for_missing_absolute_child() {
         let workspace = TempDir::new().unwrap();
         let external = TempDir::new().unwrap();
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let missing = external.path().join("missing").join("file.txt");
 
         let resolved =
-            resolve_file_ref_reveal_path(&missing.to_string_lossy(), &workspace_root).unwrap();
+            resolve_file_ref_reveal_path(&missing.to_string_lossy(), &working_dir).unwrap();
 
         assert_eq!(resolved, dunce::canonicalize(external.path()).unwrap());
     }
@@ -4301,7 +4301,7 @@ mod tests {
     #[test]
     fn resolve_knowledge_reveal_path_returns_workspace_document() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
         let target = temp
             .path()
             .join("Locus")
@@ -4313,7 +4313,7 @@ mod tests {
         std::fs::write(&target, "# Core Loop").unwrap();
 
         let resolved = resolve_knowledge_reveal_path(
-            &workspace_root,
+            &working_dir,
             None,
             KnowledgeType::Design,
             KnowledgeTargetKind::Document,
@@ -4328,7 +4328,7 @@ mod tests {
     fn resolve_knowledge_reveal_path_falls_back_to_app_document() {
         let workspace = TempDir::new().unwrap();
         let app_root = TempDir::new().unwrap();
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let app_knowledge_root = app_root.path().join("knowledge");
         let target = app_knowledge_root
             .join("reference")
@@ -4338,7 +4338,7 @@ mod tests {
         std::fs::write(&target, "# API").unwrap();
 
         let resolved = resolve_knowledge_reveal_path(
-            &workspace_root,
+            &working_dir,
             Some(&app_knowledge_root),
             KnowledgeType::Reference,
             KnowledgeTargetKind::Document,
@@ -4353,13 +4353,13 @@ mod tests {
     fn resolve_knowledge_reveal_path_falls_back_to_app_directory() {
         let workspace = TempDir::new().unwrap();
         let app_root = TempDir::new().unwrap();
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let app_knowledge_root = app_root.path().join("knowledge");
         let target = app_knowledge_root.join("skill").join("workflow");
         std::fs::create_dir_all(&target).unwrap();
 
         let resolved = resolve_knowledge_reveal_path(
-            &workspace_root,
+            &working_dir,
             Some(&app_knowledge_root),
             KnowledgeType::Skill,
             KnowledgeTargetKind::Directory,
@@ -4385,10 +4385,10 @@ mod tests {
     #[test]
     fn execute_knowledge_create_allows_path_only_document_creation() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
         let result = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Document,
                 path: "design/core-loop.md".to_string(),
@@ -4420,10 +4420,10 @@ mod tests {
     #[test]
     fn execute_knowledge_create_rejects_document_path_without_md_suffix() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
         let err = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Document,
                 path: "design/core-loop".to_string(),
@@ -4438,12 +4438,12 @@ mod tests {
     #[test]
     fn execute_knowledge_create_inherits_parent_rules_for_path_only_document() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
-        knowledge_store::create_directory(&workspace_root, KnowledgeType::Design, "combat")
+        knowledge_store::create_directory(&working_dir, KnowledgeType::Design, "combat")
             .expect("create parent");
         knowledge_store::update_directory_config(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Design,
             "combat",
             sample_parent_config(),
@@ -4451,7 +4451,7 @@ mod tests {
         .expect("save parent config");
 
         let result = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Document,
                 path: "design/combat/core-loop.md".to_string(),
@@ -4486,12 +4486,12 @@ mod tests {
     #[test]
     fn execute_knowledge_create_inherits_parent_rules_for_new_directory() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
-        knowledge_store::create_directory(&workspace_root, KnowledgeType::Design, "combat")
+        knowledge_store::create_directory(&working_dir, KnowledgeType::Design, "combat")
             .expect("create parent");
         knowledge_store::update_directory_config(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Design,
             "combat",
             sample_parent_config(),
@@ -4499,7 +4499,7 @@ mod tests {
         .expect("save parent config");
 
         let result = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Directory,
                 path: "design/combat/notes".to_string(),
@@ -4536,10 +4536,10 @@ mod tests {
     #[test]
     fn execute_knowledge_create_allows_memory_documents_to_opt_out_of_inherited_ai_config() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
         let result = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Document,
                 path: "memory/project-understanding.md".to_string(),
@@ -4563,7 +4563,7 @@ mod tests {
         assert!(doc.maintenance_rules.is_none());
 
         let rendered = knowledge_store::read_document_part(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Memory,
             "project-understanding.md",
             "full",
@@ -4575,14 +4575,14 @@ mod tests {
     #[test]
     fn execute_knowledge_create_rejects_document_when_parent_disallows_creation() {
         let temp = TempDir::new().unwrap();
-        let workspace_root = temp.path().to_string_lossy().to_string();
+        let working_dir = temp.path().to_string_lossy().to_string();
 
         let mut parent = sample_parent_config();
         parent.allow_create_documents = false;
-        knowledge_store::create_directory(&workspace_root, KnowledgeType::Design, "combat")
+        knowledge_store::create_directory(&working_dir, KnowledgeType::Design, "combat")
             .expect("create parent");
         knowledge_store::update_directory_config(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Design,
             "combat",
             parent,
@@ -4590,7 +4590,7 @@ mod tests {
         .expect("save parent config");
 
         let err = execute_knowledge_create_request(
-            &workspace_root,
+            &working_dir,
             KnowledgeCreateRequest {
                 kind: KnowledgeTargetKind::Document,
                 path: "design/combat/core-loop.md".to_string(),

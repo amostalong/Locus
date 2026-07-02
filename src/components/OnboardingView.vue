@@ -17,7 +17,7 @@ import {
 import { useAuthStore } from "../stores/auth";
 import { useModelStore } from "../stores/model";
 import { useUiStore } from "../stores/ui";
-import { getWorkingDir, setWorkspace, resolveUnityProjectPath } from "../services/project";
+import { setWorkingDir, getWorkingDir } from "../services/project";
 import { checkUnityPlugin, checkUnityPluginInstallPlan, installUnityPlugin } from "../services/unity";
 import { gitCheckUserConfig, gitInitUnity, gitProbe, gitSetUserConfig } from "../services/git";
 import { assetDbScanStart } from "../services/asset";
@@ -210,12 +210,6 @@ const projectPath = ref("");
 const projectError = ref("");
 const projectValid = ref(false);
 const projectOpening = ref(false);
-// Picker state — shown when the user-selected directory contains multiple
-// Unity projects and the front-end must ask which one to use.
-const projectPickerCandidates = ref<string[]>([]);
-const projectPickerVisible = ref(false);
-const projectPickerOpening = ref(false);
-const projectPickerTitle = ref("");
 
 async function waitForProjectOpeningPaint() {
   await nextTick();
@@ -228,83 +222,25 @@ async function waitForProjectOpeningPaint() {
   });
 }
 
-async function applyProjectPath(path: string): Promise<void> {
-  // Shared switch path: resolves the user-selected path through the new
-  // P5/P6 IPC. If the back-end returns a Picker result, pop the picker;
-  // otherwise (Resolved / NotFound) apply directly.
-  projectError.value = "";
-  projectPath.value = path;
-  projectValid.value = false;
-  projectOpening.value = true;
-  await waitForProjectOpeningPaint();
-  try {
-    const resolved = await resolveUnityProjectPath(path);
-    if (resolved.kind === "picker") {
-      // Multi-Unity-parent case — show picker, let the user choose.
-      projectPickerCandidates.value = resolved.candidates;
-      projectPickerTitle.value = path;
-      projectPickerVisible.value = true;
-      projectOpening.value = false;
-      return;
-    }
-    if (resolved.kind === "notFound") {
-      projectError.value = t("onboarding.project.notUnity");
-      projectOpening.value = false;
-      return;
-    }
-    // Resolved → commit via setWorkspace.
-    const result = await setWorkspace(path);
-    projectPath.value = result.unityRoot;
-    projectValid.value = true;
-    if (result.migration) {
-      // Knowledge base moved — surface a one-line confirmation. The
-      // back-end leaves the legacy copy in place as a backup; no user
-      // action is required.
-      console.info(
-        `[Locus] knowledge base migrated: ${result.migration.fileCount} files, ${result.migration.bytes} bytes`,
-      );
-    }
-  } catch (e) {
-    projectError.value = normalizeAppError(e).message;
-    projectValid.value = false;
-  } finally {
-    projectOpening.value = false;
-  }
-}
-
-async function pickProjectCandidate(candidate: string): Promise<void> {
-  // User picked a Unity project from the picker. Forward the choice
-  // straight to setWorkspace — the back-end will not re-resolve (it
-  // trusts the path the front-end selected).
-  projectPickerVisible.value = false;
-  projectPickerOpening.value = true;
-  try {
-    const result = await setWorkspace(candidate);
-    projectPath.value = result.unityRoot;
-    projectValid.value = true;
-    projectError.value = "";
-  } catch (e) {
-    projectError.value = normalizeAppError(e).message;
-    projectValid.value = false;
-  } finally {
-    projectPickerOpening.value = false;
-    projectPickerCandidates.value = [];
-    projectPickerTitle.value = "";
-  }
-}
-
-function cancelProjectPicker(): void {
-  projectPickerVisible.value = false;
-  projectPickerCandidates.value = [];
-  projectPickerTitle.value = "";
-}
-
 async function browseProject() {
-  if (projectOpening.value || projectPickerOpening.value) return;
+  if (projectOpening.value) return;
   try {
     const selected = await open({ directory: true, multiple: false });
     if (selected && typeof selected === "string") {
-      await applyProjectPath(selected);
+      projectError.value = "";
+      projectPath.value = selected;
+      projectValid.value = false;
+      projectOpening.value = true;
+      await waitForProjectOpeningPaint();
+      try {
+        projectPath.value = await setWorkingDir(selected);
+        projectValid.value = true;
+      } catch (e) {
+        projectError.value = normalizeAppError(e).message;
+        projectValid.value = false;
+      } finally {
+        projectOpening.value = false;
+      }
     }
   } catch { /* cancelled */ }
 }
@@ -605,40 +541,6 @@ onUnmounted(() => {
           </button>
           <button class="win-ctrl-btn win-close" @click="uiStore.winClose" :title="t('app.win.close')">
             <svg viewBox="0 0 12 12" width="12" height="12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Picker modal: shown when the user-selected directory contains
-         multiple Unity projects and the front-end must ask which one
-         to use. (P5 of workspace_root vs unity_root refactor.) -->
-    <div v-if="projectPickerVisible" class="project-picker-backdrop" @click.self="cancelProjectPicker">
-      <div class="project-picker-modal" role="dialog" aria-modal="true">
-        <h3 class="project-picker-title">{{ t("onboarding.project.pickerTitle") }}</h3>
-        <p class="project-picker-desc">
-          {{ t("onboarding.project.pickerDesc", projectPickerTitle) }}
-        </p>
-        <ul class="project-picker-list">
-          <li v-for="candidate in projectPickerCandidates" :key="candidate">
-            <button
-              class="project-picker-item"
-              type="button"
-              :disabled="projectPickerOpening"
-              @click="pickProjectCandidate(candidate)"
-            >
-              <span class="project-picker-item-path">{{ candidate }}</span>
-            </button>
-          </li>
-        </ul>
-        <div class="project-picker-actions">
-          <button
-            class="ob-btn secondary"
-            type="button"
-            :disabled="projectPickerOpening"
-            @click="cancelProjectPicker"
-          >
-            {{ t("common.cancel") }}
           </button>
         </div>
       </div>
@@ -1821,89 +1723,6 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-/* Picker modal — shown when multiple Unity projects live under the
-   user-selected parent directory. (P5 of the workspace_root vs
-   unity_root refactor.) */
-.project-picker-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  box-sizing: border-box;
-}
-.project-picker-modal {
-  width: 100%;
-  max-width: 520px;
-  background: var(--sidebar-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.project-picker-title {
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--text-color);
-  margin: 0;
-}
-.project-picker-desc {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-  line-height: 1.5;
-  word-break: break-all;
-}
-.project-picker-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 50vh;
-  overflow-y: auto;
-}
-.project-picker-item {
-  width: 100%;
-  text-align: left;
-  padding: 10px 14px;
-  background: var(--input-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  color: var(--text-color);
-  font: inherit;
-  font-size: 13px;
-  font-family: var(--font-mono-identifier);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-  word-break: break-all;
-}
-.project-picker-item:hover:not(:disabled) {
-  border-color: var(--accent-color);
-  background: color-mix(in srgb, var(--accent-color) 5%, transparent);
-}
-.project-picker-item:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.project-picker-item-path {
-  display: block;
-  line-height: 1.4;
-}
-.project-picker-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
 }
 .browse-btn {
   display: flex;

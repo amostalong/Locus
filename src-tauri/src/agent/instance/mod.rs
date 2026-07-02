@@ -225,10 +225,7 @@ pub struct AgentInstance {
     #[allow(dead_code)]
     registry: Arc<AgentDefRegistry>,
     tool_registry: Arc<ToolRegistry>,
-    /// User-selected canonical root. Knowledge / skill / memory anchored here.
-    workspace_root: String,
-    /// Resolved Unity project root. Unity integration (asset_db / native bridge / Unity monitor) anchored here.
-    unity_root: String,
+    working_dir: String,
     raw_store: RawContextStore,
     workspace_id: Option<String>,
     parent_tool_call: Option<ParentToolCall>,
@@ -2566,7 +2563,7 @@ impl AgentInstance {
     }
 
     fn has_selected_working_dir(&self) -> bool {
-        Self::has_selected_working_dir_value(&self.workspace_root)
+        Self::has_selected_working_dir_value(&self.working_dir)
     }
 
     fn knowledge_semantic_search_enabled(&self) -> bool {
@@ -2574,7 +2571,7 @@ impl AgentInstance {
             return false;
         }
         let config = crate::knowledge_index::load_general_config(
-            &crate::knowledge_index::library_dir_for_working_dir(&self.workspace_root),
+            &crate::knowledge_index::library_dir_for_working_dir(&self.working_dir),
         );
         config.enabled && config.semantic_search_enabled
     }
@@ -2607,7 +2604,7 @@ impl AgentInstance {
         }
 
         Some(
-            std::path::Path::new(&self.workspace_root)
+            std::path::Path::new(&self.working_dir)
                 .join(path)
                 .display()
                 .to_string(),
@@ -2861,13 +2858,13 @@ impl AgentInstance {
         let started_at = Instant::now();
         eprintln!(
             "[Agent {}] knowledge context build start: session={} cwd={} include_index={} include_memory={}",
-            self.id, self.session_id, self.workspace_root, _include_index, _include_memory
+            self.id, self.session_id, self.working_dir, _include_index, _include_memory
         );
         let mut sections = Vec::new();
 
         let structure_started_at = Instant::now();
         if let Ok(structure) = build_structure_section(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
             self.knowledge_access_mode,
         ) {
@@ -2887,7 +2884,7 @@ impl AgentInstance {
 
         if _include_memory {
             if let Ok(full_document_section) = build_l2_full_document_section(
-                &self.workspace_root,
+                &self.working_dir,
                 self.app_knowledge_dir.as_ref().as_ref(),
             ) {
                 if !full_document_section.trim().is_empty() {
@@ -2925,11 +2922,7 @@ impl AgentInstance {
         debug: bool,
         registry: Arc<AgentDefRegistry>,
         tool_registry: Arc<ToolRegistry>,
-        // workspace_root: user-selected canonical root for knowledge / skill / memory.
-        // unity_root: resolved Unity project root for Unity integration.
-        // (May be the same path or differ — see Workspace struct.)
-        workspace_root: String,
-        unity_root: String,
+        working_dir: String,
         raw_store: RawContextStore,
         workspace_id: Option<String>,
         effective_model: String,
@@ -2951,8 +2944,7 @@ impl AgentInstance {
             debug,
             registry,
             tool_registry,
-            workspace_root,
-            unity_root,
+            working_dir,
             raw_store,
             workspace_id,
             parent_tool_call: None,
@@ -2985,7 +2977,7 @@ impl AgentInstance {
         tool_name: &str,
     ) -> ToolExecutionContext {
         let unity_connected = if tool_name == "read" {
-            Some(crate::unity_bridge::is_unity_connected(&self.unity_root).await)
+            Some(crate::unity_bridge::is_unity_connected(&self.working_dir).await)
         } else {
             None
         };
@@ -2993,7 +2985,7 @@ impl AgentInstance {
         ToolExecutionContext {
             app_handle: Some(app_handle.clone()),
             working_dir: if self.has_selected_working_dir() {
-                Some(self.workspace_root.clone())
+                Some(self.working_dir.clone())
             } else {
                 None
             },
@@ -3098,7 +3090,7 @@ impl AgentInstance {
     fn tool_direct_load_overrides(&self) -> HashMap<String, bool> {
         let config = crate::commands::merged_tool_load_config_for_agent(
             self.app_agent_dir.as_ref(),
-            &self.workspace_root,
+            &self.working_dir,
             &self.def.id,
         );
         config
@@ -3114,7 +3106,7 @@ impl AgentInstance {
     fn tool_enabled_overrides(&self) -> HashMap<String, bool> {
         let config = crate::commands::merged_tool_load_config_for_agent(
             self.app_agent_dir.as_ref(),
-            &self.workspace_root,
+            &self.working_dir,
             &self.def.id,
         );
         config
@@ -3149,7 +3141,7 @@ impl AgentInstance {
     fn canonical_tool_name(&self, name: &str) -> Option<String> {
         self.tool_registry.canonical_name(name).or_else(|| {
             crate::commands::canonical_skill_package_tool_name_for_working_dir(
-                &self.workspace_root,
+                &self.working_dir,
                 name,
             )
         })
@@ -3158,7 +3150,7 @@ impl AgentInstance {
     fn tool_description(&self, name: &str) -> Option<(String, serde_json::Value)> {
         self.tool_registry.tool_description(name).or_else(|| {
             crate::commands::skill_package_tool_description_sync_for_working_dir(
-                &self.workspace_root,
+                &self.working_dir,
                 name,
             )
         })
@@ -3167,7 +3159,7 @@ impl AgentInstance {
     fn resolve_api_tool(&self, name: &str) -> Option<serde_json::Value> {
         self.tool_registry.resolve_api_tool(name).or_else(|| {
             crate::commands::resolve_skill_package_api_tool_sync_for_working_dir(
-                &self.workspace_root,
+                &self.working_dir,
                 name,
             )
         })
@@ -3609,7 +3601,7 @@ impl AgentInstance {
 
         if self.knowledge_access_mode.allows_context() {
             if let Ok(rule_entries) =
-                build_l3_rule_entries(&self.workspace_root, self.app_knowledge_dir.as_ref().as_ref())
+                build_l3_rule_entries(&self.working_dir, self.app_knowledge_dir.as_ref().as_ref())
             {
                 items.extend(rule_entries.into_iter().map(|entry| InjectedPromptItem {
                     id: format!("knowledge_rule::{}::{}", entry.doc_type, entry.path),
@@ -3797,11 +3789,11 @@ impl AgentInstance {
         let python = crate::python_runtime::python_prompt_display(None);
         eprintln!(
             "[Agent {}] system prompt build start: session={} cwd={} has_working_dir={}",
-            self.id, self.session_id, self.workspace_root, has_working_dir
+            self.id, self.session_id, self.working_dir, has_working_dir
         );
 
         let unity_version = if has_working_dir {
-            let version_path = std::path::Path::new(&self.workspace_root)
+            let version_path = std::path::Path::new(&self.working_dir)
                 .join("ProjectSettings")
                 .join("ProjectVersion.txt");
             std::fs::read_to_string(&version_path)
@@ -3831,17 +3823,17 @@ impl AgentInstance {
             // status through the per-run conversation announcements instead.
             if self.def.env_template.contains("<unity_status>") {
                 let (connected, status, active_scene) =
-                    crate::unity_bridge::query_unity_status(&self.unity_root).await;
+                    crate::unity_bridge::query_unity_status(&self.working_dir).await;
                 eprintln!(
                     "[Agent {}] Unity status: connected={}, status={}, scene={:?}, cwd={}",
-                    self.id, connected, status, active_scene, self.workspace_root
+                    self.id, connected, status, active_scene, self.working_dir
                 );
                 unity_status =
                     crate::unity_bridge::format_editor_status_for_prompt(status).to_string();
                 unity_active_scene = active_scene.unwrap_or_else(|| "unknown".to_string());
             }
 
-            let project_path = std::path::Path::new(&self.unity_root);
+            let project_path = std::path::Path::new(&self.working_dir);
             let (tags, layers) = parse_tag_manager(project_path);
 
             {
@@ -3885,7 +3877,7 @@ impl AgentInstance {
         env = env.replace("<python>", &python);
         env = env.replace(
             "<working_dir>",
-            &Self::display_working_dir_value(&self.workspace_root),
+            &Self::display_working_dir_value(&self.working_dir),
         );
 
         // Helper to remove a mustache block (e.g. {{#tag}}...{{/tag}})
@@ -3904,7 +3896,7 @@ impl AgentInstance {
         if has_working_dir && env.contains("{{#git}}") {
             use crate::vcs::git::GitProvider;
             use crate::vcs::VcsProvider;
-            let is_git = GitProvider.is_available(&self.workspace_root).await;
+            let is_git = GitProvider.is_available(&self.working_dir).await;
             git_available = is_git;
             if is_git {
                 git_context_included = true;
@@ -3912,7 +3904,7 @@ impl AgentInstance {
                 env = env.replace("{{/git}}", "");
 
                 if env.contains("<git_branch>") {
-                    let branch = GitProvider::current_branch(&self.workspace_root)
+                    let branch = GitProvider::current_branch(&self.working_dir)
                         .await
                         .unwrap_or_default();
                     let branch_display = if branch.is_empty() {
@@ -3927,7 +3919,7 @@ impl AgentInstance {
                 // it; templates without these placeholders direct the model to
                 // run git commands instead, keeping the env prompt stable.
                 if env.contains("<git_recent_commits>") {
-                    let commits = GitProvider::recent_commits(&self.workspace_root, 10)
+                    let commits = GitProvider::recent_commits(&self.working_dir, 10)
                         .await
                         .unwrap_or_default();
                     env = env.replace(
@@ -3941,7 +3933,7 @@ impl AgentInstance {
                 }
 
                 if env.contains("{{#git_uncommitted}}") {
-                    let stat = GitProvider::uncommitted_summary(&self.workspace_root)
+                    let stat = GitProvider::uncommitted_summary(&self.working_dir)
                         .await
                         .unwrap_or_default();
                     if stat.is_empty() {
@@ -3999,7 +3991,7 @@ impl AgentInstance {
         if let Some(focus) = &self.knowledge_focus {
             if has_working_dir && self.knowledge_access_mode.allows_context() {
                 match crate::knowledge_store::load_document_by_path_with_app_root(
-                    &self.workspace_root,
+                    &self.working_dir,
                     self.app_knowledge_dir.as_ref().as_ref(),
                     focus.doc_type,
                     &focus.path,
@@ -4058,7 +4050,7 @@ impl AgentInstance {
         let rules_prompt = {
             let rule_entries = crate::commands::collect_agent_rule_files(
                 self.app_agent_dir.as_ref(),
-                &self.workspace_root,
+                &self.working_dir,
                 &self.def.id,
                 false,
             )
@@ -4085,7 +4077,7 @@ impl AgentInstance {
             }
             if has_working_dir && self.knowledge_access_mode.allows_context() {
                 if let Ok(l3_rules) = build_l3_rule_section(
-                    &self.workspace_root,
+                    &self.working_dir,
                     self.app_knowledge_dir.as_ref().as_ref(),
                 ) {
                     if !l3_rules.trim().is_empty() {
@@ -4135,7 +4127,7 @@ impl AgentInstance {
                         args["workdir"] = serde_json::Value::String(resolved);
                     }
                 } else if self.has_selected_working_dir() {
-                    args["workdir"] = serde_json::Value::String(self.workspace_root.clone());
+                    args["workdir"] = serde_json::Value::String(self.working_dir.clone());
                 }
             }
             "grep" | "list" => {
@@ -4144,7 +4136,7 @@ impl AgentInstance {
                         args["path"] = serde_json::Value::String(resolved);
                     }
                 } else if self.has_selected_working_dir() {
-                    args["path"] = serde_json::Value::String(self.workspace_root.clone());
+                    args["path"] = serde_json::Value::String(self.working_dir.clone());
                 }
             }
             "read" | "write" | "edit" => {
@@ -4160,7 +4152,7 @@ impl AgentInstance {
                         args["project_path"] = serde_json::Value::String(resolved);
                     }
                 } else if self.has_selected_working_dir() {
-                    args["project_path"] = serde_json::Value::String(self.unity_root.clone());
+                    args["project_path"] = serde_json::Value::String(self.working_dir.clone());
                 }
             }
             _ => {}
@@ -4875,7 +4867,7 @@ impl AgentInstance {
         match tool_name {
             "read" | "write" | "edit" => {
                 let file_path = args.get("filePath").and_then(|value| value.as_str())?;
-                if Self::path_targets_knowledge_root(&self.workspace_root, app_root, file_path) {
+                if Self::path_targets_knowledge_root(&self.working_dir, app_root, file_path) {
                     Some(knowledge_tool_routing_error())
                 } else {
                     None
@@ -4883,7 +4875,7 @@ impl AgentInstance {
             }
             "grep" | "list" => {
                 let path = args.get("path").and_then(|value| value.as_str())?;
-                if Self::path_targets_knowledge_root(&self.workspace_root, app_root, path) {
+                if Self::path_targets_knowledge_root(&self.working_dir, app_root, path) {
                     Some(knowledge_tool_routing_error())
                 } else {
                     None
@@ -4898,14 +4890,14 @@ impl AgentInstance {
                     .get("command")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                if Self::path_targets_knowledge_root(&self.workspace_root, app_root, workdir)
+                if Self::path_targets_knowledge_root(&self.working_dir, app_root, workdir)
                     || Self::shell_command_mentions_knowledge_root(
-                        &self.workspace_root,
+                        &self.working_dir,
                         app_root,
                         command,
                     )
                 {
-                    if Self::assess_bash_git_knowledge_command(&self.workspace_root, app_root, args)
+                    if Self::assess_bash_git_knowledge_command(&self.working_dir, app_root, args)
                         .is_some()
                     {
                         None
@@ -5273,7 +5265,7 @@ impl AgentInstance {
         };
 
         let path = std::path::Path::new(file_path);
-        let working_dir = std::path::Path::new(&self.unity_root);
+        let working_dir = std::path::Path::new(&self.working_dir);
         let assets_dir = working_dir.join("Assets");
         let packages_dir = working_dir.join("Packages");
         path.starts_with(&assets_dir) || path.starts_with(&packages_dir)
@@ -5290,18 +5282,18 @@ impl AgentInstance {
         }
 
         let file_path = args.get("filePath").and_then(|v| v.as_str())?;
-        let working_dir = std::path::Path::new(&self.workspace_root);
+        let working_dir = std::path::Path::new(&self.working_dir);
         let path = std::path::Path::new(file_path);
         let relative = path.strip_prefix(working_dir).ok()?;
         Some(relative.to_string_lossy().replace('\\', "/"))
     }
 
     async fn cleanup_unity_edit_session(&self) {
-        if !crate::unity_bridge::is_unity_project(&self.unity_root) {
+        if !crate::unity_bridge::is_unity_project(&self.working_dir) {
             return;
         }
 
-        match crate::unity_bridge::end_edit_session(&self.unity_root, &self.session_id).await {
+        match crate::unity_bridge::end_edit_session(&self.working_dir, &self.session_id).await {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -5310,7 +5302,7 @@ impl AgentInstance {
                 );
                 Self::retry_unity_edit_session_cleanup(
                     self.id.clone(),
-                    self.workspace_root.clone(),
+                    self.working_dir.clone(),
                     self.session_id.clone(),
                 );
             }
@@ -5372,8 +5364,7 @@ impl AgentInstance {
             self.debug,
             self.registry.clone(),
             self.tool_registry.clone(),
-            self.workspace_root.clone(),
-            self.unity_root.clone(),
+            self.working_dir.clone(),
             self.raw_store.clone(),
             self.workspace_id.clone(),
             self.resolve_subagent_model_name(child_def_id)
@@ -6096,7 +6087,7 @@ impl AgentInstance {
         );
         let keep_from_msg = &messages[boundary_idx];
         let restored_files_section =
-            compact::build_post_compact_restored_files_section(&messages, &self.workspace_root);
+            compact::build_post_compact_restored_files_section(&messages, &self.working_dir);
         let summary_msg = compact::build_post_compact_message(
             &summary,
             &restored_files_section,
@@ -6245,7 +6236,7 @@ impl AgentInstance {
                 let keep_from_msg = &messages[boundary_idx];
                 let restored_files_section = compact::build_post_compact_restored_files_section(
                     &messages,
-                    &self.workspace_root,
+                    &self.working_dir,
                 );
                 let summary_msg = compact::build_post_compact_message(
                     &summary,
@@ -6384,7 +6375,7 @@ impl AgentInstance {
                 let keep_from_msg = &messages[boundary_idx];
                 let restored_files_section = compact::build_post_compact_restored_files_section(
                     &messages,
-                    &self.workspace_root,
+                    &self.working_dir,
                 );
                 let summary_msg = compact::build_post_compact_message(
                     &summary,
@@ -6512,7 +6503,7 @@ impl AgentInstance {
 
         let keep_from_msg = &messages[boundary_idx];
         let restored_files_section =
-            compact::build_post_compact_restored_files_section(&messages, &self.workspace_root);
+            compact::build_post_compact_restored_files_section(&messages, &self.working_dir);
         let summary_msg = compact::build_post_compact_message(
             &summary,
             &restored_files_section,
@@ -6571,7 +6562,7 @@ impl AgentInstance {
     ) -> String {
         let mut blocks = Vec::new();
         let skills = crate::commands::list_skills_sync(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
         );
         let app_knowledge_dir = self.app_knowledge_dir.as_ref().as_ref();
@@ -6593,7 +6584,7 @@ impl AgentInstance {
             };
 
             let content_result = crate::commands::read_skill_manifest_sync(
-                &self.workspace_root,
+                &self.working_dir,
                 app_knowledge_dir,
                 dir_name,
                 Some(source),
@@ -6684,7 +6675,7 @@ impl AgentInstance {
         }
 
         let skills = crate::commands::list_skills_sync(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
         );
         let mut names = HashSet::new();
@@ -6695,7 +6686,7 @@ impl AgentInstance {
             if let Some(package_id) = manifest.and_then(|manifest| manifest.package_id.as_deref()) {
                 for tool_name in
                     crate::commands::skill_package_tool_names_for_package_sync_with_working_dir(
-                        &self.workspace_root,
+                        &self.working_dir,
                         package_id,
                     )
                 {
@@ -7289,12 +7280,12 @@ impl AgentInstance {
 
         let user_text_started_at = Instant::now();
         let actual_user_text: String;
-        if crate::unity_bridge::is_unity_project(&self.unity_root) {
+        if crate::unity_bridge::is_unity_project(&self.working_dir) {
             // The status probe can stall on a busy editor; race it against the
             // cancel signal so a cancel during prep reacts immediately.
             let mut cancel_rx = self.cancel_waiter();
             let probed_status = tokio::select! {
-                status = crate::unity_bridge::query_unity_status(&self.unity_root) => Some(status),
+                status = crate::unity_bridge::query_unity_status(&self.working_dir) => Some(status),
                 _ = cancel_rx.changed() => None,
             };
             let Some((_connected, status, active_scene)) = probed_status else {
@@ -7500,7 +7491,7 @@ impl AgentInstance {
             self.effective_model,
             self.def.tools.join(","),
             initial_mode,
-            self.workspace_root
+            self.working_dir
         );
         log_stage_elapsed(
             &self.id,
@@ -8329,7 +8320,7 @@ impl AgentInstance {
 
                 let pre_checkpoint = if needs_undo {
                     if let Some(ref undo_mgr) = self.undo_manager {
-                        match undo_mgr.before_round(&self.workspace_root, "agent round").await {
+                        match undo_mgr.before_round(&self.working_dir, "agent round").await {
                             Ok(cp) => cp,
                             Err(e) => {
                                 eprintln!("[Agent {}] undo checkpoint failed: {}", self.id, e);
@@ -8357,12 +8348,12 @@ impl AgentInstance {
                     } else { None }
                 } else { None };
 
-                let has_unity_asset_writes = crate::unity_bridge::is_unity_project(&self.unity_root)
+                let has_unity_asset_writes = crate::unity_bridge::is_unity_project(&self.working_dir)
                     && prepared
                         .iter()
                         .any(|(tc, args)| self.is_unity_asset_write_call(tc, args));
                 if has_unity_asset_writes {
-                    match crate::unity_bridge::begin_edit_session(&self.unity_root, &self.session_id).await {
+                    match crate::unity_bridge::begin_edit_session(&self.working_dir, &self.session_id).await {
                         Ok(msg) => eprintln!(
                             "[Agent {}] Unity edit session active for {}: {}",
                             self.id, self.session_id, msg
@@ -8390,7 +8381,7 @@ impl AgentInstance {
                     let mut queued_asset_paths: Vec<String> = Vec::new();
                     for (tc, args) in &prepared {
                         if tc.name == "unity_recompile" && !queued_asset_paths.is_empty() {
-                            match crate::unity_bridge::import_assets(&self.unity_root, &queued_asset_paths).await {
+                            match crate::unity_bridge::import_assets(&self.working_dir, &queued_asset_paths).await {
                                 Ok(msg) => eprintln!(
                                     "[Agent {}] queued changed Unity assets before recompile: {}",
                                     self.id, msg
@@ -8422,7 +8413,7 @@ impl AgentInstance {
 
                     if !queued_asset_paths.is_empty() {
                         crate::unity_bridge::import_assets_fire_and_forget(
-                            &self.workspace_root,
+                            &self.working_dir,
                             queued_asset_paths,
                         );
                     }
@@ -8469,7 +8460,7 @@ impl AgentInstance {
 
                     if !queued_asset_paths.is_empty() {
                         crate::unity_bridge::import_assets_fire_and_forget(
-                            &self.workspace_root,
+                            &self.working_dir,
                             queued_asset_paths,
                         );
                     }
@@ -8600,7 +8591,7 @@ impl AgentInstance {
                                 Some(run_id.as_str()),
                                 checkpoint,
                                 has_unity_execute,
-                                &self.workspace_root,
+                                &self.working_dir,
                             )
                             .await;
                         match recorded {
@@ -9355,7 +9346,7 @@ impl AgentInstance {
             tool_name,
             "knowledge_create" | "knowledge_edit" | "knowledge_move" | "knowledge_delete"
         ) {
-            match assess_knowledge_tool_confirmation_decision(&self.workspace_root, tool_name, args) {
+            match assess_knowledge_tool_confirmation_decision(&self.working_dir, tool_name, args) {
                 Ok(Some(assessment)) => {
                     knowledge_governance_triggered = assessment.governance_requires_confirm;
                     knowledge_preview = Some(assessment.preview);
@@ -9372,7 +9363,7 @@ impl AgentInstance {
         }
         if tool_name == "bash" {
             if let Some(assessment) = Self::assess_bash_git_knowledge_command(
-                &self.workspace_root,
+                &self.working_dir,
                 self.app_knowledge_dir.as_ref().as_ref(),
                 args,
             ) {
@@ -9755,7 +9746,7 @@ impl AgentInstance {
             .map(|config| config.file_tool_workspace_boundary_enabled())
             .unwrap_or(false);
         if let Some(error) = Self::validate_tool_path_requirements(
-            &self.workspace_root,
+            &self.working_dir,
             &tc.name,
             args,
             file_workspace_boundary_enabled,
@@ -9885,7 +9876,7 @@ impl AgentInstance {
         } else {
             let bash_git_knowledge_assessment = if tc.name == "bash" {
                 Self::assess_bash_git_knowledge_command(
-                    &self.workspace_root,
+                    &self.working_dir,
                     self.app_knowledge_dir.as_ref().as_ref(),
                     args,
                 )
@@ -10269,7 +10260,7 @@ impl AgentInstance {
         };
 
         if let Err(error) =
-            crate::knowledge_store::ensure_memory_builtin_documents(&self.workspace_root)
+            crate::knowledge_store::ensure_memory_builtin_documents(&self.working_dir)
         {
             return ToolResult {
                 output: format!("Error preparing memory documents: {}", error),
@@ -10291,7 +10282,7 @@ impl AgentInstance {
         };
 
         match crate::knowledge_store::list_documents_with_app_root(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
             resolved_type,
             resolved_prefix.as_deref(),
@@ -10309,7 +10300,7 @@ impl AgentInstance {
                         .collect::<HashSet<_>>();
                     items.extend(
                         crate::commands::list_skill_package_knowledge_items_sync_with_hidden(
-                            &self.workspace_root,
+                            &self.working_dir,
                             resolved_prefix.as_deref(),
                             false,
                         )
@@ -10328,11 +10319,11 @@ impl AgentInstance {
                 let include_package_documents = resolved_type
                     == Some(crate::knowledge_store::KnowledgeType::Skill)
                     && crate::commands::skill_package_path_prefix_targets_package_sync(
-                        &self.workspace_root,
+                        &self.working_dir,
                         resolved_prefix.as_deref(),
                     );
                 items.retain(|item| {
-                    Self::knowledge_list_item_model_recall_allowed(&self.workspace_root, item)
+                    Self::knowledge_list_item_model_recall_allowed(&self.working_dir, item)
                         .unwrap_or(false)
                         && (include_hidden
                             || item.inject_mode
@@ -10462,7 +10453,7 @@ impl AgentInstance {
         let query_result = tokio::time::timeout(
             KNOWLEDGE_QUERY_TOOL_TIMEOUT,
             crate::knowledge_index::query_documents_with_progress(
-                &self.workspace_root,
+                &self.working_dir,
                 self.app_knowledge_dir.as_ref().as_ref(),
                 lexical_query.as_deref(),
                 semantic_query.as_deref(),
@@ -10594,7 +10585,7 @@ impl AgentInstance {
         };
 
         match crate::commands::execute_knowledge_read_request(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
             request.clone(),
         ) {
@@ -10675,7 +10666,7 @@ impl AgentInstance {
     ) -> Result<Option<String>, String> {
         let Some(bundle) =
             crate::commands::skill_package_unity_script_bundle_for_document_sync_for_working_dir(
-                &self.workspace_root,
+                &self.working_dir,
                 knowledge_path,
             )?
         else {
@@ -10701,7 +10692,7 @@ impl AgentInstance {
         }
 
         let (connected, _status, _scene) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return Ok(Some(format!(
                 "Locus Skill runtime: Unity C# compile skipped for `{}` because Unity Editor is disconnected.",
@@ -10721,7 +10712,7 @@ impl AgentInstance {
         );
 
         let compile_raw =
-            crate::unity_bridge::compile_skill_package(&self.unity_root, &bundle.request).await?;
+            crate::unity_bridge::compile_skill_package(&self.working_dir, &bundle.request).await?;
         let compile_json = serde_json::from_str::<serde_json::Value>(&compile_raw)
             .map_err(|error| format!("Failed to parse Skill C# compile response: {}", error))?;
         let cache_hit = compile_json
@@ -10750,7 +10741,7 @@ impl AgentInstance {
 
         let type_index_update =
             crate::unity_bridge::update_unity_type_index_after_skill_package_compile(
-                &self.workspace_root,
+                &self.working_dir,
                 &compile_json,
             )
             .await?;
@@ -10795,7 +10786,7 @@ impl AgentInstance {
         };
         crate::commands::reconcile_and_emit_knowledge_changed(
             app_handle,
-            &self.workspace_root,
+            &self.working_dir,
             knowledge_index_state,
             source,
         )
@@ -10852,7 +10843,7 @@ impl AgentInstance {
                 .map(AgentKnowledgeDocumentContentPatch::into_document_patch),
         };
 
-        match crate::commands::execute_knowledge_create_request(&self.workspace_root, request) {
+        match crate::commands::execute_knowledge_create_request(&self.working_dir, request) {
             Ok(mut result) => match self.reconcile_knowledge_workspace(app_handle).await {
                 Ok(()) => {
                     Self::prefix_knowledge_mutation_response_paths(&mut result);
@@ -10911,7 +10902,7 @@ impl AgentInstance {
             config: None,
         };
 
-        match crate::commands::execute_knowledge_edit_request(&self.workspace_root, request) {
+        match crate::commands::execute_knowledge_edit_request(&self.working_dir, request) {
             Ok(mut result) => match self.reconcile_knowledge_workspace(app_handle).await {
                 Ok(()) => {
                     Self::prefix_knowledge_mutation_response_paths(&mut result);
@@ -10956,7 +10947,7 @@ impl AgentInstance {
             }
         };
 
-        match crate::commands::execute_knowledge_move_request(&self.workspace_root, parsed) {
+        match crate::commands::execute_knowledge_move_request(&self.working_dir, parsed) {
             Ok(mut result) => match self.reconcile_knowledge_workspace(app_handle).await {
                 Ok(()) => {
                     Self::prefix_knowledge_mutation_response_paths(&mut result);
@@ -11001,7 +10992,7 @@ impl AgentInstance {
             }
         };
 
-        match crate::commands::execute_knowledge_delete_request(&self.workspace_root, parsed) {
+        match crate::commands::execute_knowledge_delete_request(&self.working_dir, parsed) {
             Ok(mut result) => match self.reconcile_knowledge_workspace(app_handle).await {
                 Ok(()) => {
                     Self::prefix_knowledge_mutation_response_paths(&mut result);
@@ -11058,7 +11049,7 @@ impl AgentInstance {
         let mut output = Self::format_skill_manifest_detail(action, skill);
         if let Some(package_id) = skill.package_id.as_deref() {
             if let Ok(root) = crate::commands::resolve_skill_package_root_sync_for_working_dir(
-                &self.workspace_root,
+                &self.working_dir,
                 package_id,
             ) {
                 output.push_str("\npackageRoot=");
@@ -11120,7 +11111,7 @@ impl AgentInstance {
             .unwrap_or_default();
 
         match crate::commands::create_skill_sync_with_default_package_namespace(
-            &self.workspace_root,
+            &self.working_dir,
             parsed,
             Some(&default_namespace),
         ) {
@@ -11164,7 +11155,7 @@ impl AgentInstance {
             };
 
         match crate::commands::reload_skill_manifest_sync(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
             parsed,
         ) {
@@ -11197,7 +11188,7 @@ impl AgentInstance {
         };
 
         match crate::commands::list_skills_filtered_sync(
-            &self.workspace_root,
+            &self.working_dir,
             self.app_knowledge_dir.as_ref().as_ref(),
             parsed.source.as_deref(),
         ) {
@@ -11810,7 +11801,7 @@ impl AgentInstance {
         }
 
         let (connected, current_status, _scene) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return ExecutedToolResult::from_tool_result(ToolResult {
                 output: "Unity Editor not connected".to_string(),
@@ -11857,7 +11848,7 @@ impl AgentInstance {
             }
 
             if let Err(error) =
-                crate::unity_bridge::set_editor_status(&self.unity_root, requested_status).await
+                crate::unity_bridge::set_editor_status(&self.working_dir, requested_status).await
             {
                 return ExecutedToolResult::from_tool_result(ToolResult {
                     output: format!("Failed to change Unity Editor status: {}", error),
@@ -11931,7 +11922,7 @@ impl AgentInstance {
 
         let cancel_rx = self.cancel_waiter();
         match crate::unity_bridge::unity_execute_code_with_progress_cancellable(
-            &self.workspace_root,
+            &self.working_dir,
             code,
             cancel_rx,
             move |snapshot| {
@@ -12006,7 +11997,7 @@ impl AgentInstance {
         run_id: &str,
     ) -> ToolResult {
         let (connected, status, _) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
 
         if !connected {
             return ToolResult {
@@ -12047,7 +12038,7 @@ impl AgentInstance {
                 }
             }
 
-            if let Err(e) = crate::unity_bridge::exit_play_mode(&self.unity_root).await {
+            if let Err(e) = crate::unity_bridge::exit_play_mode(&self.working_dir).await {
                 return ToolResult {
                     output: format!("Failed to exit play mode: {}", e),
                     is_error: true,
@@ -12057,7 +12048,7 @@ impl AgentInstance {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        match crate::unity_bridge::recompile_and_wait(&self.unity_root).await {
+        match crate::unity_bridge::recompile_and_wait(&self.working_dir).await {
             Ok(msg) => ToolResult {
                 output: msg,
                 is_error: false,
@@ -12112,7 +12103,7 @@ impl AgentInstance {
         }
 
         let (connected, _current_status, _) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return ToolResult {
                 output: "Unity Editor not connected".to_string(),
@@ -12131,7 +12122,7 @@ impl AgentInstance {
             "running",
         );
 
-        if let Err(error) = crate::unity_bridge::compile_run_states(&self.unity_root, args).await {
+        if let Err(error) = crate::unity_bridge::compile_run_states(&self.working_dir, args).await {
             emit_tool_progress(
                 app_handle,
                 run_id,
@@ -12149,7 +12140,7 @@ impl AgentInstance {
         }
 
         let (connected, current_status, _) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return ToolResult {
                 output: "Unity Editor not connected".to_string(),
@@ -12202,7 +12193,7 @@ impl AgentInstance {
             }
 
             if let Err(error) =
-                crate::unity_bridge::set_editor_status(&self.unity_root, requested_status).await
+                crate::unity_bridge::set_editor_status(&self.working_dir, requested_status).await
             {
                 emit_tool_progress(
                     app_handle,
@@ -12232,7 +12223,7 @@ impl AgentInstance {
             "running",
         );
 
-        match crate::unity_bridge::unity_run_states(&self.unity_root, args).await {
+        match crate::unity_bridge::unity_run_states(&self.working_dir, args).await {
             Ok(output) => ToolResult {
                 output: if output.trim().is_empty() {
                     "unity_run_states completed with no output.".to_string()
@@ -12816,7 +12807,7 @@ impl AgentInstance {
         let payload_text =
             serde_json::to_string(&payload).map_err(|e| format!("invalid tool payload: {}", e))?;
         let resp =
-            crate::unity_bridge::send_message(&self.unity_root, message_type, &payload_text)
+            crate::unity_bridge::send_message(&self.working_dir, message_type, &payload_text)
                 .await?;
 
         if !resp.ok {
@@ -12927,7 +12918,7 @@ impl AgentInstance {
             })
             .collect();
         let Some(extension) = crate::commands::find_unity_yaml_read_extension_for_working_dir(
-            &self.workspace_root,
+            &self.working_dir,
             &doc_keys,
         ) else {
             return Ok(None);
@@ -12939,7 +12930,7 @@ impl AgentInstance {
             extension.extension_name.clone()
         };
         let (connected, _status, _scene) =
-            crate::unity_bridge::query_unity_status(&self.unity_root).await;
+            crate::unity_bridge::query_unity_status(&self.working_dir).await;
         if !connected {
             return Err(format!(
                 "yaml-read extension '{}' (Skill package '{}') was skipped: Unity Editor is not connected.",
@@ -12974,7 +12965,7 @@ impl AgentInstance {
         });
 
         match crate::commands::run_unity_yaml_read_extension(
-            &self.workspace_root,
+            &self.working_dir,
             &extension,
             &invoke_args,
         )
@@ -13747,7 +13738,7 @@ impl AgentInstance {
     fn ensure_ref_graph_initialized(&self, app_handle: &AppHandle) {
         use crate::asset_db::{AssetDb, AssetDbState};
 
-        let project_root = std::path::Path::new(&self.unity_root);
+        let project_root = std::path::Path::new(&self.working_dir);
         if !project_root.join("Assets").is_dir() {
             eprintln!("[unity_yaml_read] Not a Unity project, skip auto-scan");
             return;
@@ -14039,8 +14030,7 @@ impl AgentInstance {
             self.debug,
             self.registry.clone(),
             self.tool_registry.clone(),
-            self.workspace_root.clone(),
-            self.unity_root.clone(),
+            self.working_dir.clone(),
             self.raw_store.clone(),
             self.workspace_id.clone(),
             self.resolve_subagent_model_name(subagent_type)
@@ -15275,8 +15265,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::new()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15332,8 +15321,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15419,7 +15407,6 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            temp.path().to_string_lossy().to_string(),
             temp.path().to_string_lossy().to_string(),
             RawContextStore::default(),
             None,
@@ -15517,8 +15504,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15617,8 +15603,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15699,8 +15684,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15778,7 +15762,6 @@ PrefabInstance:
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
             temp.path().to_string_lossy().to_string(),
-            temp.path().to_string_lossy().to_string(),
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15852,7 +15835,6 @@ PrefabInstance:
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(registry),
             temp.path().to_string_lossy().to_string(),
-            temp.path().to_string_lossy().to_string(),
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -15917,7 +15899,6 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(registry),
-            temp.path().to_string_lossy().to_string(),
             temp.path().to_string_lossy().to_string(),
             RawContextStore::default(),
             None,
@@ -16117,8 +16098,7 @@ PrefabInstance:
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            working_dir.clone(),
-            working_dir.clone(),
+            working_dir,
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -16286,7 +16266,6 @@ Create a reusable Skill.
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
             workspace.to_string_lossy().to_string(),
-            workspace.to_string_lossy().to_string(),
             RawContextStore::default(),
             None,
             "test-model".to_string(),
@@ -16391,7 +16370,6 @@ Search, install, audit, and export a plugin.
             false,
             Arc::new(AgentDefRegistry::load(None, None)),
             Arc::new(ToolRegistry::with_builtins()),
-            workspace.to_string_lossy().to_string(),
             workspace.to_string_lossy().to_string(),
             RawContextStore::default(),
             None,

@@ -464,11 +464,7 @@ pub fn run() {
             startup_for_setup.mark("setup_session_store_ready");
 
             let working_dir_file = data_dir.join("working_dir.txt");
-            // Read the persisted root. M1: this can be either a Unity project
-            // path (老用户 — workspace_root == unity_root) or a non-Unity org
-            // directory (新用户 — workspace_root != unity_root, requires
-            // re-resolution on startup).
-            let initial_workspace_root = std::fs::read_to_string(&working_dir_file)
+            let initial_working_dir = std::fs::read_to_string(&working_dir_file)
                 .ok()
                 .and_then(|s| {
                     let trimmed = s.trim().to_string();
@@ -479,60 +475,22 @@ pub fn run() {
                     }
                 })
                 .unwrap_or_default();
-            println!("[Locus] workspace_root: {}", initial_workspace_root);
+            println!("[Locus] working_dir: {}", initial_working_dir);
 
-            if !initial_workspace_root.is_empty() {
-                commands::save_recent_dir_pub(&data_dir, &initial_workspace_root);
+            if !initial_working_dir.is_empty() {
+                commands::save_recent_dir_pub(&data_dir, &initial_working_dir);
             }
 
-            // M1 dual-track resolution: derive unity_root from the persisted
-            // workspace_root.
-            //
-            // - If the persisted path itself is a Unity project →
-            //   workspace_root == unity_root (老用户无感, full back-compat).
-            // - Otherwise → call resolve_unity_project_path. If it finds a
-            //   single Unity project, use that. Multiple / none → fall back
-            //   to treating the persisted path as both roots (the UI will
-            //   show an error and prompt the user to re-select).
-            let (initial_unity_root, workspace_was_resolved) = if initial_workspace_root.is_empty()
-            {
-                (String::new(), false)
-            } else if unity_bridge::is_unity_project(&initial_workspace_root) {
-                (initial_workspace_root.clone(), false)
-            } else {
-                match workspace::resolve_unity_project_path(&initial_workspace_root) {
-                    workspace::ResolveUnityResult::Resolved { unity_root, .. } => {
-                        eprintln!(
-                            "[Locus] startup auto-resolved workspace_root '{}' -> unity_root '{}'",
-                            initial_workspace_root, unity_root
-                        );
-                        (unity_root, true)
-                    }
-                    workspace::ResolveUnityResult::Picker { .. } | workspace::ResolveUnityResult::NotFound => {
-                        eprintln!(
-                            "[Locus] startup: persisted workspace_root '{}' has no single Unity project; \
-                             leaving unity_root empty until user re-selects",
-                            initial_workspace_root
-                        );
-                        // Fall back: keep them distinct so the UI can show an error.
-                        (String::new(), true)
-                    }
-                }
-            };
-
-            let initial_workspace_id = if !initial_workspace_root.is_empty() {
-                let unity_for_seed = if initial_unity_root.is_empty() {
-                    initial_workspace_root.as_str()
-                } else {
-                    initial_unity_root.as_str()
-                };
-                workspace::load_or_create_workspace(&initial_workspace_root, unity_for_seed).ok()
+            let initial_workspace_id = if !initial_working_dir.is_empty() {
+                workspace::load_or_create_workspace(&initial_working_dir).ok()
             } else {
                 None
             };
-            if !initial_unity_root.is_empty() {
+            if !initial_working_dir.is_empty()
+                && unity_bridge::is_unity_project(&initial_working_dir)
+            {
                 if let Err(error) = unity_bridge::sync_native_bridge_marker(
-                    &initial_unity_root,
+                    &initial_working_dir,
                     config.unity_native_bridge_enabled(),
                 ) {
                     eprintln!(
@@ -541,7 +499,7 @@ pub fn run() {
                     );
                 }
                 if let Err(error) = unity_bridge::sync_background_hook_marker(
-                    &initial_unity_root,
+                    &initial_working_dir,
                     config.unity_background_hook_enabled(),
                 ) {
                     eprintln!(
@@ -551,21 +509,10 @@ pub fn run() {
                 }
             }
             println!("[Locus] workspace_id: {:?}", initial_workspace_id);
-            if workspace_was_resolved {
-                println!(
-                    "[Locus] startup: workspace_root={} unity_root={}",
-                    initial_workspace_root, initial_unity_root
-                );
-            }
             startup_for_setup.mark("setup_workspace_ready");
 
-            let initial_workspace_root_copy = initial_workspace_root.clone();
-            let initial_unity_root_copy = initial_unity_root.clone();
-            let workspace = Arc::new(Workspace::new_with_roots(
-                initial_workspace_root,
-                initial_unity_root,
-                initial_workspace_id,
-            ));
+            let initial_working_dir_copy = initial_working_dir.clone();
+            let workspace = Arc::new(Workspace::new(initial_working_dir, initial_workspace_id));
 
             let mut app_agent_dir_candidates = vec![
                 std::path::PathBuf::from("../agent"), // dev: src-tauri/../agent
@@ -591,7 +538,7 @@ pub fn run() {
                 println!("[Locus] no app agent dir found");
             }
 
-            let project_agent_dir = std::path::Path::new(&initial_workspace_root_copy)
+            let project_agent_dir = std::path::Path::new(&initial_working_dir_copy)
                 .join("Locus")
                 .join("agent");
             let project_agent_opt = if project_agent_dir.is_dir() {
@@ -604,7 +551,7 @@ pub fn run() {
             let initial_registry = AgentDefRegistry::load_with_plugins(
                 app_agent_dir.0.as_deref(),
                 project_agent_opt,
-                &crate::plugin::installed_agent_sources(&initial_workspace_root_copy),
+                &crate::plugin::installed_agent_sources(&initial_working_dir_copy),
             );
             let initial_subagents = initial_registry.list_task_agent_descriptions();
             let registry = AgentDefRegistryState(Arc::new(tokio::sync::RwLock::new(initial_registry)));
@@ -621,10 +568,10 @@ pub fn run() {
                 println!("[Locus] no app knowledge dir found");
             }
 
-            let knowledge_library_dir = if initial_workspace_root_copy.trim().is_empty() {
+            let knowledge_library_dir = if initial_working_dir_copy.trim().is_empty() {
                 knowledge_index::no_workspace_library_dir()
             } else {
-                knowledge_index::library_dir_for_working_dir(&initial_workspace_root_copy)
+                knowledge_index::library_dir_for_working_dir(&initial_working_dir_copy)
             };
             let knowledge_runtime =
                 knowledge_index::KnowledgeRuntime::open(&knowledge_library_dir, &data_dir)
@@ -745,12 +692,12 @@ pub fn run() {
                 Arc<std::sync::Mutex<Option<asset_db::AssetDb>>>,
             )> = None;
             let ref_graph_state = match asset_db::AssetDb::load_existing(std::path::Path::new(
-                &initial_unity_root_copy,
+                &initial_working_dir_copy,
             )) {
                 asset_db::LoadExistingAssetDb::Ready(graph) => {
-                    let project_root = std::path::Path::new(&initial_unity_root_copy);
+                    let project_root = std::path::Path::new(&initial_working_dir_copy);
                     match commands::asset::read_persisted_last_scan_info(
-                        std::path::Path::new(&initial_unity_root_copy),
+                        std::path::Path::new(&initial_working_dir_copy),
                     ) {
                         Ok(Some(info)) => last_scan_info_state.set(info),
                         Ok(None) => {}
@@ -770,7 +717,7 @@ pub fn run() {
                 }
                 asset_db::LoadExistingAssetDb::NeedsRescan(issue) => {
                     if let Err(err) = commands::asset::delete_persisted_last_scan_info(
-                        std::path::Path::new(&initial_unity_root_copy),
+                        std::path::Path::new(&initial_working_dir_copy),
                     ) {
                         eprintln!(
                             "[Locus] warning: failed to clear stale asset scan info: {}",
@@ -788,7 +735,7 @@ pub fn run() {
                 }
                 asset_db::LoadExistingAssetDb::Missing => {
                     if let Err(err) = commands::asset::delete_persisted_last_scan_info(
-                        std::path::Path::new(&initial_unity_root_copy),
+                        std::path::Path::new(&initial_working_dir_copy),
                     ) {
                         eprintln!(
                             "[Locus] warning: failed to clear stale asset scan info: {}",
@@ -810,7 +757,7 @@ pub fn run() {
 
             if ref_graph_state.0.lock().unwrap().is_some() {
                 let graph_arc = ref_graph_state.0.clone();
-                let watcher_root = std::path::PathBuf::from(&initial_unity_root_copy);
+                let watcher_root = std::path::PathBuf::from(&initial_working_dir_copy);
                 match AssetDbWatcher::start(watcher_root, graph_arc, watcher_tuning.clone()) {
                     Ok(w) => {
                         *watcher_handle.lock().unwrap() = Some(w);
@@ -911,9 +858,9 @@ pub fn run() {
                 });
             }
 
-            if !initial_workspace_root_copy.trim().is_empty() {
+            if !initial_working_dir_copy.trim().is_empty() {
                 if let Err(error) =
-                    crate::knowledge_store::ensure_knowledge_roots(&initial_workspace_root_copy)
+                    crate::knowledge_store::ensure_knowledge_roots(&initial_working_dir_copy)
                 {
                     eprintln!(
                         "[Locus] warning: failed to prepare knowledge roots before watcher start: {}",
@@ -922,7 +869,7 @@ pub fn run() {
                 }
                 match knowledge_watcher::KnowledgeFsWatcher::start(
                     app.handle().clone(),
-                    initial_workspace_root_copy.clone(),
+                    initial_working_dir_copy.clone(),
                     app_knowledge_dir.0.as_ref().as_ref().cloned(),
                     knowledge_index_state.clone(),
                 ) {
@@ -1017,12 +964,10 @@ pub fn run() {
             let startup_for_unity = startup_for_setup.clone();
             tauri::async_runtime::spawn(async move {
                 startup_for_unity.mark("unity_monitor_task_start");
-                // Unity monitor task reads from the deprecated `path` alias,
-                // which mirrors `unity_root` per Workspace's P1 contract.
-                let wd = workspace_for_unity.unity_root.read().await.clone();
+                let wd = workspace_for_unity.path.read().await.clone();
                 let is_unity = unity_bridge::is_unity_project(&wd);
                 eprintln!(
-                    "[Locus] unity_root='{}', is_unity_project={}",
+                    "[Locus] working_dir='{}', is_unity_project={}",
                     wd, is_unity
                 );
                 if is_unity {

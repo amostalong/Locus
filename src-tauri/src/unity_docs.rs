@@ -183,7 +183,7 @@ impl Default for UnityReferenceImportStatus {
 
 #[derive(Debug, Clone)]
 pub struct UnityReferenceImportRuntime {
-    pub workspace_root: String,
+    pub working_dir: String,
     pub status: UnityReferenceImportStatus,
     pub cancel_requested: Arc<AtomicBool>,
 }
@@ -191,7 +191,7 @@ pub struct UnityReferenceImportRuntime {
 impl Default for UnityReferenceImportRuntime {
     fn default() -> Self {
         Self {
-            workspace_root: String::new(),
+            working_dir: String::new(),
             status: UnityReferenceImportStatus::default(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
@@ -248,8 +248,8 @@ struct UnityExtractedZipEntry {
     file_path: PathBuf,
 }
 
-pub fn read_project_unity_version(workspace_root: &str) -> Result<Option<String>, String> {
-    let version_path = Path::new(workspace_root)
+pub fn read_project_unity_version(working_dir: &str) -> Result<Option<String>, String> {
+    let version_path = Path::new(working_dir)
         .join("ProjectSettings")
         .join("ProjectVersion.txt");
     if !version_path.is_file() {
@@ -325,11 +325,11 @@ fn normalize_requested_target_path(target_path: Option<&str>) -> Option<String> 
 }
 
 pub async fn get_unity_reference_import_status(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
 ) -> Result<UnityReferenceImportStatus, String> {
-    let project_version = read_project_unity_version(workspace_root)?;
+    let project_version = read_project_unity_version(working_dir)?;
     let docs_version = project_version
         .as_deref()
         .and_then(derive_unity_docs_version);
@@ -338,7 +338,7 @@ pub async fn get_unity_reference_import_status(
 
     if let Some(target_path) = target_path.as_deref() {
         let managed_path = reference_target_managed_path(target_path);
-        if runtime.workspace_root == workspace_root
+        if runtime.working_dir == working_dir
             && runtime.status.managed_path == managed_path
             && runtime.status.running
         {
@@ -354,7 +354,7 @@ pub async fn get_unity_reference_import_status(
             imported_locale,
             imported_at,
             imported_doc_count,
-        ) = read_unity_target_import_snapshot(workspace_root, target_path)?;
+        ) = read_unity_target_import_snapshot(working_dir, target_path)?;
 
         let mut status = UnityReferenceImportStatus {
             project_version: project_version.clone(),
@@ -369,7 +369,7 @@ pub async fn get_unity_reference_import_status(
             ..UnityReferenceImportStatus::default()
         };
 
-        if runtime.workspace_root == workspace_root
+        if runtime.working_dir == working_dir
             && runtime.status.managed_path == managed_path
             && runtime.status.stage == UnityReferenceImportStage::Error
             && runtime.status.error.is_some()
@@ -417,7 +417,7 @@ pub async fn get_unity_reference_import_status(
             }
         }
 
-        if runtime.workspace_root == workspace_root
+        if runtime.working_dir == working_dir
             && runtime.status.managed_path == managed_path
             && runtime.status.last_outcome == Some(UnityReferenceImportLastOutcome::Cancelled)
         {
@@ -428,14 +428,14 @@ pub async fn get_unity_reference_import_status(
         return Ok(status);
     }
 
-    if runtime.workspace_root == workspace_root && runtime.status.running {
+    if runtime.working_dir == working_dir && runtime.status.running {
         let mut running = runtime.status;
         running.project_version = project_version;
         running.docs_version = docs_version;
         return Ok(running);
     }
 
-    let manifest = read_manifest(workspace_root)?;
+    let manifest = read_manifest(working_dir)?;
 
     let mut status = UnityReferenceImportStatus {
         project_version: project_version.clone(),
@@ -453,7 +453,7 @@ pub async fn get_unity_reference_import_status(
         ..UnityReferenceImportStatus::default()
     };
 
-    if runtime.workspace_root == workspace_root
+    if runtime.working_dir == working_dir
         && runtime.status.stage == UnityReferenceImportStage::Error
         && runtime.status.error.is_some()
     {
@@ -499,7 +499,7 @@ pub async fn get_unity_reference_import_status(
         }
     }
 
-    if runtime.workspace_root == workspace_root
+    if runtime.working_dir == working_dir
         && runtime.status.last_outcome == Some(UnityReferenceImportLastOutcome::Cancelled)
     {
         status.last_outcome = Some(UnityReferenceImportLastOutcome::Cancelled);
@@ -511,14 +511,14 @@ pub async fn get_unity_reference_import_status(
 
 pub async fn start_unity_reference_import(
     app_handle: AppHandle,
-    workspace_root: String,
+    working_dir: String,
     target_path: Option<String>,
     requested_locale: Option<String>,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     state: Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
 ) -> Result<UnityReferenceImportStatus, String> {
     let target_path = normalize_requested_target_path(target_path.as_deref());
-    if let Some(existing_path) = existing_unity_binding_path(&workspace_root)? {
+    if let Some(existing_path) = existing_unity_binding_path(&working_dir)? {
         match target_path.as_deref() {
             Some(requested_path) if requested_path != existing_path => {
                 return Err(format!(
@@ -541,7 +541,7 @@ pub async fn start_unity_reference_import(
             UNITY_REFERENCE_MANAGED_PATH
         ));
     }
-    let project_version = read_project_unity_version(&workspace_root)?
+    let project_version = read_project_unity_version(&working_dir)?
         .ok_or_else(|| "当前项目缺少 ProjectVersion.txt，无法确定 Unity 文档版本。".to_string())?;
     let docs_version = derive_unity_docs_version(&project_version)
         .ok_or_else(|| format!("无法从 Unity 版本 '{}' 推导离线文档版本。", project_version))?;
@@ -556,7 +556,7 @@ pub async fn start_unity_reference_import(
         if runtime.status.running {
             return Err("Unity 文档导入任务仍在进行中。".to_string());
         }
-        runtime.workspace_root = workspace_root.clone();
+        runtime.working_dir = working_dir.clone();
         runtime.cancel_requested.store(false, Ordering::Relaxed);
         runtime.status = UnityReferenceImportStatus {
             state: UnityReferenceImportStateKind::Running,
@@ -575,7 +575,7 @@ pub async fn start_unity_reference_import(
 
     let state_for_task = state.clone();
     let app_handle_for_task = app_handle.clone();
-    let working_dir_for_task = workspace_root.clone();
+    let working_dir_for_task = working_dir.clone();
     let target_path_for_task = target_path.clone();
     tauri::async_runtime::spawn(async move {
         match run_unity_reference_import(
@@ -599,7 +599,7 @@ pub async fn start_unity_reference_import(
             Err(UnityReferenceImportRunError::Failed(error)) => {
                 let _ = cleanup_import_runtime_artifacts(&working_dir_for_task);
                 let mut runtime = state_for_task.lock().await;
-                if runtime.workspace_root == working_dir_for_task {
+                if runtime.working_dir == working_dir_for_task {
                     runtime.cancel_requested.store(false, Ordering::Relaxed);
                     runtime.status.running = false;
                     runtime.status.state = UnityReferenceImportStateKind::Error;
@@ -612,11 +612,11 @@ pub async fn start_unity_reference_import(
         }
     });
 
-    get_unity_reference_import_status(&workspace_root, target_path.as_deref(), state).await
+    get_unity_reference_import_status(&working_dir, target_path.as_deref(), state).await
 }
 
 pub async fn cancel_unity_reference_import(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: Option<&str>,
     state: Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
 ) -> Result<UnityReferenceImportStatus, String> {
@@ -627,9 +627,9 @@ pub async fn cancel_unity_reference_import(
         .map(reference_target_managed_path)
         .map(|value| runtime.status.managed_path == value)
         .unwrap_or(true);
-    if runtime.workspace_root != workspace_root || !runtime.status.running || !target_matches {
+    if runtime.working_dir != working_dir || !runtime.status.running || !target_matches {
         drop(runtime);
-        return get_unity_reference_import_status(workspace_root, target_path.as_deref(), state).await;
+        return get_unity_reference_import_status(working_dir, target_path.as_deref(), state).await;
     }
 
     runtime.cancel_requested.store(true, Ordering::Relaxed);
@@ -642,7 +642,7 @@ pub async fn cancel_unity_reference_import(
 
 pub async fn delete_unity_reference_docs(
     app_handle: AppHandle,
-    workspace_root: String,
+    working_dir: String,
     target_path: Option<String>,
     knowledge_index_state: Arc<KnowledgeIndexState>,
     state: Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
@@ -654,7 +654,7 @@ pub async fn delete_unity_reference_docs(
         .unwrap_or_else(|| UNITY_REFERENCE_MANAGED_PATH.to_string());
     {
         let runtime = state.lock().await;
-        if runtime.workspace_root == workspace_root
+        if runtime.working_dir == working_dir
             && runtime.status.running
             && runtime.status.managed_path == managed_path
         {
@@ -663,27 +663,27 @@ pub async fn delete_unity_reference_docs(
     }
 
     if let Some(target_path) = target_path.as_deref() {
-        delete_target_reference_import_artifacts(&workspace_root, target_path)?;
+        delete_target_reference_import_artifacts(&working_dir, target_path)?;
     } else {
-        let _removed_any = delete_unity_reference_import_artifacts(&workspace_root)?;
-        clear_runtime_status(&state, &workspace_root).await;
+        let _removed_any = delete_unity_reference_import_artifacts(&working_dir)?;
+        clear_runtime_status(&state, &working_dir).await;
     }
 
     crate::commands::reconcile_and_emit_knowledge_changed(
         &app_handle,
-        &workspace_root,
+        &working_dir,
         knowledge_index_state,
         "knowledge_delete_unity_reference_docs",
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    get_unity_reference_import_status(&workspace_root, target_path.as_deref(), state).await
+    get_unity_reference_import_status(&working_dir, target_path.as_deref(), state).await
 }
 
 async fn run_unity_reference_import(
     app_handle: AppHandle,
-    workspace_root: String,
+    working_dir: String,
     target_path: Option<String>,
     project_version: String,
     docs_version: String,
@@ -695,7 +695,7 @@ async fn run_unity_reference_import(
     let use_legacy_managed_store = target_path.is_none();
     let target_path = target_path.unwrap_or_else(|| UNITY_REFERENCE_MANAGED_DIR.to_string());
     let managed_path = reference_target_managed_path(&target_path);
-    let had_existing_managed_store = use_legacy_managed_store && has_managed_store(&workspace_root);
+    let had_existing_managed_store = use_legacy_managed_store && has_managed_store(&working_dir);
     let client = crate::network::reqwest_client(
         crate::network::ReqwestClientOptions::new()
             .user_agent("Locus/1.0 (Unity Reference Import)"),
@@ -708,7 +708,7 @@ async fn run_unity_reference_import(
     let source = resolve_offline_source(&client, &docs_version, selected_locale)
         .await
         .map_err(UnityReferenceImportRunError::Failed)?;
-    update_status(&state, &workspace_root, |status| {
+    update_status(&state, &working_dir, |status| {
         status.state = UnityReferenceImportStateKind::Running;
         status.stage = UnityReferenceImportStage::Downloading;
         status.running = true;
@@ -719,7 +719,7 @@ async fn run_unity_reference_import(
     })
     .await;
 
-    let cache_root = cache_root(&workspace_root);
+    let cache_root = cache_root(&working_dir);
     let download_path = cache_root.join("UnityDocumentation.zip");
     let extract_root = cache_root.join("extracted");
 
@@ -731,8 +731,8 @@ async fn run_unity_reference_import(
     if extract_root.exists() {
         let _ = std::fs::remove_dir_all(&extract_root);
     }
-    cleanup_temp_managed_dir(&workspace_root).map_err(UnityReferenceImportRunError::Failed)?;
-    cleanup_temp_managed_store(&workspace_root).map_err(UnityReferenceImportRunError::Failed)?;
+    cleanup_temp_managed_dir(&working_dir).map_err(UnityReferenceImportRunError::Failed)?;
+    cleanup_temp_managed_store(&working_dir).map_err(UnityReferenceImportRunError::Failed)?;
 
     download_unity_zip(
         &client,
@@ -741,9 +741,9 @@ async fn run_unity_reference_import(
         cancel_requested.clone(),
         |downloaded, total| {
             let state = state.clone();
-            let workspace_root = workspace_root.clone();
+            let working_dir = working_dir.clone();
             async move {
-                update_status(&state, &workspace_root, |status| {
+                update_status(&state, &working_dir, |status| {
                     status.stage = UnityReferenceImportStage::Downloading;
                     status.downloaded_bytes = Some(downloaded);
                     status.total_bytes = total;
@@ -763,7 +763,7 @@ async fn run_unity_reference_import(
     .await?;
 
     ensure_import_not_cancelled(&cancel_requested)?;
-    update_status(&state, &workspace_root, |status| {
+    update_status(&state, &working_dir, |status| {
         status.stage = UnityReferenceImportStage::Extracting;
         status.progress = Some(0.0);
         status.downloaded_bytes = None;
@@ -781,7 +781,7 @@ async fn run_unity_reference_import(
                 return;
             }
             let current_path = current_path.to_string();
-            update_status_from_sync(&state, &workspace_root, |status| {
+            update_status_from_sync(&state, &working_dir, |status| {
                 status.stage = UnityReferenceImportStage::Extracting;
                 status.progress = Some(count_progress_ratio(processed, total));
                 status.current_path = Some(current_path.clone());
@@ -804,7 +804,7 @@ async fn run_unity_reference_import(
     let relative_markdown_lookup = build_relative_markdown_lookup(&candidates);
 
     let total_docs = candidates.len() as u32;
-    let temp_store = temp_managed_store_path(&workspace_root);
+    let temp_store = temp_managed_store_path(&working_dir);
     if use_legacy_managed_store {
         initialize_empty_managed_store(&temp_store)
             .map_err(UnityReferenceImportRunError::Failed)?;
@@ -820,7 +820,7 @@ async fn run_unity_reference_import(
     let shared_script_reference_context = Arc::new(script_reference_context);
     let shared_relative_markdown_lookup = Arc::new(relative_markdown_lookup);
 
-    update_status(&state, &workspace_root, |status| {
+    update_status(&state, &working_dir, |status| {
         status.stage = UnityReferenceImportStage::Converting;
         status.total_docs = Some(total_docs);
         status.processed_docs = 0;
@@ -850,7 +850,7 @@ async fn run_unity_reference_import(
             append_documents_to_store(&temp_store, &batch_documents)
                 .map_err(UnityReferenceImportRunError::Failed)?;
         } else {
-            let temp_root = temp_managed_dir_path(&workspace_root);
+            let temp_root = temp_managed_dir_path(&working_dir);
             for document in batch_documents {
                 let target_file = knowledge_store::document_path_in_root(
                     &temp_root,
@@ -869,7 +869,7 @@ async fn run_unity_reference_import(
             target_path,
             candidates[batch_end - 1].relative_markdown_path
         );
-        update_status(&state, &workspace_root, |status| {
+        update_status(&state, &working_dir, |status| {
             status.stage = UnityReferenceImportStage::Converting;
             status.processed_docs = processed;
             status.total_docs = Some(total_docs);
@@ -881,7 +881,7 @@ async fn run_unity_reference_import(
     }
 
     ensure_import_not_cancelled(&cancel_requested)?;
-    update_status(&state, &workspace_root, |status| {
+    update_status(&state, &working_dir, |status| {
         status.stage = UnityReferenceImportStage::Reconciling;
         status.current_path = None;
         status.progress = Some(0.0);
@@ -902,9 +902,9 @@ async fn run_unity_reference_import(
         })?;
         drop(store_conn);
 
-        finalize_managed_store(&workspace_root).map_err(UnityReferenceImportRunError::Failed)?;
+        finalize_managed_store(&working_dir).map_err(UnityReferenceImportRunError::Failed)?;
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: project_version.clone(),
                 docs_version: docs_version.clone(),
@@ -916,11 +916,11 @@ async fn run_unity_reference_import(
         )
         .map_err(UnityReferenceImportRunError::Failed)?;
     } else {
-        publish_target_directory_from_temp_root(&workspace_root, &target_path)
+        publish_target_directory_from_temp_root(&working_dir, &target_path)
             .map_err(UnityReferenceImportRunError::Failed)?;
     }
     configure_managed_directory(
-        &workspace_root,
+        &working_dir,
         &target_path,
         &project_version,
         &docs_version,
@@ -934,13 +934,13 @@ async fn run_unity_reference_import(
     let mut last_reconcile_stage = String::new();
     let reconcile_result = if use_legacy_managed_store && !had_existing_managed_store {
         match crate::knowledge_index::reconcile_unity_reference_import(
-            &workspace_root,
+            &working_dir,
             app_knowledge_dir.0.as_ref().as_ref(),
             knowledge_index_state.clone(),
             |stage, processed, total, current_file| {
                 emit_reconcile_progress_update(
                     &state,
-                    &workspace_root,
+                    &working_dir,
                     &mut last_reconcile_stage,
                     stage,
                     processed,
@@ -955,10 +955,10 @@ async fn run_unity_reference_import(
             Err(error) => {
                 eprintln!(
                     "[UnityReferenceImport] bulk reconcile fallback workspace={} target={} error={}",
-                    workspace_root, managed_path, error
+                    working_dir, managed_path, error
                 );
                 crate::knowledge_index::reconcile_workspace_internal(
-                    &workspace_root,
+                    &working_dir,
                     app_knowledge_dir.0.as_ref().as_ref(),
                     knowledge_index_state,
                     false,
@@ -967,7 +967,7 @@ async fn run_unity_reference_import(
                     |stage, processed, total, current_file| {
                         emit_reconcile_progress_update(
                             &state,
-                            &workspace_root,
+                            &working_dir,
                             &mut last_reconcile_stage,
                             stage,
                             processed,
@@ -981,7 +981,7 @@ async fn run_unity_reference_import(
         }
     } else {
         crate::knowledge_index::reconcile_workspace_internal(
-            &workspace_root,
+            &working_dir,
             app_knowledge_dir.0.as_ref().as_ref(),
             knowledge_index_state,
             false,
@@ -990,7 +990,7 @@ async fn run_unity_reference_import(
             |stage, processed, total, current_file| {
                 emit_reconcile_progress_update(
                     &state,
-                    &workspace_root,
+                    &working_dir,
                     &mut last_reconcile_stage,
                     stage,
                     processed,
@@ -1004,11 +1004,11 @@ async fn run_unity_reference_import(
     reconcile_result.map_err(UnityReferenceImportRunError::Failed)?;
     crate::commands::emit_knowledge_changed(
         &app_handle,
-        &workspace_root,
+        &working_dir,
         "knowledge_import_unity_reference_docs",
     );
 
-    update_status(&state, &workspace_root, |status| {
+    update_status(&state, &working_dir, |status| {
         status.running = false;
         status.state = UnityReferenceImportStateKind::Ready;
         status.stage = UnityReferenceImportStage::Ready;
@@ -1034,13 +1034,13 @@ async fn run_unity_reference_import(
 
 async fn update_status<F>(
     state: &Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
-    workspace_root: &str,
+    working_dir: &str,
     update: F,
 ) where
     F: FnOnce(&mut UnityReferenceImportStatus),
 {
     let mut runtime = state.lock().await;
-    runtime.workspace_root = workspace_root.to_string();
+    runtime.working_dir = working_dir.to_string();
     update(&mut runtime.status);
     if runtime.status.managed_path.is_empty() {
         runtime.status.managed_path = UNITY_REFERENCE_MANAGED_PATH.to_string();
@@ -1049,7 +1049,7 @@ async fn update_status<F>(
 
 fn update_status_from_sync<F>(
     state: &Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
-    workspace_root: &str,
+    working_dir: &str,
     update: F,
 ) where
     F: FnOnce(&mut UnityReferenceImportStatus),
@@ -1060,7 +1060,7 @@ fn update_status_from_sync<F>(
     let Ok(mut runtime) = state.try_lock() else {
         return;
     };
-    runtime.workspace_root = workspace_root.to_string();
+    runtime.working_dir = working_dir.to_string();
     update(&mut runtime.status);
     if runtime.status.managed_path.is_empty() {
         runtime.status.managed_path = UNITY_REFERENCE_MANAGED_PATH.to_string();
@@ -1142,7 +1142,7 @@ fn reconcile_stage_message(
 
 fn emit_reconcile_progress_update(
     state: &Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
-    workspace_root: &str,
+    working_dir: &str,
     last_reconcile_stage: &mut String,
     stage: &str,
     processed: usize,
@@ -1162,7 +1162,7 @@ fn emit_reconcile_progress_update(
         .map(|value| format!("reference/{}", value));
     let message = reconcile_stage_message(stage, processed, total, current_path.as_deref());
 
-    update_status_from_sync(state, workspace_root, |status| {
+    update_status_from_sync(state, working_dir, |status| {
         status.stage = UnityReferenceImportStage::Reconciling;
         status.progress = Some(progress);
         status.current_path = current_path.clone();
@@ -1181,11 +1181,11 @@ fn ensure_import_not_cancelled(
 
 async fn clear_runtime_status(
     state: &Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
-    workspace_root: &str,
+    working_dir: &str,
 ) {
     let mut runtime = state.lock().await;
-    if runtime.workspace_root == workspace_root {
-        runtime.workspace_root.clear();
+    if runtime.working_dir == working_dir {
+        runtime.working_dir.clear();
         runtime.cancel_requested.store(false, Ordering::Relaxed);
         runtime.status = UnityReferenceImportStatus::default();
     }
@@ -1193,10 +1193,10 @@ async fn clear_runtime_status(
 
 async fn mark_runtime_cancelled(
     state: &Arc<tokio::sync::Mutex<UnityReferenceImportRuntime>>,
-    workspace_root: &str,
+    working_dir: &str,
 ) {
     let mut runtime = state.lock().await;
-    if runtime.workspace_root == workspace_root {
+    if runtime.working_dir == working_dir {
         runtime.cancel_requested.store(false, Ordering::Relaxed);
         runtime.status = UnityReferenceImportStatus {
             managed_path: UNITY_REFERENCE_MANAGED_PATH.to_string(),
@@ -1207,10 +1207,10 @@ async fn mark_runtime_cancelled(
     }
 }
 
-fn cleanup_import_runtime_artifacts(workspace_root: &str) -> Result<(), String> {
-    cleanup_temp_managed_dir(workspace_root)?;
-    cleanup_temp_managed_store(workspace_root)?;
-    cleanup_cache_root(workspace_root)?;
+fn cleanup_import_runtime_artifacts(working_dir: &str) -> Result<(), String> {
+    cleanup_temp_managed_dir(working_dir)?;
+    cleanup_temp_managed_store(working_dir)?;
+    cleanup_cache_root(working_dir)?;
     Ok(())
 }
 
@@ -2537,13 +2537,13 @@ fn prepare_cache_root(cache_root: &Path) -> Result<(), String> {
     })
 }
 
-fn finalize_managed_store(workspace_root: &str) -> Result<(), String> {
-    let temp_store = temp_managed_store_path(workspace_root);
+fn finalize_managed_store(working_dir: &str) -> Result<(), String> {
+    let temp_store = temp_managed_store_path(working_dir);
     if temp_store.is_file() {
         let mut conn = open_unity_reference_store(&temp_store)?;
         rebuild_managed_directory_index(&temp_store, &mut conn)?;
     }
-    let final_store = managed_store_path(workspace_root);
+    let final_store = managed_store_path(working_dir);
     if final_store.exists() {
         std::fs::remove_file(&final_store).map_err(|e| {
             format!(
@@ -2563,8 +2563,8 @@ fn finalize_managed_store(workspace_root: &str) -> Result<(), String> {
     })
 }
 
-fn cleanup_temp_managed_dir(workspace_root: &str) -> Result<(), String> {
-    let temp_dir = temp_managed_dir_path(workspace_root);
+fn cleanup_temp_managed_dir(working_dir: &str) -> Result<(), String> {
+    let temp_dir = temp_managed_dir_path(working_dir);
     if !temp_dir.exists() {
         return Ok(());
     }
@@ -2577,8 +2577,8 @@ fn cleanup_temp_managed_dir(workspace_root: &str) -> Result<(), String> {
     })
 }
 
-fn cleanup_temp_managed_store(workspace_root: &str) -> Result<(), String> {
-    let temp_store = temp_managed_store_path(workspace_root);
+fn cleanup_temp_managed_store(working_dir: &str) -> Result<(), String> {
+    let temp_store = temp_managed_store_path(working_dir);
     if !temp_store.exists() {
         return Ok(());
     }
@@ -2591,8 +2591,8 @@ fn cleanup_temp_managed_store(workspace_root: &str) -> Result<(), String> {
     })
 }
 
-fn cleanup_cache_root(workspace_root: &str) -> Result<(), String> {
-    let cache_dir = cache_root(workspace_root);
+fn cleanup_cache_root(working_dir: &str) -> Result<(), String> {
+    let cache_dir = cache_root(working_dir);
     if !cache_dir.exists() {
         return Ok(());
     }
@@ -2605,22 +2605,22 @@ fn cleanup_cache_root(workspace_root: &str) -> Result<(), String> {
     })
 }
 
-fn delete_unity_reference_import_artifacts(workspace_root: &str) -> Result<bool, String> {
+fn delete_unity_reference_import_artifacts(working_dir: &str) -> Result<bool, String> {
     let mut removed_any = false;
-    removed_any |= remove_directory_if_exists(&managed_dir_path(workspace_root), "managed directory")?;
+    removed_any |= remove_directory_if_exists(&managed_dir_path(working_dir), "managed directory")?;
     removed_any |=
-        remove_directory_if_exists(&temp_managed_dir_path(workspace_root), "temporary directory")?;
-    removed_any |= remove_directory_if_exists(&cache_root(workspace_root), "cache directory")?;
-    removed_any |= remove_file_if_exists(&managed_store_path(workspace_root), "document store")?;
-    removed_any |= remove_file_if_exists(&temp_managed_store_path(workspace_root), "temporary store")?;
-    removed_any |= remove_file_if_exists(&manifest_path(workspace_root), "manifest")?;
-    removed_any |= remove_file_if_exists(&legacy_manifest_path(workspace_root), "legacy manifest")?;
+        remove_directory_if_exists(&temp_managed_dir_path(working_dir), "temporary directory")?;
+    removed_any |= remove_directory_if_exists(&cache_root(working_dir), "cache directory")?;
+    removed_any |= remove_file_if_exists(&managed_store_path(working_dir), "document store")?;
+    removed_any |= remove_file_if_exists(&temp_managed_store_path(working_dir), "temporary store")?;
+    removed_any |= remove_file_if_exists(&manifest_path(working_dir), "manifest")?;
+    removed_any |= remove_file_if_exists(&legacy_manifest_path(working_dir), "legacy manifest")?;
     removed_any |= remove_file_if_exists(
-        &managed_directory_config_path(workspace_root, UNITY_REFERENCE_DIRECTORY_CONFIG_SUFFIX),
+        &managed_directory_config_path(working_dir, UNITY_REFERENCE_DIRECTORY_CONFIG_SUFFIX),
         "directory config",
     )?;
     removed_any |= remove_file_if_exists(
-        &managed_directory_config_path(workspace_root, UNITY_REFERENCE_LEGACY_DIRECTORY_CONFIG_SUFFIX),
+        &managed_directory_config_path(working_dir, UNITY_REFERENCE_LEGACY_DIRECTORY_CONFIG_SUFFIX),
         "legacy directory config",
     )?;
     Ok(removed_any)
@@ -2657,7 +2657,7 @@ fn remove_file_if_exists(path: &Path, label: &str) -> Result<bool, String> {
 }
 
 fn configure_managed_directory(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
     project_version: &str,
     docs_version: &str,
@@ -2683,10 +2683,10 @@ fn configure_managed_directory(
     config.allow_create_directories = false;
     config.allow_move_documents = false;
     config.allow_move_directories = false;
-    update_directory_config(workspace_root, KnowledgeType::Reference, target_path, config)
+    update_directory_config(working_dir, KnowledgeType::Reference, target_path, config)
         .and_then(|_| {
             update_directory_external_sources(
-                workspace_root,
+                working_dir,
                 KnowledgeType::Reference,
                 target_path,
                 vec![KnowledgeExternalSource {
@@ -2703,31 +2703,31 @@ fn configure_managed_directory(
         .map(|_| ())
 }
 
-fn reference_root(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
+fn reference_root(working_dir: &str) -> PathBuf {
+    Path::new(working_dir)
         .join("Locus")
         .join("knowledge")
         .join(KnowledgeType::Reference.as_str())
 }
 
-fn managed_dir_path(workspace_root: &str) -> PathBuf {
-    reference_root(workspace_root).join(UNITY_REFERENCE_MANAGED_DIR)
+fn managed_dir_path(working_dir: &str) -> PathBuf {
+    reference_root(working_dir).join(UNITY_REFERENCE_MANAGED_DIR)
 }
 
 fn reference_target_managed_path(target_path: &str) -> String {
     format!("reference/{}", target_path.trim().trim_matches('/'))
 }
 
-fn reference_target_dir_path(workspace_root: &str, target_path: &str) -> PathBuf {
-    reference_root(workspace_root).join(target_path.trim().trim_matches('/').replace('\\', "/"))
+fn reference_target_dir_path(working_dir: &str, target_path: &str) -> PathBuf {
+    reference_root(working_dir).join(target_path.trim().trim_matches('/').replace('\\', "/"))
 }
 
 fn ensure_reference_target_directory(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
 ) -> Result<crate::knowledge_store::KnowledgeDirectoryConfigRecord, String> {
     let record =
-        knowledge_store::read_directory_config(workspace_root, KnowledgeType::Reference, target_path)?;
+        knowledge_store::read_directory_config(working_dir, KnowledgeType::Reference, target_path)?;
     if record.read_only {
         return Err("当前 Reference 文件夹是只读目录，无法配置外部导入。".to_string());
     }
@@ -2735,15 +2735,15 @@ fn ensure_reference_target_directory(
 }
 
 fn delete_target_reference_import_artifacts(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
 ) -> Result<(), String> {
-    let record = ensure_reference_target_directory(workspace_root, target_path)?;
+    let record = ensure_reference_target_directory(working_dir, target_path)?;
     remove_directory_if_exists(
-        &reference_target_dir_path(workspace_root, &record.path),
+        &reference_target_dir_path(working_dir, &record.path),
         "managed directory",
     )?;
-    delete_directory_config_sidecars(workspace_root, KnowledgeType::Reference, &record.path)?;
+    delete_directory_config_sidecars(working_dir, KnowledgeType::Reference, &record.path)?;
     Ok(())
 }
 
@@ -2771,7 +2771,7 @@ fn parse_locator_parts(locator: Option<&str>) -> std::collections::HashMap<Strin
 }
 
 fn read_unity_directory_binding(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
 ) -> Result<
     (
@@ -2783,7 +2783,7 @@ fn read_unity_directory_binding(
     ),
     String,
 > {
-    let record = ensure_reference_target_directory(workspace_root, target_path)?;
+    let record = ensure_reference_target_directory(working_dir, target_path)?;
     let source = record
         .external_sources
         .iter()
@@ -2801,7 +2801,7 @@ fn read_unity_directory_binding(
 }
 
 fn read_unity_target_import_snapshot(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
 ) -> Result<
     (
@@ -2813,14 +2813,14 @@ fn read_unity_target_import_snapshot(
     ),
     String,
 > {
-    if !knowledge_store::directory_exists(workspace_root, KnowledgeType::Reference, target_path)? {
+    if !knowledge_store::directory_exists(working_dir, KnowledgeType::Reference, target_path)? {
         return Ok((None, None, None, None, 0));
     }
 
     let (_, imported_project_version, imported_docs_version, imported_locale, imported_at) =
-        read_unity_directory_binding(workspace_root, target_path)?;
+        read_unity_directory_binding(working_dir, target_path)?;
     let imported_doc_count =
-        count_reference_markdown_documents(&reference_target_dir_path(workspace_root, target_path))?;
+        count_reference_markdown_documents(&reference_target_dir_path(working_dir, target_path))?;
     Ok((
         imported_project_version,
         imported_docs_version,
@@ -2830,10 +2830,10 @@ fn read_unity_target_import_snapshot(
     ))
 }
 
-fn existing_unity_binding_path(workspace_root: &str) -> Result<Option<String>, String> {
+fn existing_unity_binding_path(working_dir: &str) -> Result<Option<String>, String> {
     Ok(
         knowledge_store::find_reference_directory_by_external_provider(
-            workspace_root,
+            working_dir,
             KnowledgeSourceProvider::Unity,
         )?
         .map(|record| record.path),
@@ -2881,10 +2881,10 @@ fn count_reference_markdown_documents(root: &Path) -> Result<u32, String> {
 }
 
 fn publish_target_directory_from_temp_root(
-    workspace_root: &str,
+    working_dir: &str,
     target_path: &str,
 ) -> Result<(), String> {
-    let temp_root = temp_managed_dir_path(workspace_root);
+    let temp_root = temp_managed_dir_path(working_dir);
     let incoming = temp_root.join("reference").join(target_path);
     if !incoming.is_dir() {
         return Err(format!(
@@ -2892,7 +2892,7 @@ fn publish_target_directory_from_temp_root(
             incoming.display()
         ));
     }
-    let managed = reference_target_dir_path(workspace_root, target_path);
+    let managed = reference_target_dir_path(working_dir, target_path);
     remove_directory_if_exists(&managed, "managed directory")?;
     if let Some(parent) = managed.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -2915,41 +2915,41 @@ fn publish_target_directory_from_temp_root(
     Ok(())
 }
 
-pub(crate) fn managed_store_path(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
+pub(crate) fn managed_store_path(working_dir: &str) -> PathBuf {
+    Path::new(working_dir)
         .join("Library")
         .join("Locus")
         .join(UNITY_REFERENCE_STORE_FILE)
 }
 
-fn managed_directory_config_path(workspace_root: &str, suffix: &str) -> PathBuf {
-    reference_root(workspace_root).join(format!("{}{}", UNITY_REFERENCE_MANAGED_DIR, suffix))
+fn managed_directory_config_path(working_dir: &str, suffix: &str) -> PathBuf {
+    reference_root(working_dir).join(format!("{}{}", UNITY_REFERENCE_MANAGED_DIR, suffix))
 }
 
-fn temp_managed_dir_path(workspace_root: &str) -> PathBuf {
-    reference_root(workspace_root).join(UNITY_REFERENCE_TEMP_DIR)
+fn temp_managed_dir_path(working_dir: &str) -> PathBuf {
+    reference_root(working_dir).join(UNITY_REFERENCE_TEMP_DIR)
 }
 
-fn temp_managed_store_path(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
+fn temp_managed_store_path(working_dir: &str) -> PathBuf {
+    Path::new(working_dir)
         .join("Library")
         .join("Locus")
         .join(UNITY_REFERENCE_TEMP_STORE_FILE)
 }
 
-fn cache_root(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
+fn cache_root(working_dir: &str) -> PathBuf {
+    Path::new(working_dir)
         .join("Library")
         .join("Locus")
         .join(UNITY_REFERENCE_CACHE_DIR)
 }
 
-fn manifest_path(workspace_root: &str) -> PathBuf {
-    reference_root(workspace_root).join(UNITY_REFERENCE_MANIFEST_FILE)
+fn manifest_path(working_dir: &str) -> PathBuf {
+    reference_root(working_dir).join(UNITY_REFERENCE_MANIFEST_FILE)
 }
 
-fn legacy_manifest_path(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
+fn legacy_manifest_path(working_dir: &str) -> PathBuf {
+    Path::new(working_dir)
         .join("Library")
         .join("Locus")
         .join(UNITY_REFERENCE_MANIFEST_FILE)
@@ -2965,25 +2965,25 @@ pub fn is_unity_reference_managed_relative_path(path: &str) -> bool {
             .unwrap_or(false)
 }
 
-pub fn has_managed_store(workspace_root: &str) -> bool {
-    managed_store_path(workspace_root).is_file() && has_managed_reference_anchor(workspace_root)
+pub fn has_managed_store(working_dir: &str) -> bool {
+    managed_store_path(working_dir).is_file() && has_managed_reference_anchor(working_dir)
 }
 
-fn has_managed_reference_anchor(workspace_root: &str) -> bool {
-    managed_dir_path(workspace_root).is_dir()
-        || managed_directory_config_path(workspace_root, UNITY_REFERENCE_DIRECTORY_CONFIG_SUFFIX)
+fn has_managed_reference_anchor(working_dir: &str) -> bool {
+    managed_dir_path(working_dir).is_dir()
+        || managed_directory_config_path(working_dir, UNITY_REFERENCE_DIRECTORY_CONFIG_SUFFIX)
             .is_file()
-        || manifest_path(workspace_root).is_file()
-        || legacy_manifest_path(workspace_root).is_file()
+        || manifest_path(working_dir).is_file()
+        || legacy_manifest_path(working_dir).is_file()
 }
 
-fn existing_manifest_path(workspace_root: &str) -> Option<PathBuf> {
-    let workspace_path = manifest_path(workspace_root);
+fn existing_manifest_path(working_dir: &str) -> Option<PathBuf> {
+    let workspace_path = manifest_path(working_dir);
     if workspace_path.is_file() {
         return Some(workspace_path);
     }
 
-    let legacy_path = legacy_manifest_path(workspace_root);
+    let legacy_path = legacy_manifest_path(working_dir);
     if legacy_path.is_file() {
         return Some(legacy_path);
     }
@@ -3555,12 +3555,12 @@ fn rebuild_managed_directory_index(store_path: &Path, conn: &mut Connection) -> 
     Ok(())
 }
 
-fn sync_managed_store_summary_metadata(workspace_root: &str) -> Result<(), String> {
-    let Some(snapshot) = current_unity_reference_managed_snapshot(workspace_root)? else {
+fn sync_managed_store_summary_metadata(working_dir: &str) -> Result<(), String> {
+    let Some(snapshot) = current_unity_reference_managed_snapshot(working_dir)? else {
         return Ok(());
     };
-    let imported_at = read_manifest(workspace_root)?.map(|manifest| manifest.imported_at);
-    let store_path = managed_store_path(workspace_root);
+    let imported_at = read_manifest(working_dir)?.map(|manifest| manifest.imported_at);
+    let store_path = managed_store_path(working_dir);
     if !store_path.is_file() {
         return Ok(());
     }
@@ -3588,8 +3588,8 @@ fn sync_managed_store_summary_metadata(workspace_root: &str) -> Result<(), Strin
     Ok(())
 }
 
-fn ensure_managed_directory_index_available(workspace_root: &str) -> Result<(), String> {
-    let store_path = managed_store_path(workspace_root);
+fn ensure_managed_directory_index_available(working_dir: &str) -> Result<(), String> {
+    let store_path = managed_store_path(working_dir);
     if !store_path.is_file() {
         return Ok(());
     }
@@ -3623,7 +3623,7 @@ fn ensure_managed_directory_index_available(workspace_root: &str) -> Result<(), 
         .map_err(|e| format!("Failed to count Unity reference store summary rows: {}", e))?;
     if directory_count > 0 && (document_count <= 0 || valid_stats_count > 0) && summary_count > 0 {
         drop(conn);
-        return sync_managed_store_summary_metadata(workspace_root);
+        return sync_managed_store_summary_metadata(working_dir);
     }
     drop(conn);
 
@@ -3659,7 +3659,7 @@ fn ensure_managed_directory_index_available(workspace_root: &str) -> Result<(), 
         .map_err(|e| format!("Failed to count Unity reference store summary rows: {}", e))?;
     if directory_count > 0 && (document_count <= 0 || valid_stats_count > 0) && summary_count > 0 {
         drop(conn);
-        return sync_managed_store_summary_metadata(workspace_root);
+        return sync_managed_store_summary_metadata(working_dir);
     }
     if document_count <= 0 {
         return Ok(());
@@ -3667,7 +3667,7 @@ fn ensure_managed_directory_index_available(workspace_root: &str) -> Result<(), 
 
     rebuild_managed_directory_index(&store_path, &mut conn)?;
     drop(conn);
-    sync_managed_store_summary_metadata(workspace_root)
+    sync_managed_store_summary_metadata(working_dir)
 }
 
 fn initialize_empty_managed_store(path: &Path) -> Result<(), String> {
@@ -3994,22 +3994,22 @@ pub fn ensure_managed_store_available(_working_dir: &str) -> Result<(), String> 
 }
 
 pub fn load_managed_document(
-    workspace_root: &str,
+    working_dir: &str,
     rel_path: &str,
 ) -> Result<Option<KnowledgeDocument>, String> {
     let normalized_path = knowledge_store::ensure_document_path(rel_path)?;
     if !is_unity_reference_managed_relative_path(&normalized_path) {
         return Ok(None);
     }
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(None);
     }
-    load_document_from_store_by_path(&managed_store_path(workspace_root), &normalized_path)
+    load_document_from_store_by_path(&managed_store_path(working_dir), &normalized_path)
 }
 
 pub fn list_managed_documents(
-    workspace_root: &str,
+    working_dir: &str,
     path_prefix: Option<&str>,
 ) -> Result<Vec<KnowledgeDocument>, String> {
     let normalized_prefix = path_prefix
@@ -4022,18 +4022,18 @@ pub fn list_managed_documents(
     {
         return Ok(Vec::new());
     }
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(Vec::new());
     }
     list_documents_from_store(
-        &managed_store_path(workspace_root),
+        &managed_store_path(working_dir),
         normalized_prefix.as_deref(),
     )
 }
 
 pub fn list_managed_document_paths(
-    workspace_root: &str,
+    working_dir: &str,
     path_prefix: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let normalized_prefix = path_prefix
@@ -4046,18 +4046,18 @@ pub fn list_managed_document_paths(
     {
         return Ok(Vec::new());
     }
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(Vec::new());
     }
     list_document_paths_from_store(
-        &managed_store_path(workspace_root),
+        &managed_store_path(working_dir),
         normalized_prefix.as_deref(),
     )
 }
 
 pub fn count_managed_document_paths(
-    workspace_root: &str,
+    working_dir: &str,
     path_prefix: Option<&str>,
 ) -> Result<usize, String> {
     let normalized_prefix = path_prefix
@@ -4070,24 +4070,24 @@ pub fn count_managed_document_paths(
     {
         return Ok(0);
     }
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(0);
     }
     count_document_paths_from_store(
-        &managed_store_path(workspace_root),
+        &managed_store_path(working_dir),
         normalized_prefix.as_deref(),
     )
 }
 
-pub fn list_managed_directories(workspace_root: &str) -> Result<Vec<String>, String> {
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+pub fn list_managed_directories(working_dir: &str) -> Result<Vec<String>, String> {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(Vec::new());
     }
-    ensure_managed_directory_index_available(workspace_root)?;
+    ensure_managed_directory_index_available(working_dir)?;
 
-    let store_path = managed_store_path(workspace_root);
+    let store_path = managed_store_path(working_dir);
     if !store_path.is_file() {
         return Ok(Vec::new());
     }
@@ -4125,15 +4125,15 @@ pub fn list_managed_directories(workspace_root: &str) -> Result<Vec<String>, Str
 }
 
 pub fn list_managed_directory_stats(
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<Vec<UnityManagedDirectoryStat>, String> {
-    ensure_managed_store_available(workspace_root)?;
-    if !has_managed_store(workspace_root) {
+    ensure_managed_store_available(working_dir)?;
+    if !has_managed_store(working_dir) {
         return Ok(Vec::new());
     }
-    ensure_managed_directory_index_available(workspace_root)?;
+    ensure_managed_directory_index_available(working_dir)?;
 
-    let store_path = managed_store_path(workspace_root);
+    let store_path = managed_store_path(working_dir);
     if !store_path.is_file() {
         return Ok(Vec::new());
     }
@@ -4182,7 +4182,7 @@ pub fn list_managed_directory_stats(
     })
 }
 
-pub fn managed_directory_exists(workspace_root: &str, rel_path: &str) -> Result<bool, String> {
+pub fn managed_directory_exists(working_dir: &str, rel_path: &str) -> Result<bool, String> {
     let normalized = rel_path.trim().trim_matches('/').replace('\\', "/");
     let normalized = normalized
         .strip_prefix("reference/")
@@ -4191,16 +4191,16 @@ pub fn managed_directory_exists(workspace_root: &str, rel_path: &str) -> Result<
     if !is_unity_reference_managed_relative_path(&normalized) {
         return Ok(false);
     }
-    ensure_managed_store_available(workspace_root)?;
+    ensure_managed_store_available(working_dir)?;
     if normalized == UNITY_REFERENCE_MANAGED_DIR {
-        return Ok(has_managed_store(workspace_root));
+        return Ok(has_managed_store(working_dir));
     }
-    if !has_managed_store(workspace_root) {
+    if !has_managed_store(working_dir) {
         return Ok(false);
     }
-    ensure_managed_directory_index_available(workspace_root)?;
+    ensure_managed_directory_index_available(working_dir)?;
 
-    let store_path = managed_store_path(workspace_root);
+    let store_path = managed_store_path(working_dir);
     let conn = open_unity_reference_store_readonly(&store_path)?;
     let exists = conn
         .query_row(
@@ -4221,31 +4221,31 @@ pub fn managed_directory_exists(workspace_root: &str, rel_path: &str) -> Result<
 
 #[cfg(test)]
 pub(crate) fn seed_managed_documents_for_tests(
-    workspace_root: &str,
+    working_dir: &str,
     documents: &[KnowledgeDocument],
 ) -> Result<(), String> {
-    remove_directory_if_exists(&managed_dir_path(workspace_root), "managed directory")?;
-    remove_file_if_exists(&managed_store_path(workspace_root), "document store")?;
-    let temp_store = temp_managed_store_path(workspace_root);
+    remove_directory_if_exists(&managed_dir_path(working_dir), "managed directory")?;
+    remove_file_if_exists(&managed_store_path(working_dir), "document store")?;
+    let temp_store = temp_managed_store_path(working_dir);
     initialize_empty_managed_store(&temp_store)?;
     append_documents_to_store(&temp_store, documents)?;
-    finalize_managed_store(workspace_root)?;
+    finalize_managed_store(working_dir)?;
     Ok(())
 }
 
 pub fn current_unity_reference_managed_snapshot(
-    workspace_root: &str,
+    working_dir: &str,
 ) -> Result<Option<UnityReferenceManagedSnapshot>, String> {
-    let Some(manifest) = read_manifest(workspace_root)? else {
+    let Some(manifest) = read_manifest(working_dir)? else {
         return Ok(None);
     };
-    ensure_managed_store_available(workspace_root)?;
-    let store_path = managed_store_path(workspace_root);
+    ensure_managed_store_available(working_dir)?;
+    let store_path = managed_store_path(working_dir);
     if !store_path.is_file() {
         return Ok(None);
     }
     let (fingerprint, document_count) =
-        build_managed_store_fingerprint(workspace_root, &store_path, &manifest)?;
+        build_managed_store_fingerprint(working_dir, &store_path, &manifest)?;
 
     Ok(Some(UnityReferenceManagedSnapshot {
         managed_path: UNITY_REFERENCE_MANAGED_PATH.to_string(),
@@ -4256,19 +4256,19 @@ pub fn current_unity_reference_managed_snapshot(
     }))
 }
 
-pub fn managed_document_count_hint(workspace_root: &str) -> Result<Option<usize>, String> {
-    Ok(read_manifest(workspace_root)?.map(|manifest| manifest.imported_doc_count as usize))
+pub fn managed_document_count_hint(working_dir: &str) -> Result<Option<usize>, String> {
+    Ok(read_manifest(working_dir)?.map(|manifest| manifest.imported_doc_count as usize))
 }
 
-fn read_manifest(workspace_root: &str) -> Result<Option<UnityReferenceImportManifest>, String> {
-    let Some(path) = existing_manifest_path(workspace_root) else {
+fn read_manifest(working_dir: &str) -> Result<Option<UnityReferenceImportManifest>, String> {
+    let Some(path) = existing_manifest_path(working_dir) else {
         return Ok(None);
     };
     read_manifest_file(&path).map(Some)
 }
 
 fn build_managed_store_fingerprint(
-    workspace_root: &str,
+    working_dir: &str,
     store_path: &Path,
     manifest: &UnityReferenceImportManifest,
 ) -> Result<(String, usize), String> {
@@ -4291,7 +4291,7 @@ fn build_managed_store_fingerprint(
     hasher.update(&store_meta.len().to_le_bytes());
     hasher.update(&system_time_millis(store_meta.modified().ok()).to_le_bytes());
 
-    let manifest_path = existing_manifest_path(workspace_root)
+    let manifest_path = existing_manifest_path(working_dir)
         .ok_or_else(|| "Unity reference manifest is missing".to_string())?;
     let manifest_meta = std::fs::metadata(&manifest_path).map_err(|e| {
         format!(
@@ -4317,12 +4317,12 @@ fn system_time_millis(value: Option<std::time::SystemTime>) -> u128 {
 }
 
 fn write_manifest(
-    workspace_root: &str,
+    working_dir: &str,
     manifest: &UnityReferenceImportManifest,
 ) -> Result<(), String> {
-    let path = manifest_path(workspace_root);
+    let path = manifest_path(working_dir);
     write_manifest_file(&path, manifest)?;
-    remove_file_if_exists(&legacy_manifest_path(workspace_root), "legacy manifest")?;
+    remove_file_if_exists(&legacy_manifest_path(working_dir), "legacy manifest")?;
     Ok(())
 }
 
@@ -4476,13 +4476,13 @@ mod tests {
     #[test]
     fn delete_target_reference_import_artifacts_removes_directory_and_sidecars() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let target_path = "reference-folder";
 
-        std::fs::create_dir_all(super::reference_target_dir_path(&workspace_root, target_path))
+        std::fs::create_dir_all(super::reference_target_dir_path(&working_dir, target_path))
             .expect("create reference directory");
         knowledge_store::update_directory_external_sources(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Reference,
             target_path,
             vec![KnowledgeExternalSource {
@@ -4496,16 +4496,16 @@ mod tests {
         )
         .expect("seed directory config");
 
-        let legacy_config = crate::knowledge_store::knowledge_root(&workspace_root)
+        let legacy_config = crate::knowledge_store::knowledge_root(&working_dir)
             .join("reference")
             .join("reference-folder.meta");
         std::fs::write(&legacy_config, "legacy").expect("write legacy config");
 
-        super::delete_target_reference_import_artifacts(&workspace_root, target_path)
+        super::delete_target_reference_import_artifacts(&working_dir, target_path)
             .expect("delete target artifacts");
 
-        assert!(!super::reference_target_dir_path(&workspace_root, target_path).exists());
-        assert!(!crate::knowledge_store::knowledge_root(&workspace_root)
+        assert!(!super::reference_target_dir_path(&working_dir, target_path).exists());
+        assert!(!crate::knowledge_store::knowledge_root(&working_dir)
             .join("reference")
             .join("reference-folder.locus-meta")
             .exists());
@@ -5203,14 +5203,14 @@ Suggest a change
     #[test]
     fn managed_store_round_trips_documents() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "Execution Order",
         )];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5223,13 +5223,13 @@ Suggest a change
         .expect("write manifest");
 
         let loaded =
-            load_managed_document(&workspace_root, "unity-official-docs/manual/ExecutionOrder.md")
+            load_managed_document(&working_dir, "unity-official-docs/manual/ExecutionOrder.md")
                 .expect("load managed doc")
                 .expect("managed doc exists");
         assert_eq!(loaded.id, "kd_test_execution_order");
         assert!(!loaded.summary_enabled);
 
-        let listed = list_managed_documents(&workspace_root, Some("unity-official-docs/manual"))
+        let listed = list_managed_documents(&working_dir, Some("unity-official-docs/manual"))
             .expect("list managed docs");
         assert_eq!(listed.len(), 1);
         assert_eq!(
@@ -5242,22 +5242,22 @@ Suggest a change
     #[test]
     fn ensure_managed_store_available_preserves_legacy_markdown_layout() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let document = test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "ExecutionOrder",
         );
-        knowledge_store::save_document(&workspace_root, document.clone()).expect("save legacy doc");
+        knowledge_store::save_document(&working_dir, document.clone()).expect("save legacy doc");
         let legacy_file =
-            knowledge_store::document_path(&workspace_root, KnowledgeType::Reference, &document.path)
+            knowledge_store::document_path(&working_dir, KnowledgeType::Reference, &document.path)
                 .expect("legacy path");
         assert!(legacy_file.is_file());
 
-        ensure_managed_store_available(&workspace_root).expect("preserve legacy layout");
+        ensure_managed_store_available(&working_dir).expect("preserve legacy layout");
 
-        assert!(!managed_store_path(&workspace_root).is_file());
+        assert!(!managed_store_path(&working_dir).is_file());
         assert!(legacy_file.is_file());
-        assert!(load_managed_document(&workspace_root, &document.path)
+        assert!(load_managed_document(&working_dir, &document.path)
             .expect("load preserved legacy doc")
             .is_none());
     }
@@ -5265,14 +5265,14 @@ Suggest a change
     #[test]
     fn current_unity_reference_managed_snapshot_supports_legacy_manifest_without_migration() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "Execution Order",
         )];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
 
-        let legacy_manifest = legacy_manifest_path(&workspace_root);
+        let legacy_manifest = legacy_manifest_path(&working_dir);
         std::fs::create_dir_all(legacy_manifest.parent().expect("legacy manifest parent"))
             .expect("create legacy manifest parent");
         std::fs::write(
@@ -5289,26 +5289,26 @@ Suggest a change
         )
         .expect("write legacy manifest");
 
-        let snapshot = current_unity_reference_managed_snapshot(&workspace_root)
+        let snapshot = current_unity_reference_managed_snapshot(&working_dir)
             .expect("load snapshot with legacy manifest")
             .expect("snapshot exists");
 
         assert_eq!(snapshot.document_count, 1);
-        assert!(!manifest_path(&workspace_root).is_file());
+        assert!(!manifest_path(&working_dir).is_file());
         assert!(legacy_manifest.is_file());
     }
 
     #[test]
     fn ensure_managed_store_available_preserves_orphaned_store_when_locus_is_deleted() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "Execution Order",
         )];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5320,15 +5320,15 @@ Suggest a change
             },
         )
         .expect("write workspace manifest");
-        assert!(managed_store_path(&workspace_root).is_file());
+        assert!(managed_store_path(&working_dir).is_file());
 
-        std::fs::remove_dir_all(Path::new(&workspace_root).join("Locus")).expect("remove Locus");
+        std::fs::remove_dir_all(Path::new(&working_dir).join("Locus")).expect("remove Locus");
 
-        ensure_managed_store_available(&workspace_root).expect("preserve orphaned store");
+        ensure_managed_store_available(&working_dir).expect("preserve orphaned store");
 
-        assert!(managed_store_path(&workspace_root).is_file());
+        assert!(managed_store_path(&working_dir).is_file());
         assert!(
-            list_managed_documents(&workspace_root, Some("unity-official-docs"))
+            list_managed_documents(&working_dir, Some("unity-official-docs"))
                 .expect("list after orphan preservation")
                 .is_empty()
         );
@@ -5337,15 +5337,15 @@ Suggest a change
     #[test]
     fn snapshot_reads_document_count_from_managed_store() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "Execution Order",
         )];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
 
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5358,7 +5358,7 @@ Suggest a change
         )
         .expect("write manifest");
 
-        let snapshot = current_unity_reference_managed_snapshot(&workspace_root)
+        let snapshot = current_unity_reference_managed_snapshot(&working_dir)
             .expect("load snapshot")
             .expect("snapshot exists");
         assert_eq!(snapshot.managed_path, "reference/unity-official-docs");
@@ -5370,14 +5370,14 @@ Suggest a change
     #[test]
     fn managed_directory_defaults_disable_vector_search() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![test_unity_document(
             "unity-official-docs/manual/ExecutionOrder.md",
             "Execution Order",
         )];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5391,7 +5391,7 @@ Suggest a change
         .expect("write manifest");
 
         configure_managed_directory(
-            &workspace_root,
+            &working_dir,
             UNITY_REFERENCE_MANAGED_DIR,
             "2022.3.47f1",
             "2022.3",
@@ -5401,7 +5401,7 @@ Suggest a change
         .expect("configure managed directory");
 
         let record = knowledge_store::read_directory_config(
-            &workspace_root,
+            &working_dir,
             KnowledgeType::Reference,
             UNITY_REFERENCE_MANAGED_DIR,
         )
@@ -5431,7 +5431,7 @@ Suggest a change
     #[test]
     fn managed_virtual_directories_are_listed_from_store() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![
             test_unity_document(
                 "unity-official-docs/manual/ExecutionOrder.md",
@@ -5442,9 +5442,9 @@ Suggest a change
                 "Transform",
             ),
         ];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5457,7 +5457,7 @@ Suggest a change
         )
         .expect("write manifest");
 
-        let directories = list_managed_directories(&workspace_root).expect("list managed dirs");
+        let directories = list_managed_directories(&working_dir).expect("list managed dirs");
         assert!(directories.contains(&"unity-official-docs".to_string()));
         assert!(directories.contains(&"unity-official-docs/manual".to_string()));
         assert!(directories.contains(&"unity-official-docs/script-reference".to_string()));
@@ -5467,7 +5467,7 @@ Suggest a change
     #[test]
     fn managed_directory_stats_are_cached_in_store() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
+        let working_dir = workspace.path().to_string_lossy().to_string();
         let documents = vec![
             test_unity_document(
                 "unity-official-docs/manual/ExecutionOrder.md",
@@ -5478,9 +5478,9 @@ Suggest a change
                 "Transform",
             ),
         ];
-        seed_managed_documents_for_tests(&workspace_root, &documents).expect("seed managed store");
+        seed_managed_documents_for_tests(&working_dir, &documents).expect("seed managed store");
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5494,7 +5494,7 @@ Suggest a change
         .expect("write manifest");
 
         let stats =
-            list_managed_directory_stats(&workspace_root).expect("list managed directory stats");
+            list_managed_directory_stats(&working_dir).expect("list managed directory stats");
         assert!(stats.iter().any(|stat| {
             stat.path == "unity-official-docs"
                 && stat.direct_child_count == 2
@@ -5537,7 +5537,7 @@ Suggest a change
         });
 
         let runtime = state.lock().await;
-        assert_eq!(runtime.workspace_root, "F:/workspace");
+        assert_eq!(runtime.working_dir, "F:/workspace");
         assert_eq!(runtime.status.message, "正在重建索引");
         assert_eq!(runtime.status.progress, Some(0.5));
     }
@@ -5545,8 +5545,8 @@ Suggest a change
     #[tokio::test]
     async fn get_status_keeps_cache_root_while_import_is_running() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
-        let project_settings = Path::new(&workspace_root).join("ProjectSettings");
+        let working_dir = workspace.path().to_string_lossy().to_string();
+        let project_settings = Path::new(&working_dir).join("ProjectSettings");
         std::fs::create_dir_all(&project_settings).expect("create project settings");
         std::fs::write(
             project_settings.join("ProjectVersion.txt"),
@@ -5554,11 +5554,11 @@ Suggest a change
         )
         .expect("write project version");
 
-        let cache_dir = cache_root(&workspace_root);
+        let cache_dir = cache_root(&working_dir);
         std::fs::create_dir_all(&cache_dir).expect("create cache root");
 
         let state = Arc::new(tokio::sync::Mutex::new(UnityReferenceImportRuntime {
-            workspace_root: workspace_root.clone(),
+            working_dir: working_dir.clone(),
             status: UnityReferenceImportStatus {
                 running: true,
                 stage: UnityReferenceImportStage::Downloading,
@@ -5568,7 +5568,7 @@ Suggest a change
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }));
 
-        let status = get_unity_reference_import_status(&workspace_root, None, state)
+        let status = get_unity_reference_import_status(&working_dir, None, state)
             .await
             .expect("get status");
 
@@ -5580,8 +5580,8 @@ Suggest a change
     #[tokio::test]
     async fn get_status_for_missing_target_directory_returns_missing_state() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
-        let project_settings = Path::new(&workspace_root).join("ProjectSettings");
+        let working_dir = workspace.path().to_string_lossy().to_string();
+        let project_settings = Path::new(&working_dir).join("ProjectSettings");
         std::fs::create_dir_all(&project_settings).expect("create project settings");
         std::fs::write(
             project_settings.join("ProjectVersion.txt"),
@@ -5593,7 +5593,7 @@ Suggest a change
             UnityReferenceImportRuntime::default(),
         ));
         let status = get_unity_reference_import_status(
-            &workspace_root,
+            &working_dir,
             Some("external/unity-official-docs"),
             state,
         )
@@ -5617,8 +5617,8 @@ Suggest a change
     #[tokio::test]
     async fn get_status_for_default_managed_target_path_uses_sqlite_managed_slot() {
         let workspace = tempdir().expect("workspace");
-        let workspace_root = workspace.path().to_string_lossy().to_string();
-        let project_settings = Path::new(&workspace_root).join("ProjectSettings");
+        let working_dir = workspace.path().to_string_lossy().to_string();
+        let project_settings = Path::new(&working_dir).join("ProjectSettings");
         std::fs::create_dir_all(&project_settings).expect("create project settings");
         std::fs::write(
             project_settings.join("ProjectVersion.txt"),
@@ -5627,7 +5627,7 @@ Suggest a change
         .expect("write project version");
 
         write_manifest(
-            &workspace_root,
+            &working_dir,
             &UnityReferenceImportManifest {
                 project_version: "2022.3.47f1".to_string(),
                 docs_version: "2022.3".to_string(),
@@ -5643,7 +5643,7 @@ Suggest a change
             UnityReferenceImportRuntime::default(),
         ));
         let status =
-            get_unity_reference_import_status(&workspace_root, Some("unity-official-docs"), state)
+            get_unity_reference_import_status(&working_dir, Some("unity-official-docs"), state)
                 .await
                 .expect("get status");
 

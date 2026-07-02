@@ -871,11 +871,7 @@ async fn resolve_project_path(
 }
 
 async fn set_workspace_for_driver(workspace: &Arc<Workspace>, project: &str) -> Result<(), String> {
-    // CLI driver always receives a Unity project root from --project, so
-    // workspace_root == unity_root == project. (No "org dir with multiple
-    // Unity projects" case here — that's a desktop app concern.)
-    let workspace_id = crate::workspace::load_or_create_workspace(project, project).ok();
-    workspace.set_workspace_root(project.to_string()).await;
+    let workspace_id = crate::workspace::load_or_create_workspace(project).ok();
     // Setter keeps the deprecated `path` alias in sync with `unity_root`.
     workspace.set_unity_root(project.to_string()).await;
     {

@@ -208,35 +208,6 @@ export const useProjectStore = defineStore("project", () => {
     return result;
   }
 
-  /**
-   * Switch the workspace using the new structured IPC. The front-end
-   * should call `resolveUnityProjectPath` first and pop a picker for
-   * multi-Unity-parent directories before forwarding the chosen path
-   * here. See `locus-workspace-unity-roots.md` (agent memory) for the
-   * full P5 design.
-   */
-  async function setWorkspace(path: string): Promise<projectService.SetWorkspaceResult> {
-    const result = await projectService.setWorkspace(path);
-    resetUnityLaunchState();
-    // `workingDir` keeps its existing semantics: it tracks the Unity
-    // project root (the path the rest of the front-end already knows how
-    // to interpret). The structured result also exposes `workspaceRoot`
-    // for callers that need the user-selected root (e.g. for the
-    // recent-dirs list and migration notices).
-    workingDir.value = result.unityRoot;
-    unityConnectionStatus.value = null;
-    scanPhase.value = null;
-    lastScanStats.value = null;
-    scanInFlight = false;
-    return result;
-  }
-
-  async function resolveUnityProjectPath(
-    path: string,
-  ): Promise<projectService.ResolveUnityResult> {
-    return projectService.resolveUnityProjectPath(path);
-  }
-
   async function loadRecentDirs() {
     try {
       recentDirs.value = await projectService.listRecentDirs();
@@ -457,8 +428,6 @@ export const useProjectStore = defineStore("project", () => {
     isUnityProject,
     loadWorkingDir,
     setWorkingDir,
-    setWorkspace,
-    resolveUnityProjectPath,
     loadRecentDirs,
     removeRecentDir,
     openDirInFileExplorer,

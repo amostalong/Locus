@@ -325,7 +325,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
             return;
         };
         let checkpoint = match undo_mgr
-            .before_round(&self.agent.workspace_root, "cli tool round")
+            .before_round(&self.agent.working_dir, "cli tool round")
             .await
         {
             Ok(checkpoint) => checkpoint,
@@ -361,7 +361,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
         };
         if !queued_before_recompile.is_empty() {
             match crate::unity_bridge::import_assets(
-                &self.agent.unity_root,
+                &self.agent.working_dir,
                 &queued_before_recompile,
             )
             .await
@@ -377,7 +377,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
             }
         }
 
-        if !crate::unity_bridge::is_unity_project(&self.agent.unity_root)
+        if !crate::unity_bridge::is_unity_project(&self.agent.working_dir)
             || !self.agent.is_unity_asset_write_call(tool_call, args)
         {
             return;
@@ -396,7 +396,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
         }
 
         match crate::unity_bridge::begin_edit_session(
-            &self.agent.unity_root,
+            &self.agent.working_dir,
             &self.agent.session_id,
         )
         .await
@@ -445,7 +445,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
     async fn finish_cli_round_external_side_effects(&self, completion: CliRoundCompletion) {
         if !completion.queued_unity_asset_paths.is_empty() {
             crate::unity_bridge::import_assets_fire_and_forget(
-                &self.agent.unity_root,
+                &self.agent.working_dir,
                 completion.queued_unity_asset_paths,
             );
         }
@@ -463,7 +463,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
                 Some(self.run_id),
                 undo_guard,
                 completion.has_unity_execute,
-                &self.agent.workspace_root,
+                &self.agent.working_dir,
             )
             .await;
         match recorded {
@@ -926,7 +926,7 @@ impl AgentInstance {
         let options = ClaudeCodeCliOptions {
             locus_session_id: self.session_id.clone(),
             cwd: if self.has_selected_working_dir() {
-                self.unity_root.clone()
+                self.working_dir.clone()
             } else {
                 std::env::current_dir()
                     .map(|dir| dir.display().to_string())
