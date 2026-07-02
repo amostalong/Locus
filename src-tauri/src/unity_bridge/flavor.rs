@@ -95,6 +95,28 @@ pub(crate) fn is_engine_module_exe(module_name: &str) -> bool {
         .any(|flavor| module_name.eq_ignore_ascii_case(flavor.engine_module_exe()))
 }
 
+/// Engine module prefix used in DbgHelp symbol lookups for the engine
+/// identified by `module_file_name` (e.g. `Unity.dll`, `Unity.exe`,
+/// `Tuanjie.dll`, `Tuanjie.exe`). Mirrors `engine_pdb_name_for_module`: any
+/// module name that isn't recognizably Tuanjie resolves to `"Unity"`, so the
+/// standard-Unity path is byte-for-byte unchanged.
+///
+/// Pass this to both `SymLoadModuleExW` (as the `ModuleName` arg) and
+/// `SymFromName` (as the `<prefix>!<symbol>` prefix) so the prefix matches
+/// whatever the on-disk PDB was generated against. Tuanjie's PDB prefixes
+/// every symbol with `Tuanjie!`; Unity's prefixes with `Unity!`.
+pub(crate) fn engine_module_sym_name(module_file_name: &str) -> &'static str {
+    let stem = Path::new(module_file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if stem.eq_ignore_ascii_case("Tuanjie") {
+        "Tuanjie"
+    } else {
+        "Unity"
+    }
+}
+
 /// True when `normalized_lower_path` (already lower-cased, back-slash separated)
 /// ends with a known editor executable file name. Used to guard against PID
 /// reuse when an `EditorInstance.json` omits `app_path`.
@@ -215,5 +237,23 @@ mod tests {
         assert!(!is_tuanjie_version("2022.3.47f1"));
         assert!(!is_tuanjie_version("6000.3.14f1"));
         assert!(!is_tuanjie_version(""));
+    }
+
+    #[test]
+    fn sym_name_derives_from_module_filename() {
+        // Standard Unity.
+        assert_eq!(engine_module_sym_name("Unity.dll"), "Unity");
+        assert_eq!(engine_module_sym_name("Unity.exe"), "Unity");
+        assert_eq!(engine_module_sym_name("unity.dll"), "Unity");
+        assert_eq!(engine_module_sym_name(""), "Unity");
+
+        // Tuanjie (团结引擎, the Unity China fork).
+        assert_eq!(engine_module_sym_name("Tuanjie.dll"), "Tuanjie");
+        assert_eq!(engine_module_sym_name("Tuanjie.exe"), "Tuanjie");
+        assert_eq!(engine_module_sym_name("tuanjie.exe"), "Tuanjie");
+        assert_eq!(
+            engine_module_sym_name(r"f:\tuanjie\2022.3.62t10\editor\tuanjie.exe"),
+            "Tuanjie"
+        );
     }
 }

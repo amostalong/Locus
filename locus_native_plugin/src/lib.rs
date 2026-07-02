@@ -1379,10 +1379,12 @@ mod hook {
     /// `mov eax, 1; ret` — the patched function unconditionally reports "active".
     /// MUST match `background_hook.rs::PATCH_BYTES`.
     const PATCH_BYTES: [u8; 6] = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
-    /// MUST match `background_hook.rs::SYMBOLS`.
+    /// Bare symbol names — the engine module prefix is prepended at lookup time
+    /// via `engine_module_sym_name(module_path)`. MUST match the (bare) names
+    /// used by `background_hook.rs::SYMBOLS`.
     const SYMBOLS: [&str; 2] = [
-        "Unity!IsApplicationActive",
-        "Unity!IsApplicationActiveOSImpl",
+        "IsApplicationActive",
+        "IsApplicationActiveOSImpl",
     ];
 
     /// A dbghelp "process" key private to this module. Resolution is
@@ -1627,6 +1629,28 @@ mod hook {
         }
     }
 
+    /// Engine module prefix used in DbgHelp symbol lookups for the engine
+    /// identified by `module_file_name` (e.g. `Unity.dll`, `Unity.exe`,
+    /// `Tuanjie.dll`, `Tuanjie.exe`). Mirrors `unity_bridge::flavor` and
+    /// `engine_pdb_name_for_module` above — anything not recognizably Tuanjie
+    /// returns `"Unity"`, so the standard-Unity path is byte-for-byte unchanged.
+    ///
+    /// Pass this to both `SymLoadModuleExW` (as the `ModuleName` arg) and
+    /// `SymFromName` (as the `<prefix>!<symbol>` prefix) so the prefix matches
+    /// whatever the on-disk PDB was generated against. Tuanjie's PDB prefixes
+    /// every symbol with `Tuanjie!`; Unity's prefixes with `Unity!`.
+    fn engine_module_sym_name(module_file_name: &str) -> &'static str {
+        let stem = Path::new(module_file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if stem.eq_ignore_ascii_case("Tuanjie") {
+            "Tuanjie"
+        } else {
+            "Unity"
+        }
+    }
+
     fn apply_all() -> Result<Vec<PatchRecord>, String> {
         let module = find_unity_engine_module()?;
         let image_path = Path::new(&module.path);
@@ -1637,15 +1661,29 @@ mod hook {
             )
         })?;
         let pdb_path = symbol_dir.join(engine_pdb_name_for_module(&module.path));
+        let module_prefix = engine_module_sym_name(&module.path);
+        eprintln!(
+            "[locus-native] apply_all: module={} base=0x{:X} size={} pdb={} prefix={}",
+            module.path,
+            module.base,
+            module.size,
+            pdb_path.display(),
+            module_prefix
+        );
         if !pdb_path.is_file() {
             return Err(format!("Editor PDB is missing: {}", pdb_path.display()));
         }
 
         let mut records: Vec<PatchRecord> = Vec::new();
-        for symbol in SYMBOLS {
-            let address = match resolve_symbol(image_path, symbol_dir, &module, symbol) {
+        for bare_symbol in SYMBOLS {
+            let full_symbol = format!("{module_prefix}!{bare_symbol}");
+            let address = match resolve_symbol(image_path, symbol_dir, &module, &full_symbol) {
                 Ok(address) => address,
                 Err(error) => {
+                    eprintln!(
+                        "[locus-native] apply_all: resolve failed for {} — {}",
+                        full_symbol, error
+                    );
                     rollback(&records);
                     return Err(error);
                 }
@@ -1653,7 +1691,7 @@ mod hook {
             if address < module.base || address >= module.base.saturating_add(module.size as u64) {
                 rollback(&records);
                 return Err(format!(
-                    "Resolved symbol {symbol} outside Unity module: 0x{address:X}"
+                    "Resolved symbol {} outside Unity module: 0x{address:X}", full_symbol
                 ));
             }
 
@@ -1732,7 +1770,7 @@ mod hook {
         // Held for its Drop (SymCleanup); resolution uses the SYM_HANDLE const.
         let _session = SymSession::new(symbol_path)?;
         let image = wide_null(image_path.as_os_str());
-        let module_name = wide_null(OsStr::new("Unity"));
+        let module_name = wide_null(OsStr::new(engine_module_sym_name(&module.path)));
         let loaded = unsafe {
             SymLoadModuleExW(
                 SYM_HANDLE,
@@ -1811,20 +1849,17 @@ mod hook {
 
     #[cfg(test)]
     mod tests {
-        use super::{engine_pdb_name_for_module, PATCH_BYTES, SYMBOLS};
+        use super::{engine_module_sym_name, engine_pdb_name_for_module, PATCH_BYTES, SYMBOLS};
 
         /// Parity with `unity_bridge/background_hook.rs`: the cross-process and
         /// in-process patches must touch the same symbols with the same bytes.
+        /// Both sides now keep the bare symbol names without a prefix; the
+        /// prefix (`Unity!` / `Tuanjie!`) is prepended at lookup time so the
+        /// DbgHelper `ModuleName` and the `<prefix>!<symbol>` query line up.
         #[test]
         fn patch_constants_match_cross_process_hook() {
             assert_eq!(PATCH_BYTES, [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3]);
-            assert_eq!(
-                SYMBOLS,
-                [
-                    "Unity!IsApplicationActive",
-                    "Unity!IsApplicationActiveOSImpl",
-                ]
-            );
+            assert_eq!(SYMBOLS, ["IsApplicationActive", "IsApplicationActiveOSImpl"]);
         }
 
         /// `engine_pdb_name_for_module` must resolve the in-process
@@ -1857,6 +1892,42 @@ mod hook {
             assert_eq!(
                 engine_pdb_name_for_module(r"f:\tuanjie\2022.3.62t10\editor\tuanjie.dll"),
                 "Tuanjie_x64.pdb"
+            );
+        }
+
+        /// `engine_module_sym_name` returns the DbgHelp `ModuleName` and
+        /// `<prefix>!<symbol>` query prefix for the engine module. Anything
+        /// not recognizably Tuanjie falls back to `"Unity"` so the standard
+        /// Unity path is byte-for-byte unchanged.
+        #[test]
+        fn sym_name_derives_from_module_filename() {
+            // Standard Unity.
+            assert_eq!(engine_module_sym_name("Unity.dll"), "Unity");
+            assert_eq!(engine_module_sym_name("Unity.exe"), "Unity");
+            assert_eq!(engine_module_sym_name("unity.dll"), "Unity");
+            assert_eq!(engine_module_sym_name(""), "Unity");
+
+            // Tuanjie (团结引擎).
+            assert_eq!(engine_module_sym_name("Tuanjie.dll"), "Tuanjie");
+            assert_eq!(engine_module_sym_name("Tuanjie.exe"), "Tuanjie");
+            assert_eq!(engine_module_sym_name("tuanjie.exe"), "Tuanjie");
+            assert_eq!(
+                engine_module_sym_name(r"f:\tuanjie\2022.3.62t10\editor\tuanjie.exe"),
+                "Tuanjie"
+            );
+
+            // Composing with bare symbols yields the lookup form DbgHelp expects.
+            let module = r"f:\tuanjie\2022.3.62t10\editor\tuanjie.exe";
+            let prefix = engine_module_sym_name(module);
+            assert_eq!(
+                format!("{prefix}!{}", SYMBOLS[0]),
+                "Tuanjie!IsApplicationActive"
+            );
+            let module = r"c:\program files\unity\2022.3.47f1\editor\unity.exe";
+            let prefix = engine_module_sym_name(module);
+            assert_eq!(
+                format!("{prefix}!{}", SYMBOLS[1]),
+                "Unity!IsApplicationActiveOSImpl"
             );
         }
     }

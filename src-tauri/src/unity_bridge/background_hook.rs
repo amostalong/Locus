@@ -71,7 +71,7 @@ impl UnityBackgroundHookStatus {
 
 #[derive(Debug, Clone)]
 struct PatchRecord {
-    symbol: &'static str,
+    symbol: String,
     address: u64,
     original: Vec<u8>,
     managed_original: bool,
@@ -306,9 +306,12 @@ mod windows_impl {
     const SYMOPT_AUTO_PUBLICS: Dword = 0x00010000;
     const MAX_SYM_NAME: usize = 2048;
     const PATCH_BYTES: [u8; 6] = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
+    /// Bare symbol names — the engine module prefix is prepended at lookup time
+    /// via `flavor::engine_module_sym_name(module_path)`. MUST match the bare
+    /// names used by `locus_native_plugin/src/lib.rs::SYMBOLS`.
     const SYMBOLS: [&str; 2] = [
-        "Unity!IsApplicationActive",
-        "Unity!IsApplicationActiveOSImpl",
+        "IsApplicationActive",
+        "IsApplicationActiveOSImpl",
     ];
 
     #[allow(non_snake_case)]
@@ -494,14 +497,16 @@ mod windows_impl {
         let pdb_path = symbol_dir.join(crate::unity_bridge::flavor::engine_pdb_name_for_module(
             &module.name,
         ));
+        let module_prefix = crate::unity_bridge::flavor::engine_module_sym_name(&module.name);
         if !pdb_path.is_file() {
             return Err(format!("Unity PDB is missing: {}", pdb_path.display()));
         }
         let process = open_target_process(process_id)?;
         let mut records = Vec::new();
 
-        for symbol in SYMBOLS {
-            let address = resolve_symbol(image_path, symbol_dir, &module, symbol)?;
+        for bare_symbol in SYMBOLS {
+            let symbol = format!("{module_prefix}!{bare_symbol}");
+            let address = resolve_symbol(image_path, symbol_dir, &module, &symbol)?;
             if address < module.base || address >= module.base.saturating_add(module.size as u64) {
                 rollback_partial(process.raw(), &records);
                 return Err(format!(
@@ -624,7 +629,9 @@ mod windows_impl {
     ) -> Result<u64, String> {
         let session = SymSession::new(symbol_path)?;
         let image = wide_null(image_path.as_os_str());
-        let module_name = wide_null(OsStr::new("Unity"));
+        let module_name = wide_null(OsStr::new(crate::unity_bridge::flavor::engine_module_sym_name(
+            &module.name,
+        )));
         let loaded = unsafe {
             SymLoadModuleExW(
                 session.handle,
