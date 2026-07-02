@@ -316,6 +316,7 @@ interface TopTabItem {
 }
 
 const topTabs = computed<TopTabItem[]>(() => [
+  { id: "chat", labelKey: "app.tab.dev", visible: true },
   { id: "editor", labelKey: "app.tab.editor", visible: true },
   { id: "knowledge", labelKey: "app.tab.knowledge", visible: displaySettings.showKnowledgeTab },
   { id: "collab", labelKey: "app.tab.collab", visible: displaySettings.showCollabTab },
