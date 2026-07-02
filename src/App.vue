@@ -178,7 +178,7 @@ const diffOverlay = provideDiffOverlay();
 // windows fall back to the dedicated inspector window.
 const locusAssetInspectorPanel = useLocusAssetInspectorPanel();
 setLocusAssetInspectorPanelHostAvailable(!isStandaloneWindow);
-const { bootstrapCritical, bootstrapDeferred, preloadTabsInBackground, registerListeners, cleanup, applyWorkingDir, refreshAfterSettings, onOnboardingCompleted } = useAppBootstrap();
+const { bootstrapCritical, bootstrapDeferred, preloadTabsInBackground, registerListeners, cleanup, applyWorkspacePath, resolveWorkspace, refreshAfterSettings, onOnboardingCompleted } = useAppBootstrap();
 const {
   handleUnityAssetDrag: handleMainUnityAssetDrag,
   handleUnityAssetDrop: handleMainUnityAssetDrop,
@@ -398,6 +398,17 @@ const recentDirContextMenu = ref<RecentDirContextMenu | null>(null);
 const pendingWorkspaceSwitchPath = ref<string | null>(null);
 const switchingWorkspacePath = ref<string | null>(null);
 const workspaceSwitchBusy = ref(false);
+// Global workspace picker (P5 of the workspace_root vs unity_root
+// refactor). When the user picks a directory that contains multiple
+// Unity projects, the front-end shows this modal so they can pick the
+// right one before committing. The candidate list comes from
+// `resolveWorkspace` in `useAppBootstrap`.
+const workspacePickerCandidates = ref<string[]>([]);
+const workspacePickerTitle = ref("");
+const workspacePickerBusy = ref(false);
+const workspacePickerVisible = computed(
+  () => workspacePickerCandidates.value.length > 0,
+);
 const appCloseConfirmOpen = ref(false);
 const appCloseBusy = ref(false);
 const appCloseRunningTaskCount = ref(0);
@@ -523,9 +534,20 @@ function notifyCancelledWorkspaceSessions(count: number) {
   });
 }
 
-async function performWorkingDirChange(dir: string, cancelledSessionCount = 0) {
+async function performWorkingDirChange(
+  dir: string,
+  cancelledSessionCount = 0,
+  resolutionKind: "exact" | "walkedUp" | "pickerSelected" = "exact",
+) {
   try {
-    await applyWorkingDir(dir);
+    // P5/P6 path: route through the structured `applyWorkspacePath`
+    // (which uses the new `set_workspace` IPC) for every workspace
+    // switch. The pick-then-commit flow in `requestWorkspaceChange`
+    // funnels the picker-chosen candidate through here with
+    // `resolutionKind = "pickerSelected"`; browse and recent flows use
+    // "exact" or "walkedUp" depending on whether the back-end had to
+    // auto-resolve.
+    await applyWorkspacePath(dir, resolutionKind);
     notifyCancelledWorkspaceSessions(cancelledSessionCount);
     return true;
   } catch (error) {
@@ -534,16 +556,63 @@ async function performWorkingDirChange(dir: string, cancelledSessionCount = 0) {
   }
 }
 
-async function requestWorkingDirChange(dir: string) {
-  if (!dir || dir === projectStore.workingDir || workspaceSwitchBusy.value) return;
+/**
+ * Entry point for any user-initiated workspace change. Runs the
+ * back-end resolve → picker (if needed) → commit flow.
+ *
+ * `skipResolve: true` means the caller already resolved (e.g. the
+ * user picked a candidate from the global picker modal); in that case
+ * we forward the path straight to `applyWorkspacePath` with
+ * `resolutionKind = "pickerSelected"`.
+ */
+async function requestWorkspaceChange(
+  dir: string,
+  options: {
+    skipResolve?: boolean;
+    resolutionKind?: "exact" | "walkedUp" | "pickerSelected";
+  } = {},
+) {
+  if (!dir || workspaceSwitchBusy.value) return;
+  let target = dir;
+  let resolutionKind: "exact" | "walkedUp" | "pickerSelected" =
+    options.resolutionKind ?? "exact";
+
+  if (!options.skipResolve) {
+    try {
+      const resolved = await resolveWorkspace(dir);
+      if (resolved.kind === "notFound") {
+        reportWorkingDirSwitchError(
+          new Error(t("app.dir.notFoundMessage", dir)),
+        );
+        return;
+      }
+      if (resolved.kind === "picker") {
+        // Show the global picker modal — the user will choose one
+        // candidate and we'll get re-entered through
+        // `pickWorkspaceCandidate` with `skipResolve: true`.
+        workspacePickerCandidates.value = resolved.candidates;
+        workspacePickerTitle.value = dir;
+        return;
+      }
+      // resolved.kind === "resolved" — auto-resolved by the back-end
+      // walking up to find a Unity ancestor or BFS'ing one descendant.
+      target = dir; // the user-selected dir is the workspace_root
+      resolutionKind = "walkedUp";
+    } catch (error) {
+      reportWorkingDirSwitchError(error);
+      return;
+    }
+  }
+
+  if (target === projectStore.workingDir) return;
   if (runningSessionCount.value > 0) {
-    pendingWorkspaceSwitchPath.value = dir;
+    pendingWorkspaceSwitchPath.value = target;
     return;
   }
   workspaceSwitchBusy.value = true;
-  switchingWorkspacePath.value = dir;
+  switchingWorkspacePath.value = target;
   try {
-    await performWorkingDirChange(dir);
+    await performWorkingDirChange(target, 0, resolutionKind);
   } finally {
     switchingWorkspacePath.value = null;
     workspaceSwitchBusy.value = false;
@@ -558,7 +627,7 @@ async function confirmWorkspaceSwitch() {
   try {
     const sessionIds = Array.from(chatStore.streamingSessionIds);
     await chatStore.cancelSessions(sessionIds);
-    const switched = await performWorkingDirChange(target, sessionIds.length);
+    const switched = await performWorkingDirChange(target, sessionIds.length, "exact");
     if (switched) {
       pendingWorkspaceSwitchPath.value = null;
     }
@@ -596,7 +665,13 @@ async function selectRecentDir(dir: string) {
   if (workspaceSwitchBusy.value) return;
   closeRecentDirContextMenu();
   showDirDropdown.value = false;
-  await requestWorkingDirChange(dir);
+  // Recent dirs are always the resolved `unity_root` (the back-end
+  // stored the unity_root on save). Forcing `skipResolve` here means
+  // we commit straight through the new `set_workspace` IPC without
+  // re-running the resolve heuristic — the user already picked a
+  // fully-resolved project, so walking up or BFS'ing would just be
+  // a no-op that adds latency.
+  await requestWorkspaceChange(dir, { skipResolve: true, resolutionKind: "exact" });
 }
 
 async function browseFromDropdown() {
@@ -606,7 +681,7 @@ async function browseFromDropdown() {
   try {
     const selected = await open({ directory: true, multiple: false, defaultPath: projectStore.workingDir || undefined });
     if (selected && typeof selected === "string") {
-      await requestWorkingDirChange(selected);
+      await requestWorkspaceChange(selected);
     }
   } catch (e) {
     const err = normalizeAppError(e);
@@ -616,6 +691,29 @@ async function browseFromDropdown() {
       skipConsoleLog: true,
     });
   }
+}
+
+/**
+ * Pick a candidate from the global workspace picker modal and commit
+ * the switch via the structured `setWorkspace` IPC. Called from the
+ * picker modal's "use this project" button.
+ */
+async function pickWorkspaceCandidate(candidate: string) {
+  if (workspacePickerBusy.value) return;
+  workspacePickerBusy.value = true;
+  try {
+    await requestWorkspaceChange(candidate, { skipResolve: true, resolutionKind: "pickerSelected" });
+  } finally {
+    workspacePickerBusy.value = false;
+    workspacePickerCandidates.value = [];
+    workspacePickerTitle.value = "";
+  }
+}
+
+function cancelWorkspacePicker() {
+  if (workspacePickerBusy.value) return;
+  workspacePickerCandidates.value = [];
+  workspacePickerTitle.value = "";
 }
 
 function openRecentDirContextMenu(event: MouseEvent, dir: string) {
@@ -1297,6 +1395,61 @@ watch(() => projectStore.workingDir, () => {
             @click="confirmAppClose"
           >
             {{ t("app.close.runningConfirmAction") }}
+          </BaseButton>
+        </div>
+      </div>
+    </div>
+  </Transition>
+  <!-- Global workspace picker (P5 of the workspace_root vs unity_root
+       refactor). Shown when the user picks a directory that contains
+       multiple Unity projects. The candidate list comes from
+       `resolveWorkspace` in useAppBootstrap. -->
+  <Transition name="workspace-switch-modal">
+    <div
+      v-if="workspacePickerVisible"
+      class="workspace-switch-overlay workspace-picker-overlay"
+      @click.self="cancelWorkspacePicker"
+    >
+      <div
+        class="workspace-switch-dialog workspace-picker-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-picker-title"
+      >
+        <div class="workspace-switch-header">
+          <span id="workspace-picker-title" class="workspace-switch-title">
+            {{ t("app.dir.pickerTitle") }}
+          </span>
+          <button
+            class="workspace-switch-close"
+            :disabled="workspacePickerBusy"
+            @click="cancelWorkspacePicker"
+          >
+            <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+              <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="workspace-switch-body workspace-picker-body">
+          <p class="workspace-switch-message">
+            {{ t("app.dir.pickerMessage", workspacePickerTitle) }}
+          </p>
+          <ul class="workspace-picker-list">
+            <li v-for="candidate in workspacePickerCandidates" :key="candidate">
+              <button
+                type="button"
+                class="workspace-picker-item"
+                :disabled="workspacePickerBusy"
+                @click="pickWorkspaceCandidate(candidate)"
+              >
+                <span class="workspace-picker-item-path">{{ candidate }}</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div class="workspace-switch-footer">
+          <BaseButton :disabled="workspacePickerBusy" @click="cancelWorkspacePicker">
+            {{ t("common.cancel") }}
           </BaseButton>
         </div>
       </div>
@@ -2012,6 +2165,54 @@ body.is-dragging-select-lock * {
   flex-direction: column;
   gap: 10px;
   padding: 14px 16px;
+}
+
+/* Global workspace picker modal — P5 of the workspace_root vs
+   unity_root refactor. Shared look-and-feel with the running-task
+   confirm modal above; the unique pieces are the candidate list and
+   per-item buttons. */
+.workspace-picker-dialog {
+  max-width: 560px;
+}
+.workspace-picker-body {
+  gap: 12px;
+}
+.workspace-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.workspace-picker-item {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-color);
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--font-mono-identifier);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  word-break: break-all;
+}
+.workspace-picker-item:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 5%, transparent);
+}
+.workspace-picker-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.workspace-picker-item-path {
+  display: block;
+  line-height: 1.4;
 }
 
 .workspace-switch-message,
