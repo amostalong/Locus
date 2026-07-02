@@ -82,7 +82,9 @@ describe("display settings transcript alignment", () => {
 
     expect(app).toContain('import { initFonts, useDisplaySettings } from "./composables/useDisplaySettings";');
     expect(app).toContain("const { state: displaySettings } = useDisplaySettings();");
-    expect(app).toContain('{ id: "chat", labelKey: "app.tab.dev", visible: true }');
+    // Fork P5 home-mode routes "chat" through the home top tab; no separate
+    // chat top tab is exposed in topTabs.
+    expect(app).not.toContain('{ id: "chat", labelKey: "app.tab.dev", visible: true }');
     expect(app).toContain('{ id: "settings", labelKey: "app.tab.settings", visible: true }');
     expect(app).toContain('{ id: "knowledge", labelKey: "app.tab.knowledge", visible: displaySettings.showKnowledgeTab }');
     expect(app).toContain('{ id: "collab", labelKey: "app.tab.collab", visible: displaySettings.showCollabTab }');

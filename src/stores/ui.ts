@@ -32,10 +32,9 @@ interface PendingChatPrefill extends ChatPrefillOptions {
 export const useUiStore = defineStore("ui", () => {
 // Union of local ("editor") + upstream ("chat | collab | knowledge | asset | views | plugins | agent | settings")
   // Local added "editor" for Monaco editor tab; upstream kept the rest unchanged.
-  // "chat" is preserved as a deprecated top-tab id used by the P5 home-mode
-  // layout; it's routed through the home tab at runtime but kept in the union
-  // for backwards compatibility with persisted `lastTab` values.
-  const activeTab = ref<"home" | "chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("home");
+  // Fork P5 (home mode) routes "chat" through the "home" top tab; no separate
+  // chat top tab is exposed.
+  const activeTab = ref<"home" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("home");
   // Union of local (knowledge) + upstream (hotReload | unityConnection | testing).
   // Upstream removed the standalone Knowledge tab in SettingsView; local code may still reference it.
   const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
