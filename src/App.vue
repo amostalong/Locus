@@ -178,7 +178,7 @@ const diffOverlay = provideDiffOverlay();
 // windows fall back to the dedicated inspector window.
 const locusAssetInspectorPanel = useLocusAssetInspectorPanel();
 setLocusAssetInspectorPanelHostAvailable(!isStandaloneWindow);
-const { bootstrapCritical, bootstrapDeferred, preloadTabsInBackground, registerListeners, cleanup, applyWorkingDir, refreshAfterSettings, onOnboardingCompleted } = useAppBootstrap();
+const { bootstrapCritical, bootstrapDeferred, preloadTabsInBackground, registerListeners, cleanup, applyWorkingDir, applyWorkspacePath, refreshAfterSettings, onOnboardingCompleted } = useAppBootstrap();
 const {
   handleUnityAssetDrag: handleMainUnityAssetDrag,
   handleUnityAssetDrop: handleMainUnityAssetDrop,
@@ -550,6 +550,82 @@ async function requestWorkingDirChange(dir: string) {
   }
 }
 
+/**
+ * Unified workspace-switch entry point for App.vue. Always calls
+ * `set_workspace` (the structured IPC), which routes through
+ * resolve→picker/commit inside the back-end. Recent dirs already point at
+ * a Unity project root so the resolver takes the fast `exact` branch;
+ * browse picks a directory that may be ambiguous (multi-Unity parent),
+ * which is why `applyWorkspacePath` returns a `picker` union we have to
+ * surface here.
+ */
+const workspacePickerOpen = ref(false);
+const workspacePickerCandidates = ref<string[]>([]);
+const workspacePickerSource = ref<string | null>(null);
+const workspacePickerLoading = ref(false);
+
+function openWorkspacePicker(candidates: string[], source: string) {
+  workspacePickerCandidates.value = candidates;
+  workspacePickerSource.value = source;
+  workspacePickerOpen.value = true;
+}
+
+function closeWorkspacePicker() {
+  workspacePickerOpen.value = false;
+  workspacePickerCandidates.value = [];
+  workspacePickerSource.value = null;
+  workspacePickerLoading.value = false;
+}
+
+function candidateLabelForPicker(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/);
+  return parts.slice(-2).join("/");
+}
+
+async function pickWorkspaceCandidateFromApp(candidate: string) {
+  workspacePickerLoading.value = true;
+  try {
+    const result = await applyWorkspacePath(candidate, "pickerSelected");
+    if (result.kind === "picker") {
+      workspacePickerCandidates.value = result.candidates;
+      workspacePickerSource.value = candidate;
+      return;
+    }
+    closeWorkspacePicker();
+    notifyCancelledWorkspaceSessions(0);
+  } catch (error) {
+    reportWorkingDirSwitchError(error);
+    closeWorkspacePicker();
+  } finally {
+    workspacePickerLoading.value = false;
+  }
+}
+
+async function requestWorkspaceChange(path: string) {
+  if (!path || workspaceSwitchBusy.value) return;
+  if (runningSessionCount.value > 0) {
+    pendingWorkspaceSwitchPath.value = path;
+    return;
+  }
+  workspaceSwitchBusy.value = true;
+  switchingWorkspacePath.value = path;
+  try {
+    const result = await applyWorkspacePath(path, "user-selected");
+    if (result.kind === "picker") {
+      closeWorkspacePicker();
+      openWorkspacePicker(result.candidates, path);
+    } else {
+      closeWorkspacePicker();
+    }
+  } catch (error) {
+    reportWorkingDirSwitchError(error);
+  } finally {
+    switchingWorkspacePath.value = null;
+    workspaceSwitchBusy.value = false;
+  }
+}
+
 async function confirmWorkspaceSwitch() {
   const target = pendingWorkspaceSwitchPath.value;
   if (!target || workspaceSwitchBusy.value) return;
@@ -558,9 +634,16 @@ async function confirmWorkspaceSwitch() {
   try {
     const sessionIds = Array.from(chatStore.streamingSessionIds);
     await chatStore.cancelSessions(sessionIds);
-    const switched = await performWorkingDirChange(target, sessionIds.length);
-    if (switched) {
-      pendingWorkspaceSwitchPath.value = null;
+    notifyCancelledWorkspaceSessions(sessionIds.length);
+    pendingWorkspaceSwitchPath.value = null;
+    // After cancellation the path is guaranteed to be reachable; route
+    // through the structured IPC so multi-Unity parents still get the picker.
+    const result = await applyWorkspacePath(target, "confirm-after-cancel");
+    if (result.kind === "picker") {
+      closeWorkspacePicker();
+      openWorkspacePicker(result.candidates, target);
+    } else {
+      closeWorkspacePicker();
     }
   } catch (error) {
     reportWorkingDirSwitchError(error);
@@ -606,7 +689,7 @@ async function browseFromDropdown() {
   try {
     const selected = await open({ directory: true, multiple: false, defaultPath: projectStore.workingDir || undefined });
     if (selected && typeof selected === "string") {
-      await requestWorkingDirChange(selected);
+      await requestWorkspaceChange(selected);
     }
   } catch (e) {
     const err = normalizeAppError(e);
@@ -1203,6 +1286,48 @@ watch(() => projectStore.workingDir, () => {
       {{ t("app.dir.removeRecent") }}
     </button>
   </BaseContextMenu>
+  <Transition name="workspace-picker-modal">
+    <div
+      v-if="workspacePickerOpen"
+      class="workspace-picker-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-picker-title"
+      @click.self="closeWorkspacePicker"
+    >
+      <div class="workspace-picker-modal">
+        <div class="workspace-picker-header">
+          <span id="workspace-picker-title" class="workspace-picker-title">
+            {{ t("app.dir.pickerTitle") }}
+          </span>
+          <button
+            class="workspace-picker-close"
+            :disabled="workspacePickerLoading"
+            :aria-label="t('common.cancel')"
+            @click="closeWorkspacePicker"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+              <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/>
+            </svg>
+          </button>
+        </div>
+        <p class="workspace-picker-desc">{{ t("app.dir.pickerMessage", workspacePickerSource ?? "") }}</p>
+        <ul class="workspace-picker-list">
+          <li v-for="candidate in workspacePickerCandidates" :key="candidate">
+            <button
+              type="button"
+              class="workspace-picker-item"
+              :disabled="workspacePickerLoading"
+              @click="pickWorkspaceCandidateFromApp(candidate)"
+            >
+              <span class="workspace-picker-item-label">{{ candidateLabelForPicker(candidate) }}</span>
+              <span class="workspace-picker-item-path">{{ candidate }}</span>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </Transition>
   <Transition name="workspace-switch-modal">
     <div
       v-if="pendingWorkspaceSwitchPath"
@@ -2235,5 +2360,141 @@ body.is-dragging-select-lock * {
 .split-layout.is-home-mode .chat-panel-left {
   flex: 1 1 100%;
   border-right: none;
+}
+
+.workspace-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 280;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.workspace-picker-modal {
+  width: 100%;
+  max-width: 520px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.workspace-picker-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.workspace-picker-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-color);
+  line-height: 1.3;
+}
+
+.workspace-picker-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.workspace-picker-close:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-color);
+}
+.workspace-picker-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspace-picker-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.workspace-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace-picker-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-color);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.workspace-picker-item:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  background: var(--hover-bg);
+}
+.workspace-picker-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.workspace-picker-item-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.workspace-picker-item-path {
+  font-family: var(--font-mono-identifier);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-picker-modal-enter-active,
+.workspace-picker-modal-leave-active {
+  transition: opacity 0.18s ease;
+}
+.workspace-picker-modal-enter-from,
+.workspace-picker-modal-leave-to {
+  opacity: 0;
+}
+.workspace-picker-modal-enter-active .workspace-picker-modal,
+.workspace-picker-modal-leave-active .workspace-picker-modal {
+  transition: transform 0.18s ease;
+}
+.workspace-picker-modal-enter-from .workspace-picker-modal,
+.workspace-picker-modal-leave-to .workspace-picker-modal {
+  transform: translateY(-8px);
 }
 </style>

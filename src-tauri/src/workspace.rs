@@ -10,24 +10,33 @@ pub struct WorkspaceConfig {
 }
 
 /// Workspace state. Splits the previously monolithic `working_dir` concept into:
-/// - `workspace_root`: user-selected canonical root. Knowledge / skill / memory
-///   are anchored here.
+/// - `workspace_root`: user-selected canonical root (may equal `unity_root` when
+///   the user picks the Unity project directly, or be a Unity parent directory
+///   when the picker resolves the actual project for them). Pure UI concept:
+///   drives picker / recent_dirs / workspace_id; **no project asset is stored
+///   here**.
 /// - `unity_root`: canonical Unity project root (resolved from `workspace_root`
-///   via `resolve_unity_project_path`). Unity integration (asset_db, C# LSP,
-///   native bridge, Unity monitor) is anchored here.
+///   via `resolve_unity_project_path`). All project assets — knowledge / skill /
+///   memory / sessions / config.json — live under `<unity_root>/Locus/`. Unity
+///   integration (asset_db, C# LSP, native bridge, Unity monitor) is also
+///   anchored here.
 ///
 /// During the migration window (`path` is still present), legacy code can keep
 /// reading `workspace.path` — it mirrors `unity_root`. Writes MUST go through
 /// [`Workspace::set_unity_root`] or [`Workspace::set_workspace_root`] so both
-/// fields stay in sync. The `path` field will be removed in P6 once all
-/// callers have migrated to `unity_root` / `workspace_root`.
+/// fields stay in sync. The `path` field will be removed once all callers have
+/// migrated to `unity_root` / `workspace_root`.
 pub struct Workspace {
-    /// User-selected canonical root. Knowledge base lives here.
+    /// User-selected canonical root. Drives picker / recent_dirs / workspace_id;
+    /// **not** a storage anchor.
     pub workspace_root: tokio::sync::RwLock<String>,
-    /// Resolved Unity project root. Unity integration lives here.
+    /// Resolved Unity project root. All project assets (knowledge / skill /
+    /// memory / sessions / config.json) live under `<unity_root>/Locus/`. Unity
+    /// integration is anchored here.
     pub unity_root: tokio::sync::RwLock<String>,
     /// **Deprecated alias** for `unity_root`. Retained so the ~223 legacy
-    /// `workspace.path.read().await` call sites keep compiling. Removed in P6.
+    /// `workspace.path.read().await` call sites keep compiling. Removed once
+    /// all callers have migrated to `unity_root`.
     #[allow(dead_code)]
     pub path: tokio::sync::RwLock<String>,
     pub workspace_id: tokio::sync::RwLock<Option<String>>,

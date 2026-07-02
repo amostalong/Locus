@@ -314,6 +314,9 @@
   "app.dir.runningConfirmWarning": "Streaming output and pending confirmations from the current round will end.",
   "app.dir.runningConfirmAction": "Stop and switch",
   "app.dir.runningCancelledNotice": "Cancelled {0} running sessions",
+  "app.dir.pickerTitle": "Select Unity project",
+  "app.dir.pickerMessage": "Multiple Unity projects were found under \"{0}\". Pick the one to open:",
+  "app.dir.notFoundMessage": "The selected directory is not a Unity project, and no Unity project was found nearby.",
   "app.close.runningConfirmTitle": "Close Locus",
   "app.close.runningConfirmMessage": "{0} tasks are still running. Closing Locus will stop them.",
   "app.close.runningConfirmWarning": "Streaming output and pending confirmations from the current round will end.",
@@ -3368,6 +3371,8 @@
   "onboarding.project.opening": "Opening...",
   "onboarding.project.selected": "Selected: {0}",
   "onboarding.project.invalid": "Not a valid Unity project directory",
+  "onboarding.project.pickerTitle": "Select Unity project",
+  "onboarding.project.pickerDesc": "Multiple Unity projects were found in this directory. Pick the one to open:",
   "onboarding.project.skipHint": "You can switch projects later from the workspace selector",
 
   "onboarding.plugin.title": "Install Unity Plugin",

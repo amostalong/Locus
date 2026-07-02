@@ -17,7 +17,8 @@ import {
 import { useAuthStore } from "../stores/auth";
 import { useModelStore } from "../stores/model";
 import { useUiStore } from "../stores/ui";
-import { setWorkingDir, getWorkingDir } from "../services/project";
+import { getWorkingDir } from "../services/project";
+import { useProjectStore } from "../stores/project";
 import { checkUnityPlugin, checkUnityPluginInstallPlan, installUnityPlugin } from "../services/unity";
 import { gitCheckUserConfig, gitInitUnity, gitProbe, gitSetUserConfig } from "../services/git";
 import { assetDbScanStart } from "../services/asset";
@@ -222,25 +223,82 @@ async function waitForProjectOpeningPaint() {
   });
 }
 
+const projectStore = useProjectStore();
+
+const pickerOpen = ref(false);
+const pickerCandidates = ref<string[]>([]);
+const pickerLoading = ref(false);
+
+function candidateLabel(path: string): string {
+  // Show last 2 path segments to keep the picker compact.
+  const normalized = path.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/);
+  return parts.slice(-2).join("/");
+}
+
+async function applyProjectPath(selected: string) {
+  projectError.value = "";
+  projectPath.value = selected;
+  projectValid.value = false;
+  pickerOpen.value = false;
+  projectOpening.value = true;
+  await waitForProjectOpeningPaint();
+  try {
+    const result = await projectStore.setWorkspace(selected);
+    if (result.kind === "picker") {
+      // Multi-Unity parent directory — show the picker so the user picks
+      // which project to switch to. Reset projectOpening first so the user
+      // can interact with the picker UI.
+      projectOpening.value = false;
+      pickerCandidates.value = result.candidates;
+      pickerOpen.value = true;
+      return;
+    }
+    projectPath.value = result.unityRoot;
+    projectValid.value = true;
+  } catch (e) {
+    projectError.value = normalizeAppError(e).message;
+    projectValid.value = false;
+  } finally {
+    projectOpening.value = false;
+  }
+}
+
+async function pickWorkspaceCandidate(candidate: string) {
+  pickerLoading.value = true;
+  try {
+    const result = await projectStore.setWorkspace(candidate);
+    if (result.kind === "picker") {
+      // Picker selected path was itself ambiguous (rare; only happens for
+      // very deep multi-project trees). Replace candidates and keep the
+      // modal open.
+      pickerCandidates.value = result.candidates;
+      return;
+    }
+    pickerOpen.value = false;
+    pickerCandidates.value = [];
+    projectPath.value = result.unityRoot;
+    projectValid.value = true;
+    projectError.value = "";
+  } catch (e) {
+    projectError.value = normalizeAppError(e).message;
+  } finally {
+    pickerLoading.value = false;
+  }
+}
+
+function cancelPicker() {
+  pickerOpen.value = false;
+  pickerCandidates.value = [];
+  pickerLoading.value = false;
+}
+
 async function browseProject() {
-  if (projectOpening.value) return;
+  if (projectOpening.value || pickerOpen.value) return;
   try {
     const selected = await open({ directory: true, multiple: false });
     if (selected && typeof selected === "string") {
-      projectError.value = "";
-      projectPath.value = selected;
-      projectValid.value = false;
-      projectOpening.value = true;
-      await waitForProjectOpeningPaint();
-      try {
-        projectPath.value = await setWorkingDir(selected);
-        projectValid.value = true;
-      } catch (e) {
-        projectError.value = normalizeAppError(e).message;
-        projectValid.value = false;
-      } finally {
-        projectOpening.value = false;
-      }
+      await applyProjectPath(selected);
     }
   } catch { /* cancelled */ }
 }
@@ -879,6 +937,33 @@ onUnmounted(() => {
         <button class="ob-btn primary" :disabled="projectOpening" @click="goNext">{{ t("onboarding.next") }}</button>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="pickerOpen" class="workspace-picker-overlay" role="dialog" aria-modal="true">
+        <div class="workspace-picker-modal">
+          <h3 class="workspace-picker-title">{{ t("onboarding.project.pickerTitle") }}</h3>
+          <p class="workspace-picker-desc">{{ t("onboarding.project.pickerDesc") }}</p>
+          <ul class="workspace-picker-list">
+            <li v-for="candidate in pickerCandidates" :key="candidate">
+              <button
+                type="button"
+                class="workspace-picker-item"
+                :disabled="pickerLoading"
+                @click="pickWorkspaceCandidate(candidate)"
+              >
+                <span class="workspace-picker-item-path">{{ candidate }}</span>
+                <span class="workspace-picker-item-label">{{ candidateLabel(candidate) }}</span>
+              </button>
+            </li>
+          </ul>
+          <div class="workspace-picker-actions">
+            <button class="ob-btn secondary" type="button" :disabled="pickerLoading" @click="cancelPicker">
+              {{ t("common.cancel") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <div v-else-if="step === 3" class="step-card">
       <h2 class="step-title">{{ t("onboarding.plugin.title") }}</h2>
@@ -1939,6 +2024,102 @@ onUnmounted(() => {
 }
 .status-row.compact {
   padding: 8px 12px;
+}
+
+.workspace-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.workspace-picker-modal {
+  width: 100%;
+  max-width: 520px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.workspace-picker-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-color);
+  margin: 0 0 8px;
+}
+
+.workspace-picker-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.workspace-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.workspace-picker-item {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-color);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.workspace-picker-item:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  background: var(--hover-bg);
+}
+
+.workspace-picker-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.workspace-picker-item-path {
+  font-family: var(--font-mono-identifier);
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-picker-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.workspace-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
 }
 
 </style>

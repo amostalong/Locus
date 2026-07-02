@@ -208,6 +208,46 @@ export const useProjectStore = defineStore("project", () => {
     return result;
   }
 
+  /// Resolve a user-selected path to a Unity project without mutating state.
+  /// Use this to decide whether to call `setWorkspace` directly or to pop a
+  /// picker first. Pure resolver — see `services/project.ts` for the IPC.
+  async function resolveUnityProjectPath(path: string) {
+    return projectService.resolveUnityProjectPath(path);
+  }
+
+  /// Switch Locus to the project at `path`. Accepts a Unity root or a
+  /// parent directory containing multiple Unity projects (in which case the
+  /// caller must handle the `picker` result by re-invoking with the chosen
+  /// candidate). On success, mirrors `set_workspace` IPC: the front-end sees
+  /// both `workspaceRoot` and `unityRoot` and updates `workingDir` accordingly.
+  ///
+  /// Returned union:
+  ///   - `{ kind: "applied"; workspaceRoot; unityRoot; resolutionKind }` —
+  ///     the workspace switched successfully; UI should refresh
+  ///   - `{ kind: "picker"; candidates }` — multiple Unity projects found;
+  ///     UI should pop a picker and re-invoke with the chosen candidate
+  async function setWorkspace(path: string): Promise<
+    | { kind: "applied"; workspaceRoot: string; unityRoot: string; resolutionKind: string }
+    | { kind: "picker"; candidates: string[] }
+  > {
+    const result = await projectService.setWorkspace(path);
+    if (result.resolutionKind === "pickerSelected") {
+      return { kind: "picker", candidates: result.candidates ?? [] };
+    }
+    resetUnityLaunchState();
+    workingDir.value = result.unityRoot;
+    unityConnectionStatus.value = null;
+    scanPhase.value = null;
+    lastScanStats.value = null;
+    scanInFlight = false;
+    return {
+      kind: "applied",
+      workspaceRoot: result.workspaceRoot,
+      unityRoot: result.unityRoot,
+      resolutionKind: result.resolutionKind,
+    };
+  }
+
   async function loadRecentDirs() {
     try {
       recentDirs.value = await projectService.listRecentDirs();
@@ -428,6 +468,8 @@ export const useProjectStore = defineStore("project", () => {
     isUnityProject,
     loadWorkingDir,
     setWorkingDir,
+    setWorkspace,
+    resolveUnityProjectPath,
     loadRecentDirs,
     removeRecentDir,
     openDirInFileExplorer,

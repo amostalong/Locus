@@ -29,12 +29,48 @@ export interface WorkspaceEntryStat {
   entryKind: WorkspaceEntryKind;
 }
 
+/// Result of `resolve_unity_project_path` — pure resolver, no state mutation.
+/// Front-end uses this to decide whether to call `setWorkspace` directly or
+/// to pop a picker first.
+export type ResolveUnityResult =
+  | { kind: "resolved"; unityRoot: string; levels: number }
+  | { kind: "picker"; candidates: string[] }
+  | { kind: "notFound" };
+
+/// Result of `set_workspace`. `migration` is always `null` — all project
+/// assets live under `<unity_root>/Locus/`, so switching workspace_root never
+/// requires data migration. The field is kept in the type for future-proofing.
+export interface SetWorkspaceResult {
+  workspaceRoot: string;
+  unityRoot: string;
+  /// "exact" | "walkedUp" | "pickerSelected"
+  resolutionKind: string;
+  migration: SetWorkspaceMigrationInfo | null;
+  /// Populated only when `resolutionKind === "pickerSelected"`.
+  candidates?: string[];
+}
+
+export interface SetWorkspaceMigrationInfo {
+  source: string;
+  destination: string;
+  fileCount: number;
+  bytes: number;
+}
+
 export function getWorkingDir(): Promise<string> {
   return ipcInvoke<string>("get_working_dir");
 }
 
 export function setWorkingDir(path: string): Promise<string> {
   return ipcInvoke<string>("set_working_dir", { path });
+}
+
+export function setWorkspace(path: string): Promise<SetWorkspaceResult> {
+  return ipcInvoke<SetWorkspaceResult>("set_workspace", { path });
+}
+
+export function resolveUnityProjectPath(path: string): Promise<ResolveUnityResult> {
+  return ipcInvoke<ResolveUnityResult>("resolve_unity_project_path_cmd", { path });
 }
 
 export function listRecentDirs(): Promise<string[]> {

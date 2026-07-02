@@ -540,10 +540,13 @@ export function useAppBootstrap() {
   }
 
   // -- Workspace management --
-  async function applyWorkingDir(path: string) {
-    const switchStartedAt = workspaceSwitchNowMs();
-    console.info(`[workspace-switch] phase=apply_start target=${path}`);
-    clearWarmup(); // invalidate warmup cache for previous workingDir
+  /**
+   * Shared prelude for every workspace switch: invalidate warmup caches,
+   * reset system notifications, drop per-workspace fetched state. Runs
+   * synchronously before the IPC call so subsequent reads see clean state.
+   */
+  function runWorkspaceSwitchPrelude() {
+    clearWarmup();
     lastAutoOpenedLexicalProgressRun = "";
     resetSystemNotificationState();
     _wpCollab = null;
@@ -551,38 +554,102 @@ export function useAppBootstrap() {
     _wpAsset = null;
     _wpAgent = null;
     _wpSettings = null;
+  }
+
+  /**
+   * Shared postlude: refresh everything that depends on the new workspace.
+   * Called after a successful set_working_dir / set_workspace IPC, both
+   * from the legacy applyWorkingDir path and from the new
+   * applyWorkspacePath path. `target` is the user-facing path (workspace_root
+   * or unity_root depending on the call site) used only for trace logging.
+   */
+  async function runWorkspaceSwitchPostlude(target: string) {
+    chatStore.newChat({ persistSelection: false });
+    console.info(`[workspace-switch] phase=new_chat_done target=${target}`);
+    await Promise.all([
+      measureWorkspaceSwitchAsync("refresh_sessions", () => chatStore.refreshSessions(), {
+        target,
+      }),
+      measureWorkspaceSwitchAsync("load_recent_dirs", () => projectStore.loadRecentDirs(), {
+        target,
+      }),
+      measureWorkspaceSwitchAsync("load_agents", () => agentStore.loadAgents(), { target }),
+      measureWorkspaceSwitchAsync(
+        "check_unity_connection",
+        () => projectStore.checkUnityConnection(),
+        { target },
+      ),
+      measureWorkspaceSwitchAsync("check_unity_plugin", () => projectStore.checkUnityPlugin(), {
+        target,
+      }),
+      measureWorkspaceSwitchAsync(
+        "load_asset_db_status",
+        () => projectStore.loadAssetDbStatus(),
+        { target },
+      ),
+      measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target }),
+      measureWorkspaceSwitchAsync(
+        "load_workspace_model_override",
+        () => modelStore.loadWorkspaceDefaults(),
+        { target },
+      ),
+    ]);
+  }
+
+  /**
+   * Back-compat path used at app startup to rehydrate `working_dir.txt`.
+   * The IPC is the legacy `set_working_dir` (single-root semantics) — new
+   * user-initiated switches should go through `applyWorkspacePath` instead
+   * so the picker can intercept multi-Unity parent directories.
+   */
+  async function applyWorkingDir(path: string) {
+    const switchStartedAt = workspaceSwitchNowMs();
+    console.info(`[workspace-switch] phase=apply_start target=${path} via=set_working_dir`);
+    runWorkspaceSwitchPrelude();
     try {
       await measureWorkspaceSwitchAsync(
         "set_working_dir",
         () => projectStore.setWorkingDir(path),
         { target: path },
       );
-      chatStore.newChat({ persistSelection: false });
-      console.info(`[workspace-switch] phase=new_chat_done target=${path}`);
-      await Promise.all([
-        measureWorkspaceSwitchAsync("refresh_sessions", () => chatStore.refreshSessions(), {
-          target: path,
-        }),
-        measureWorkspaceSwitchAsync("load_recent_dirs", () => projectStore.loadRecentDirs(), {
-          target: path,
-        }),
-        measureWorkspaceSwitchAsync("load_agents", () => agentStore.loadAgents(), {
-          target: path,
-        }),
-        measureWorkspaceSwitchAsync(
-          "check_unity_connection",
-          () => projectStore.checkUnityConnection(),
-          { target: path },
-        ),
-        measureWorkspaceSwitchAsync("check_unity_plugin", () => projectStore.checkUnityPlugin(), {
-          target: path,
-        }),
-        measureWorkspaceSwitchAsync("load_asset_db_status", () => projectStore.loadAssetDbStatus(), {
-          target: path,
-        }),
-        measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target: path }),
-        measureWorkspaceSwitchAsync("load_workspace_model_override", () => modelStore.loadWorkspaceDefaults(), { target: path }),
-      ]);
+      await runWorkspaceSwitchPostlude(path);
+    } finally {
+      console.info(
+        `[workspace-switch] phase=apply_done elapsed_ms=${Math.round(
+          workspaceSwitchNowMs() - switchStartedAt,
+        )} target=${path}`,
+      );
+    }
+  }
+
+  /**
+   * New switch path that drives the structured `set_workspace` IPC. Returns
+   * the same union the store exposes so App.vue can decide whether to
+   * surface the picker UI. `resolutionKind` is appended to the trace log
+   * for parity with the back-end log (`[workspace-switch] phase=apply_start
+   * ... resolution_kind=...`).
+   */
+  async function applyWorkspacePath(
+    path: string,
+    resolutionKind: string,
+  ): Promise<
+    | { kind: "applied"; workspaceRoot: string; unityRoot: string; resolutionKind: string }
+    | { kind: "picker"; candidates: string[] }
+  > {
+    const switchStartedAt = workspaceSwitchNowMs();
+    console.info(
+      `[workspace-switch] phase=apply_start target=${path} resolution_kind=${resolutionKind} via=set_workspace`,
+    );
+    runWorkspaceSwitchPrelude();
+    try {
+      const result = await projectStore.setWorkspace(path);
+      if (result.kind === "picker") {
+        // No state was applied; runWorkspaceSwitchPostlude is intentionally
+        // skipped. The store has NOT touched `workingDir` yet.
+        return result;
+      }
+      await runWorkspaceSwitchPostlude(result.unityRoot);
+      return result;
     } finally {
       console.info(
         `[workspace-switch] phase=apply_done elapsed_ms=${Math.round(
@@ -636,6 +703,7 @@ export function useAppBootstrap() {
     registerListeners,
     cleanup,
     applyWorkingDir,
+    applyWorkspacePath,
     refreshAfterSettings,
     onOnboardingCompleted,
   };

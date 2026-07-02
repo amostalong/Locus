@@ -738,19 +738,34 @@ pub async fn set_working_dir(
 }
 
 // ============================================================================
-// set_workspace / resolve_unity_project_path (P1 of workspace_root vs
+// set_workspace / resolve_unity_project_path (P1+P5 of workspace_root vs
 // unity_root refactor — see `locus-workspace-unity-roots.md` topic in
 // agent memory + scratchpad design).
 //
-// P1 strategy: introduce the new IPC names with behavior identical to
-// `set_working_dir`, so the front-end can migrate incrementally without
-// a coordinated cutover. P5 replaces the body of `set_workspace` with
-// the full resolve → handle picker → migrate → split-roots flow and
-// changes its return type from `String` to `SetWorkspaceResult`.
+// P5 strategy (revised after the "knowledge anchors at unity_root" decision):
+//   - `set_workspace(path)` accepts an arbitrary user-selected directory
+//     (Unity root, Unity parent with multiple projects, or anything else).
+//   - It calls `resolve_unity_project_path` first.
+//   - Resolved { unity_root, kind: exact|walkedUp } → forwards the resolved
+//     Unity root to `set_working_dir` (which performs the actual workspace
+//     switch: clear watchers, init knowledge index, etc.) and additionally
+//     stores the user-selected path as `workspace_root` for picker /
+//     recent_dirs bookkeeping.
+//   - Picker { candidates } → returns a `SetWorkspaceResult` with
+//     `resolution_kind = "pickerSelected"` and the candidates list so the
+//     front-end can pop a picker UI and re-invoke with the chosen path.
+//   - NotFound → returns an `AppError` (the front-end shows it as a toast).
+//
+// Storage anchor policy (2026-07-02 revision): knowledge / skill / memory /
+// sessions / config.json all anchor at `unity_root` (NOT workspace_root),
+// so `SetWorkspaceResult.migration` is permanently `None` — there is
+// nothing to migrate when the user switches workspace_root.
 // ============================================================================
 
-/// Result returned by `set_workspace` once P5 lands. In P1 the type is
-/// defined but the command still returns `String` for back-compat.
+/// Result returned by `set_workspace`. All project assets
+/// (knowledge / skill / memory / sessions / config) live under
+/// `unity_root/Locus/`, so there is no data to migrate between roots —
+/// `migration` is always `None`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetWorkspaceResult {
@@ -758,15 +773,20 @@ pub struct SetWorkspaceResult {
     pub unity_root: String,
     /// One of: "exact" | "walkedUp" | "pickerSelected".
     pub resolution_kind: String,
+    /// Always `None`. Kept in the type so the front-end can use a single
+    /// success path; reserved for the day someone re-introduces cross-root
+    /// storage (e.g. project-shared knowledge under workspace_root).
     pub migration: Option<MigrationInfo>,
+    /// Populated only when `resolution_kind == "pickerSelected"` so the
+    /// front-end can drive the picker UI without a second `resolve` call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationInfo {
-    /// Old path (the pre-migration `unity_root/Locus/knowledge`).
     pub source: String,
-    /// New path (post-migration `workspace_root/Locus/knowledge`).
     pub destination: String,
     pub file_count: u32,
     pub bytes: u64,
@@ -783,20 +803,10 @@ pub async fn resolve_unity_project_path_cmd(
     crate::workspace::resolve_unity_project_path(&path)
 }
 
-/// **P1 stub** — forwards to `set_working_dir` for behavior parity.
-///
-/// P5 will replace this body with:
-/// 1. Call `resolve_unity_project_path_cmd` on `path`.
-/// 2. If `Picker` → return `SetWorkspaceResult` with `resolution_kind =
-///    "pickerSelected"` and `candidates` filled in (the front-end picks
-///    one and re-invokes).
-/// 3. If `Resolved` → call existing `set_working_dir` flow against
-///    `unity_root`, then `workspace.set_workspace_root(user_root)`,
-///    then run the data-migration step.
-/// 4. Return `SetWorkspaceResult` instead of `String`.
-///
-/// Until then, the function signature is identical to `set_working_dir`
-/// so the macro accepts all required Tauri states.
+/// Switch Locus to the Unity project rooted at `path` (or the project the
+/// resolver picks from `path`). Returns the canonical split-root result
+/// for the front-end to update its UI; the actual asset_db / LSP /
+/// knowledge_index state machine lives in `set_working_dir`.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn set_workspace(
@@ -819,34 +829,77 @@ pub async fn set_workspace(
     app_agent_dir: State<'_, crate::AppAgentDir>,
     config: State<'_, Arc<crate::config::AppConfig>>,
     app_handle: AppHandle,
-) -> Result<String, AppError> {
-    eprintln!(
-        "[Locus] set_workspace (P1 stub) called with path={}; delegating to set_working_dir. \
-         P5 will replace this with the resolve→migrate→split flow.",
-        path
-    );
-    set_working_dir(
-        path,
-        workspace,
-        unity_monitor,
-        ref_graph_state,
-        watcher_handle,
-        knowledge_watcher_handle,
-        last_scan_info,
-        scan_phase_state,
-        scan_task_state,
-        reconcile_task_state,
-        preview_cache,
-        dir_entries_cache,
-        watcher_tuning,
-        knowledge_index_state,
-        app_knowledge_dir,
-        registry,
-        app_agent_dir,
-        config,
-        app_handle,
-    )
-    .await
+) -> Result<SetWorkspaceResult, AppError> {
+    let path = path.trim().to_string();
+    if path.is_empty() {
+        return Err("Path cannot be empty".to_string().into());
+    }
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("Directory not found: {}", path).into());
+    }
+
+    let resolution = crate::workspace::resolve_unity_project_path(&path);
+    match resolution {
+        crate::workspace::ResolveUnityResult::Picker { candidates } => Ok(SetWorkspaceResult {
+            workspace_root: path,
+            unity_root: String::new(),
+            resolution_kind: "pickerSelected".to_string(),
+            migration: None,
+            candidates: Some(candidates),
+        }),
+        crate::workspace::ResolveUnityResult::Resolved { unity_root, levels } => {
+            let resolution_kind = if levels == 0 { "exact" } else { "walkedUp" };
+
+            // Forward the resolved Unity root to the legacy switcher so all
+            // asset_db / LSP / knowledge_index state transitions stay in one
+            // place. Then remember the user-selected path separately for the
+            // picker / recent_dirs.
+            set_working_dir(
+                unity_root.clone(),
+                workspace.clone(),
+                unity_monitor,
+                ref_graph_state,
+                watcher_handle,
+                knowledge_watcher_handle,
+                last_scan_info,
+                scan_phase_state,
+                scan_task_state,
+                reconcile_task_state,
+                preview_cache,
+                dir_entries_cache,
+                watcher_tuning,
+                knowledge_index_state,
+                app_knowledge_dir,
+                registry,
+                app_agent_dir,
+                config,
+                app_handle,
+            )
+            .await?;
+
+            workspace.set_workspace_root(path.clone()).await;
+
+            eprintln!(
+                "[workspace-switch] set_workspace completed: workspace_root={} unity_root={} kind={}",
+                path, unity_root, resolution_kind
+            );
+
+            Ok(SetWorkspaceResult {
+                workspace_root: path,
+                unity_root,
+                resolution_kind: resolution_kind.to_string(),
+                migration: None,
+                candidates: None,
+            })
+        }
+        crate::workspace::ResolveUnityResult::NotFound => Err(AppError::new(
+            "workspace.not_a_unity_project",
+            format!(
+                "{} is not a Unity project, and no Unity project was found nearby.",
+                path
+            ),
+        )),
+    }
 }
 
 const MAX_RECENT_DIRS: usize = 8;

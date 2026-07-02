@@ -314,6 +314,9 @@
   "app.dir.runningConfirmWarning": "当前轮的流式输出与待确认步骤会结束。",
   "app.dir.runningConfirmAction": "终止并切换",
   "app.dir.runningCancelledNotice": "已取消 {0} 个进行中的会话",
+  "app.dir.pickerTitle": "选择 Unity 项目",
+  "app.dir.pickerMessage": "在 “{0}” 下找到多个 Unity 项目，请选择要打开的项目：",
+  "app.dir.notFoundMessage": "所选目录不是 Unity 项目，也未在附近找到 Unity 项目",
   "app.close.runningConfirmTitle": "关闭 Locus",
   "app.close.runningConfirmMessage": "当前有 {0} 个任务正在运行。关闭 Locus 会终止这些任务。",
   "app.close.runningConfirmWarning": "当前轮的流式输出与待确认步骤会结束。",
@@ -3362,6 +3365,8 @@
   "onboarding.project.opening": "正在打开...",
   "onboarding.project.selected": "已选择：{0}",
   "onboarding.project.invalid": "不是有效的 Unity 项目目录",
+  "onboarding.project.pickerTitle": "选择 Unity 项目",
+  "onboarding.project.pickerDesc": "在该目录下找到了多个 Unity 项目，请选择要打开的项目：",
   "onboarding.project.skipHint": "可以稍后在顶部工作区选择器中切换",
 
   "onboarding.plugin.title": "安装 Unity 插件",
