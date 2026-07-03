@@ -51,9 +51,11 @@ function groupedAllModels(): ModelGroup[] {
   const groups: ModelGroup[] = [];
   for (const provider of visibleProviderOrder) {
     const models = map.get(provider);
-    if (models && models.length > 0) {
-      groups.push({ provider, label: providerLabel(provider), models });
-    }
+    if (!models || models.length === 0) continue;
+    const groupModels = provider === "custom"
+      ? [...models].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+      : models;
+    groups.push({ provider, label: providerLabel(provider), models: groupModels });
   }
   return groups;
 }

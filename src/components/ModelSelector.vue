@@ -63,13 +63,15 @@ const groupedModels = computed<ProviderGroup[]>(() => {
   const groups: ProviderGroup[] = [];
   for (const provider of visibleProviderOrder) {
     const models = map.get(provider);
-    if (models && models.length > 0) {
-      groups.push({
-        provider,
-        label: providerLabels.value[provider] || provider,
-        models,
-      });
-    }
+    if (!models || models.length === 0) continue;
+    const groupModels = provider === "custom"
+      ? [...models].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+      : models;
+    groups.push({
+      provider,
+      label: providerLabels.value[provider] || provider,
+      models: groupModels,
+    });
   }
   return groups;
 });
