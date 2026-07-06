@@ -164,6 +164,10 @@ function disposeAllMonacoRegistrations() {
 function syncModel() {
   if (!editor) return;
   const file = editorStore.active;
+  console.log(
+    `[tab-switch] syncModel enter id=${file?.id ?? "<none>"} rel=${file?.relPath ?? "<none>"}`,
+  );
+  const startedAt = performance.now();
   if (file) {
     if (editor.getModel() !== file.model) {
       // MinimapTokensColorTracker reads the color-map synchronously inside
@@ -172,11 +176,18 @@ function syncModel() {
       ensureColorMapReady();
       try {
         editor.setModel(file.model);
+        console.log(
+          `[tab-switch] syncModel setModel done in ${(performance.now() - startedAt).toFixed(1)}ms`,
+        );
       } catch (e) {
         console.warn("[editor] setModel failed, retrying once:", e);
         ensureColorMapReady();
         try { editor.setModel(file.model); } catch {}
       }
+    } else {
+      console.log(
+        `[tab-switch] syncModel same-model skip in ${(performance.now() - startedAt).toFixed(1)}ms`,
+      );
     }
     editor.updateOptions({ readOnly: !!file.readOnly });
   } else {
@@ -186,6 +197,9 @@ function syncModel() {
   refreshEnclosingContext();
   refreshPreprocessorDimming();
   refreshCsharpFieldColoring();
+  console.log(
+    `[tab-switch] syncModel full exit in ${(performance.now() - startedAt).toFixed(1)}ms`,
+  );
 }
 
 function applyTheme() {

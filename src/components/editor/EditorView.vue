@@ -75,6 +75,8 @@ function leafName(relPath: string): string {
 }
 
 function handleSelectTab(id: string) {
+  const prev = editorStore.activeFileId;
+  console.log(`[tab-switch] click id=${id} prev=${prev ?? "<none>"}`);
   editorStore.setActive(id);
 }
 
