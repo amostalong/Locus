@@ -444,6 +444,8 @@ pub fn run() {
                 config.unity_inline_force_evaluate_enabled(),
             );
             code_tools::initialize(config.code_analysis_tools());
+            llm::retry::initialize(config.llm_retry_max_attempts());
+            llm::think_tag_filter::initialize(config.llm_strip_inline_think_tags());
             startup_for_setup.mark("setup_config_ready");
 
             // Load OpenRouter API key from OS keychain only.
@@ -1307,12 +1309,19 @@ pub fn run() {
             commands::rollback_session_to_message,
             commands::undo_perform,
             commands::undo_perform_to_message,
+            commands::undo_revert_file,
             commands::undo_preview,
             commands::undo_list,
             commands::undo_check_conflicts,
             commands::undo_check_dirty,
             commands::get_debug_mode,
             commands::set_debug_mode,
+            commands::get_llm_retry_max_attempts,
+            commands::set_llm_retry_max_attempts,
+            commands::get_subagent_max_depth,
+            commands::set_subagent_max_depth,
+            commands::get_subagent_max_concurrent,
+            commands::set_subagent_max_concurrent,
             commands::get_file_tool_workspace_boundary,
             commands::set_file_tool_workspace_boundary,
             commands::get_tool_permission_mode,

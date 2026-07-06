@@ -288,7 +288,7 @@ export function useAppBootstrap() {
     });
   }
 
-  function preloadTabsInBackground() {
+  function preloadTabsInBackground(viewLoaders: Array<() => Promise<void>> = []) {
     markStartupPhase("preload_tabs_schedule_start");
     const schedule = (fn: () => void) => {
       if ("requestIdleCallback" in window) {
@@ -302,19 +302,25 @@ export function useAppBootstrap() {
       markStartupPhase("preload_tabs_task_start");
       const warmupGeneration = setScope(projectStore.workingDir);
 
-      // Stage 1: chunk prefetch — 2 concurrent (bottleneck is parse/eval, not download)
+      // Stage 1: chunk prefetch — 2 concurrent (bottleneck is parse/eval, not download).
+      // Prefer the lazy-view loaders (ensureLoaded) over bare imports: they also
+      // fill the view's `component` ref, so the first click on a tab mounts it
+      // immediately instead of flashing the "loading" placeholder for a frame.
       markStartupPhase("preload_tabs_chunks_start");
-      await runQueue(
-        [
-          () => import("../components/SettingsView.vue"),
-          () => import("../components/editor/EditorView.vue"),
-          () => import("../components/CollabView.vue"),
-          () => import("../components/KnowledgeView.vue"),
-          () => import("../components/AssetView.vue"),
-          () => import("../components/AgentView.vue"),
-        ],
-        2,
-      ).catch(() => {});
+      // Fork pass-through: the App.vue caller is expected to supply the
+      // lazy-view loaders (settingsView/collabView/knowledgeView/assetView/
+      // agentView/editorView ensureLoaded). Falling back to bare imports
+      // is the upstream v0.5.5 safety net for any other call site.
+      const chunkTasks: Array<() => Promise<unknown>> = viewLoaders.length
+        ? viewLoaders
+        : [
+            () => import("../components/SettingsView.vue"),
+            () => import("../components/CollabView.vue"),
+            () => import("../components/KnowledgeView.vue"),
+            () => import("../components/AssetView.vue"),
+            () => import("../components/AgentView.vue"),
+          ];
+      await runQueue(chunkTasks, 2).catch(() => {});
       markStartupPhase("preload_tabs_chunks_done");
 
       // Stage 2: data warmup — 2 concurrent
@@ -662,7 +668,13 @@ export function useAppBootstrap() {
   // -- Settings callbacks --
   // 设置项改动已通过各自事件即时生效；离开设置页时再做一次兜底刷新（原 closeSettings 的副作用）。
   async function refreshAfterSettings() {
-    await authStore.checkAuth();
+    // Fallback refresh only — real auth/config changes are already pushed via
+    // SettingsView's auth-changed / codex-transport-changed events. A light
+    // status probe is enough here; the full checkAuth() (providers + codex)
+    // costs three IPC round-trips on every settings exit.
+    await authStore.checkAuthLight();
+    // P5 fork: also reload per-workspace model defaults so the override
+    // changes the user just made in Settings are picked up here.
     await modelStore.loadWorkspaceDefaults();
     await modelStore.loadCodexAvailableModels();
     modelStore.resolveSelectedModel(true);
