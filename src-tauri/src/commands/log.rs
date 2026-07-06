@@ -72,27 +72,91 @@ pub(crate) fn sanitize_frontend_log_line(line: &FrontendLogLine) -> AppLogEntry 
 /// Frontend console lines are mirrored here so they land in the persistent
 /// log file next to backend output. They intentionally do not re-enter the
 /// in-memory store: the debug console already holds them on the JS side.
+///
+/// Additionally, each forwarded line is re-emitted via `tracing::*!` so the
+/// `bun tauri dev` PowerShell window sees the JS-side diagnostics live,
+/// matching the level mapping used by `debugConsole.ts` (log→info,
+/// info→info, warn→warn, error→error, debug→debug). `allow_level` gates
+/// DEBUG/TRACE through the existing `LOCUS_DEBUG` env flag.
 #[tauri::command]
 pub async fn append_frontend_logs(
     entries: Vec<FrontendLogLine>,
     dropped_count: Option<u64>,
     logs: State<'_, Arc<AppLogStore>>,
 ) -> Result<(), AppError> {
+    // Diagnostic probe: emitted unconditionally before any branching so we
+    // can confirm whether the Tauri command is being invoked from the
+    // webview at all. If this never appears in the terminal, the JS side
+    // never reaches `invoke("append_frontend_logs", ...)` and the problem
+    // is upstream (debugConsole.ts capture / batch flush / IPC plumbing).
+    eprintln!(
+        "[FE_LOG] PROBE append_frontend_logs called count={} dropped={:?} file_sink={}",
+        entries.len(),
+        dropped_count,
+        logs.file_sink().is_some(),
+    );
+
     let Some(sink) = logs.file_sink() else {
+        eprintln!("[FE_LOG] PROBE early-return: file_sink is None");
         return Ok(());
     };
     if let Some(dropped) = dropped_count.filter(|count| *count > 0) {
-        sink.enqueue(sanitize_frontend_log_line(&FrontendLogLine {
+        let line = FrontendLogLine {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             level: "warn".to_string(),
             module: "debugConsole".to_string(),
             message: format!("{dropped} frontend log line(s) dropped before forwarding"),
-        }));
+        };
+        sink.enqueue(sanitize_frontend_log_line(&line));
+        tracing::warn!("[debugConsole] {dropped} frontend log line(s) dropped before forwarding");
     }
     for line in entries.iter().take(FRONTEND_LOG_MAX_BATCH) {
-        sink.enqueue(sanitize_frontend_log_line(line));
+        let sanitized = sanitize_frontend_log_line(line);
+        sink.enqueue(sanitized.clone());
+        emit_frontend_to_tracing(&sanitized);
     }
     Ok(())
+}
+
+/// Re-emit a sanitized frontend log line through `tracing::*!` so the Rust
+/// tracing layer (and therefore the `bun tauri dev` terminal) sees it. The
+/// level string is normalized to lowercase by `sanitize_frontend_log_line`,
+/// so the match is exhaustive over the documented set.
+///
+/// Also writes a tagged line to **stderr** (`[FE_LOG] ...`). `tracing`'s
+/// default fmt writer targets stdout, which `tauri dev` on Windows does
+/// not always forward to the parent PowerShell terminal; stderr is
+/// reliably inherited from the child process. The `FE_LOG` prefix makes
+/// it greppable and lets you verify the function is being invoked even
+/// if tracing ends up filtered or routed elsewhere.
+fn emit_frontend_to_tracing(entry: &AppLogEntry) {
+    let prefixed = format!("[{}] {}", entry.module, entry.message);
+    match entry.level.as_str() {
+        "error" => {
+            tracing::error!("{prefixed}");
+            eprintln!("[FE_LOG] ERROR {prefixed}");
+        }
+        "warn" => {
+            tracing::warn!("{prefixed}");
+            eprintln!("[FE_LOG] WARN  {prefixed}");
+        }
+        "info" => {
+            tracing::info!("{prefixed}");
+            eprintln!("[FE_LOG] INFO  {prefixed}");
+        }
+        "debug" => {
+            tracing::debug!("{prefixed}");
+            eprintln!("[FE_LOG] DEBUG {prefixed}");
+        }
+        "trace" => {
+            tracing::trace!("{prefixed}");
+            eprintln!("[FE_LOG] TRACE {prefixed}");
+        }
+        _ => {
+            tracing::info!("{prefixed}");
+            eprintln!("[FE_LOG] INFO  {prefixed}");
+        }
+    }
 }
 
 /// Flushes pending lines and reveals `locus.log` in the file manager.
