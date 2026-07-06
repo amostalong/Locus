@@ -19,12 +19,25 @@ function defaults(partial?: Partial<ModelDefaults>): ModelDefaults {
 }
 
 describe("pickPreferredModelId", () => {
-  it("prefers mainModel when it is available", () => {
+  it("prefers last remembered model over mainModel when both are available", () => {
+    // The user's manual selection (lastModelId) must beat the settings
+    // default — otherwise re-resolving on settings-tab exit would clobber
+    // the model the user explicitly picked in the chat view.
     expect(
       pickPreferredModelId(
         models,
         defaults({ mainModel: "openai/gpt-5.5" }),
         "claude-sonnet-5",
+      ),
+    ).toBe("claude-sonnet-5");
+  });
+
+  it("falls back to mainModel when last remembered model is unavailable", () => {
+    expect(
+      pickPreferredModelId(
+        models,
+        defaults({ mainModel: "openai/gpt-5.5" }),
+        "claude-sonnet-5/missing",
       ),
     ).toBe("openai/gpt-5.5");
   });
