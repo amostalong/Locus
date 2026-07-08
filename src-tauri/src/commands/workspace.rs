@@ -844,6 +844,7 @@ pub async fn set_workspace(
     registry: State<'_, crate::AgentDefRegistryState>,
     app_agent_dir: State<'_, crate::AppAgentDir>,
     config: State<'_, Arc<crate::config::AppConfig>>,
+    local_reference_watcher_state: State<'_, crate::local_docs::LocalReferenceWatcherState>,
     app_handle: AppHandle,
 ) -> Result<SetWorkspaceResult, AppError> {
     let path = path.trim().to_string();
@@ -889,6 +890,7 @@ pub async fn set_workspace(
                 registry,
                 app_agent_dir,
                 config,
+                local_reference_watcher_state,
                 app_handle,
             )
             .await?;
