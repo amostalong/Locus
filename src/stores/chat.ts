@@ -1,4 +1,4 @@
-import { ref, shallowRef, computed } from "vue";
+import { ref, shallowRef, computed, markRaw } from "vue";
 import { defineStore } from "pinia";
 import { useModelStore } from "./model";
 import { useAgentStore } from "./agent";
@@ -17,6 +17,8 @@ import {
   type StreamMutation,
 } from "../composables/useStreamReducer";
 import { resolveToolCallDisplayShape } from "../composables/toolCallBatches";
+import { StreamingTextChunks } from "../composables/streamingTextChunks";
+import { useThrottledStreamingText } from "../composables/streamingRenderThrottle";
 import { hydrateChatMessagesIntent, withClientMessageId } from "../composables/chatInputIntents";
 import { buildUserMessageDraft } from "../composables/chatMessageDraft";
 import type { SessionScrollState } from "../composables/chatScrollState";
@@ -304,6 +306,22 @@ export const useChatStore = defineStore("chat", () => {
   const streamingText = shallowRef("");
   const rawStreamText = shallowRef("");
   const streamingThinking = shallowRef("");
+  // Chunked mirrors of the streaming text refs. High-frequency consumers
+  // (thinking panel, transcript renderer, typewriter pump) read these through
+  // their stable identity so a delta never re-materializes the accumulated
+  // string and never propagates a new prop value through the component tree;
+  // the string refs stay authoritative for per-round reads (finalize,
+  // snapshots).
+  // markRaw is redundant at runtime (the class self-marks) but carries the
+  // Raw<T> type marker so pinia's unwrap inference leaves the version ref
+  // intact for consumers.
+  const thinkingStream = markRaw(new StreamingTextChunks());
+  const textStream = markRaw(new StreamingTextChunks());
+  // The typewriter's visible prefix as a chunk stream. Single-part rounds
+  // render this through the incremental renderer, so the animation advances
+  // without a growing string prop re-rendering the transcript.
+  const typedStream = markRaw(new StreamingTextChunks());
+  const livePartStreams = markRaw(new Map<string, StreamingTextChunks>());
   const streamSequence = ref(0);
   const streamingTextOrder = ref(0);
   const thinkingOrder = ref(0);
@@ -572,9 +590,24 @@ export const useChatStore = defineStore("chat", () => {
     await loadSessionState(normalizedSessionId);
   }
 
+  function ensureLivePartStream(partId: string): StreamingTextChunks {
+    let stream = livePartStreams.get(partId);
+    if (!stream) {
+      stream = new StreamingTextChunks();
+      livePartStreams.set(partId, stream);
+    }
+    return stream;
+  }
+
+  function clearLivePartStreams() {
+    livePartStreams.clear();
+  }
+
   function resetStreamRuntimeState() {
     resetStreamAnim();
     streamingThinking.value = "";
+    thinkingStream.reset();
+    clearLivePartStreams();
     streamSequence.value = 0;
     streamingTextOrder.value = 0;
     thinkingOrder.value = 0;
@@ -669,12 +702,28 @@ export const useChatStore = defineStore("chat", () => {
 
     resetStreamAnim();
     rawStreamText.value = runtime.streamingText ?? "";
+    if (rawStreamText.value) {
+      textStream.append(rawStreamText.value);
+      typedStream.append(rawStreamText.value);
+    }
     streamingText.value = rawStreamText.value;
     streamingThinking.value = runtime.streamingThinking ?? "";
+    thinkingStream.reset();
+    if (streamingThinking.value) {
+      thinkingStream.append(streamingThinking.value);
+    }
     streamSequence.value = runtime.streamSequence ?? 0;
     streamingTextOrder.value = runtime.streamingTextOrder ?? 0;
     thinkingOrder.value = runtime.thinkingOrder ?? 0;
     liveRenderParts.value = cloneRuntimeJson(runtime.liveRenderParts ?? []);
+    // Restored parts carry their accumulated content as the baseline; fresh
+    // streams collect only post-restore growth on top of it.
+    clearLivePartStreams();
+    for (const part of liveRenderParts.value) {
+      if (part.kind === "text" || part.kind === "thinking") {
+        ensureLivePartStream(part.id);
+      }
+    }
     isThinking.value = runtime.isThinking === true;
     thinkingStartTime.value = isThinking.value ? Date.now() : 0;
     thinkingDuration.value = runtime.thinkingDuration ?? 0;
@@ -958,7 +1007,10 @@ export const useChatStore = defineStore("chat", () => {
       return;
     }
     streamAnimLastTime = ts;
-    const target = rawStreamText.value;
+    // Advance from the chunked mirror: appending a ranged slice costs
+    // O(advance), where rebuilding the prefix via substring on the string ref
+    // would flatten and copy the whole accumulated text every tick.
+    const target = textStream;
     const current = streamingText.value;
     if (current.length >= target.length) {
       streamAnimFrame = null;
@@ -966,7 +1018,9 @@ export const useChatStore = defineStore("chat", () => {
     }
     const remaining = target.length - current.length;
     const speed = Math.max(2, Math.ceil(remaining * 0.35));
-    streamingText.value = target.substring(0, Math.min(current.length + speed, target.length));
+    const piece = target.readRange(current.length, current.length + speed);
+    streamingText.value = current + piece;
+    typedStream.append(piece);
     streamAnimFrame = requestAnimationFrame(streamAnimTick);
   }
 
@@ -978,7 +1032,9 @@ export const useChatStore = defineStore("chat", () => {
 
   function resetStreamAnim() {
     rawStreamText.value = "";
+    textStream.reset();
     streamingText.value = "";
+    typedStream.reset();
     if (streamAnimFrame !== null) {
       cancelAnimationFrame(streamAnimFrame);
       streamAnimFrame = null;
@@ -991,6 +1047,26 @@ export const useChatStore = defineStore("chat", () => {
       streamAnimFrame = null;
     }
   }
+
+  // Typewriter output coalesced to the shared streaming cadence. Views render
+  // this instead of `streamingText` so the 25ms animation pump re-renders the
+  // (large) chat view at most once per throttle window instead of at 40fps.
+  const throttledStreamingText = useThrottledStreamingText(() => streamingText.value);
+  const displayedStreamingText = throttledStreamingText.text;
+
+  // Stable boolean over the per-delta thinking ref: consumers binding this
+  // only re-render when thinking starts or resets, not on every delta.
+  const hasStreamingThinking = computed(() => streamingThinking.value.length > 0);
+
+  // Stable boolean for "the round has visible text": recomputed O(1) per
+  // delta via the stream's version, but the value only flips at round edges
+  // so bound components do not re-render per delta. Uses arrival (textStream)
+  // rather than the typewriter's progress — at most one animation frame
+  // ahead of the first visible character.
+  const hasStreamingText = computed(() => {
+    void textStream.version.value;
+    return textStream.hasNonWhitespace;
+  });
 
   // -- Mutation applier --
   function persistTodoPanelState(sessionId: string | null = activeSessionId.value) {
@@ -1191,7 +1267,12 @@ export const useChatStore = defineStore("chat", () => {
           const rawLenBefore = rawStreamText.value.length;
           const streamingLenBefore = streamingText.value.length;
           rawStreamText.value += m.text;
-          if (!streamingText.value) streamingText.value = rawStreamText.value.charAt(0);
+          textStream.append(m.text);
+          if (!streamingText.value) {
+            const first = textStream.readRange(0, 1);
+            streamingText.value = first;
+            typedStream.append(first);
+          }
           traceChatStore("appendRawText", () => ({
             deltaLen: m.text.length,
             deltaPreview: previewTraceText(m.text, 48),
@@ -1206,6 +1287,7 @@ export const useChatStore = defineStore("chat", () => {
         break;
       case "appendThinking":
         streamingThinking.value += m.text;
+        thinkingStream.append(m.text);
         break;
       case "setStreamSequence":
         streamSequence.value = Math.max(streamSequence.value, m.value);
@@ -1217,6 +1299,9 @@ export const useChatStore = defineStore("chat", () => {
         thinkingOrder.value = m.order;
         break;
       case "upsertLiveRenderPart": {
+        if (m.part.kind === "text" || m.part.kind === "thinking") {
+          ensureLivePartStream(m.part.id);
+        }
         const index = liveRenderParts.value.findIndex((part) => part.id === m.part.id);
         if (index < 0) {
           liveRenderParts.value = [...liveRenderParts.value, m.part];
@@ -1228,18 +1313,22 @@ export const useChatStore = defineStore("chat", () => {
         break;
       }
       case "appendLiveRenderPartContent":
-        liveRenderParts.value = liveRenderParts.value.map((part) => {
-          if (part.id !== m.partId) return part;
-          if (part.kind !== "thinking" && part.kind !== "text") return part;
-          return { ...part, content: part.content + m.text };
-        });
+        // Growth goes into the part's chunk stream instead of rebuilding the
+        // parts array with a longer content string: the transcript renders
+        // streams incrementally, and the round's finalize/cancel events carry
+        // the authoritative full text for the message that lands in history.
+        ensureLivePartStream(m.partId).append(m.text);
         break;
       case "deactivateLiveThinkingParts":
-        liveRenderParts.value = liveRenderParts.value.map((part) =>
-          part.kind === "thinking"
-            ? { ...part, active: false, duration: m.duration ?? part.duration }
-            : part,
-        );
+        // Keep the array's identity when there is nothing to deactivate —
+        // downstream computeds and throttles key off it.
+        if (liveRenderParts.value.some((part) => part.kind === "thinking" && part.active)) {
+          liveRenderParts.value = liveRenderParts.value.map((part) =>
+            part.kind === "thinking"
+              ? { ...part, active: false, duration: m.duration ?? part.duration }
+              : part,
+          );
+        }
         break;
       case "updateLiveToolPart":
         liveRenderParts.value = liveRenderParts.value.map((part) =>
@@ -1250,6 +1339,7 @@ export const useChatStore = defineStore("chat", () => {
         break;
       case "clearLiveRenderParts":
         liveRenderParts.value = [];
+        clearLivePartStreams();
         break;
       case "setThinking":
         isThinking.value = m.value;
@@ -1348,9 +1438,11 @@ export const useChatStore = defineStore("chat", () => {
         }));
         resetStreamAnim();
         streamingThinking.value = "";
+        thinkingStream.reset();
         streamingTextOrder.value = 0;
         thinkingOrder.value = 0;
         liveRenderParts.value = [];
+        clearLivePartStreams();
         thinkingStartTime.value = 0;
         thinkingDuration.value = 0;
         isThinking.value = false;
@@ -1366,9 +1458,11 @@ export const useChatStore = defineStore("chat", () => {
         }));
         resetStreamAnim();
         streamingThinking.value = "";
+        thinkingStream.reset();
         streamingTextOrder.value = 0;
         thinkingOrder.value = 0;
         liveRenderParts.value = [];
+        clearLivePartStreams();
         thinkingStartTime.value = 0;
         thinkingDuration.value = 0;
         isThinking.value = false;
@@ -2781,8 +2875,14 @@ export const useChatStore = defineStore("chat", () => {
     activeSessionId,
     messages,
     streamingText,
+    displayedStreamingText,
+    hasStreamingText,
+    typedStream,
     rawStreamText,
     streamingThinking,
+    hasStreamingThinking,
+    thinkingStream,
+    livePartStreams,
     streamSequence,
     streamingTextOrder,
     thinkingOrder,
