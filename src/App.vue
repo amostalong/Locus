@@ -1134,8 +1134,22 @@ watch(() => projectStore.workingDir, () => {
       <TopBannerHost />
 
       <div class="tab-content">
+        <!--
+          Each lazy `<component :is="...">` gets a stable, slot-unique `:key`
+          so Vue's patcher can distinguish it from its v-else-if sibling. Without
+          it, Vue 3.5.x's `shouldUpdateComponent` reads `prevVNode.component.emitsOptions`
+          on a stale vnode and throws
+          "Cannot read properties of null (reading 'emitsOptions')"
+          whenever a parent re-render (e.g. `displaySettings` change) walks
+          the .tab-content fragment while one of the lazy refs is mid-load.
+          See https://github.com/vuejs/core/issues — fixed in 3.6+ but our
+          locked deps are still 3.5.x. The `:key` is unique per slot, so
+          v-show toggling (which keeps the component mounted) does not
+          force a remount, preserving the fast tab-switch perf.
+        -->
         <component
           :is="editorViewComponent"
+          :key="'lazy-editor-view'"
           v-if="uiStore.editorMounted && editorViewComponent"
           v-show="uiStore.activeTab === 'editor'"
           :working-dir="projectStore.workingDir"
@@ -1149,6 +1163,7 @@ watch(() => projectStore.workingDir, () => {
         </div>
         <component
           :is="collabViewComponent"
+          :key="'lazy-collab-view'"
           v-if="uiStore.collabMounted && collabViewComponent"
           v-show="uiStore.activeTab === 'collab'"
           :working-dir="projectStore.workingDir"
@@ -1168,6 +1183,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="knowledgeViewComponent"
+          :key="'lazy-knowledge-view'"
           v-if="uiStore.knowledgeMounted && knowledgeViewComponent"
           v-show="uiStore.activeTab === 'knowledge'"
           :working-dir="projectStore.workingDir"
@@ -1184,6 +1200,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="assetViewComponent"
+          :key="'lazy-asset-view'"
           v-if="uiStore.assetMounted && assetViewComponent"
           v-show="uiStore.activeTab === 'asset'"
           :working-dir="projectStore.workingDir"
@@ -1198,6 +1215,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="viewPackageViewComponent"
+          :key="'lazy-views-view'"
           v-if="uiStore.viewMounted && viewPackageViewComponent"
           v-show="uiStore.activeTab === 'views'"
           :working-dir="projectStore.workingDir"
@@ -1212,6 +1230,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="pluginViewComponent"
+          :key="'lazy-plugin-view'"
           v-if="showPluginEntry && uiStore.pluginsMounted && pluginViewComponent"
           v-show="uiStore.activeTab === 'plugins'"
           :working-dir="projectStore.workingDir"
@@ -1226,6 +1245,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="agentViewComponent"
+          :key="'lazy-agent-view'"
           v-if="uiStore.agentMounted && agentViewComponent"
           v-show="uiStore.activeTab === 'agent'"
           :working-dir="projectStore.workingDir"
@@ -1241,6 +1261,7 @@ watch(() => projectStore.workingDir, () => {
 
         <component
           :is="settingsViewComponent"
+          :key="'lazy-settings-view'"
           v-if="uiStore.settingsMounted && settingsViewComponent"
           v-show="uiStore.activeTab === 'settings'"
           :all-models="modelStore.availableModels"
