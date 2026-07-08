@@ -1002,7 +1002,7 @@ watch(() => projectStore.workingDir, () => {
           class="tab-brand"
           :class="{ active: uiStore.activeTab === 'home' }"
           @click="uiStore.setTab('home')"
-        >Locus</button>
+        >L<span class="locus-o">o</span>cus</button>
         <button
           v-for="tab in visibleTopTabs"
           :key="tab.id"
@@ -1831,6 +1831,14 @@ body.is-dragging-select-lock * {
 }
 
 .tab-brand:hover {
+  color: var(--accent-color);
+}
+
+.tab-brand .locus-o {
+  color: #B8860B;
+}
+
+.tab-brand:hover .locus-o {
   color: var(--accent-color);
 }
 
