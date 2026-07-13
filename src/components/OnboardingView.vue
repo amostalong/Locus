@@ -938,33 +938,6 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <Teleport to="body">
-      <div v-if="pickerOpen" class="workspace-picker-overlay" role="dialog" aria-modal="true">
-        <div class="workspace-picker-modal">
-          <h3 class="workspace-picker-title">{{ t("onboarding.project.pickerTitle") }}</h3>
-          <p class="workspace-picker-desc">{{ t("onboarding.project.pickerDesc") }}</p>
-          <ul class="workspace-picker-list">
-            <li v-for="candidate in pickerCandidates" :key="candidate">
-              <button
-                type="button"
-                class="workspace-picker-item"
-                :disabled="pickerLoading"
-                @click="pickWorkspaceCandidate(candidate)"
-              >
-                <span class="workspace-picker-item-path">{{ candidate }}</span>
-                <span class="workspace-picker-item-label">{{ candidateLabel(candidate) }}</span>
-              </button>
-            </li>
-          </ul>
-          <div class="workspace-picker-actions">
-            <button class="ob-btn secondary" type="button" :disabled="pickerLoading" @click="cancelPicker">
-              {{ t("common.cancel") }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
     <div v-else-if="step === 3" class="step-card">
       <h2 class="step-title">{{ t("onboarding.plugin.title") }}</h2>
       <p class="step-desc">{{ t("onboarding.plugin.desc") }}</p>
@@ -1135,6 +1108,33 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="pickerOpen" class="workspace-picker-overlay" role="dialog" aria-modal="true">
+        <div class="workspace-picker-modal">
+          <h3 class="workspace-picker-title">{{ t("onboarding.project.pickerTitle") }}</h3>
+          <p class="workspace-picker-desc">{{ t("onboarding.project.pickerDesc") }}</p>
+          <ul class="workspace-picker-list">
+            <li v-for="candidate in pickerCandidates" :key="candidate">
+              <button
+                type="button"
+                class="workspace-picker-item"
+                :disabled="pickerLoading"
+                @click="pickWorkspaceCandidate(candidate)"
+              >
+                <span class="workspace-picker-item-path">{{ candidate }}</span>
+                <span class="workspace-picker-item-label">{{ candidateLabel(candidate) }}</span>
+              </button>
+            </li>
+          </ul>
+          <div class="workspace-picker-actions">
+            <button class="ob-btn secondary" type="button" :disabled="pickerLoading" @click="cancelPicker">
+              {{ t("common.cancel") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
     </div>
 
   </div>
