@@ -287,3 +287,200 @@ root) into two concepts:
 issues. **Do not start a v0.5.8+ merge while P1-P6 is in flight** — the data
 migration preserves old backups, and the sessions-data orphan is accepted as
 collateral.
+
+### P1 / P5 commit history (current state)
+
+| Phase | Commit | Status |
+|---|---|---|
+| P1 (Workspace struct + `resolve_unity_project_path`) | `8094f8a` | ✅ in develop |
+| P2-P6 (knowledge_root 拆分 + data migration) | `2e1d87c` / `0ee7759` / `8aa998c` | ❌ **reverted in `7a52f3d`** |
+| P5 精简 (real `set_workspace` body + picker UI) | `8f464f8` | ✅ in develop |
+| P6 (delete `set_working_dir` + old data compat) | — | ⏸ not started |
+
+**Why the P2-P6 revert**: the user pushed back — knowledge / skill / memory / sessions /
+config.json are all Unity-project-scoped by nature, anchoring them to `workspace_root`
+was over-abstraction. Storage root is `unity_root` only; `workspace_root` is purely a
+UI concept (picker / recent_dirs / workspace_id fallback).
+
+### Known follow-ups (留尾)
+
+- `set_working_dir` not yet removed (P6) — kept for `working_dir.txt` startup reload back-compat
+- `ADR-005` (refuse `workspace_root` falling inside `Assets/`) — not implemented, auto-resolve is the fallback
+- Frontend store still single-field `workingDir` (no `workspaceRoot` / `unityRoot` split in `useProjectStore`); 200+ component changes avoided
+- Sessions-data orphan after `workspace_root` switch — **accepted**
+
+## Monaco editor architecture — Roslyn ↔ Monaco bridge
+
+Fork runs a custom Roslyn bridge between Monaco (frontend) and a Rust-hosted Roslyn
+child process. The bridge is not just "forward JSON-RPC" — five implicit protocols
+must be explicitly completed or the editor misbehaves. **If you see Monaco behaving
+wrong, first ask "which implicit protocol is broken?"**
+
+| Protocol | Symptom | Fix |
+|---|---|---|
+| `file://` URI normalization | Monaco sends `file:///c%3A/...` (lowercase + percent-encoded colon); Roslyn uses `file:///C:/...` (uppercase + literal) → "Document is null" | Normalize via `path_to_uri` before forwarding `textDocument/*` |
+| `didOpen` missing | MLC auto-fires `textDocument/didOpen`; the fork bridge doesn't → Roslyn has no document | Sniff `params.textDocument.uri` → `uri_to_path` → `LspClient::sync_document` (blake3 dedup) |
+| `fsProvider` registration | `ModelBackedFileSystemProvider` must explicitly call `registerFileSystemOverlay(priority, provider)` against monaco-vscode's FileService | Otherwise `TextModelResolverService` falls back to `BrowserFileSystemProvider` → `file://` fetch CORS-blocked → "Unable to resolve nonexistent file" |
+| `decompile` temp path outside workspace | Roslyn writes metadata decompile to `%TEMP%\MetadataAsSource\...\Type.cs` | Add `editor_read_file_abs(absolute_path)` IPC, route via abs path when path matches `MetadataAsSource` or `$metadata$` |
+| `vscode.commands.executeCommand` race | Returns "Default api is not ready" stub when extension host worker isn't ready | try/catch + fallback to Monaco `IContentWidget` self-render |
+
+**Full detail**: `~/.mavis/agents/mavis/memory/locus-editor-monaco.md`.
+
+### `monaco-vscode-api` 33.0.9 config schema gap (high-priority)
+
+Default `ConfigurationService` schema **does not include** `workbench.colorCustomizations`
+/ `editor.tokenColorCustomizations` / `editor.semanticTokenColorCustomizations`. The
+downstream consumers (`workbenchThemeService.js:341`'s `onDidChangeConfiguration`
+listener, `TokenizationRegistry`, `setCustomSemanticTokenColors`) **still read them**.
+
+Cascade:
+1. `updateUserConfiguration()` writes to disk → `configurationEditing.js:614` throws
+   `ERROR_UNKNOWN_KEY` → log line `Unable to write to User Settings because X is not a registered configuration`
+2. `configService.updateValue()` writes to memory successfully (user value visible via
+   `inspect()`), but `configurationProperties[key]` is `undefined`
+3. `onDidChangeConfiguration` fires, but listener's `e.affectsConfiguration(key)` returns
+   `false` → handler skipped → `setCustomSemanticTokenColors` / `setCustomTokenColors`
+   / `setCustomColors` never called → TokenizationRegistry doesn't update → theme
+   stylesheet doesn't update
+
+**Fix**: call `configurationRegistry.registerConfiguration({...})` for the three keys
+(arbitrary scope, permissive schema, `object` is enough). Idempotent + HMR-safe.
+**Must register before `initVscodeServices()`** — `workbenchThemeService` is constructed
+during init, listener registers then looks up `configurationProperties`.
+
+**Diagnostic trigger**: see `Unable to write to User Settings because X is not a
+registered configuration` in logs → lock this fix immediately. Cross-check
+`inspect()` — user value present but `onDidChangeConfiguration` not taking effect is
+this bug.
+
+### csharp TextMate grammar limitation (monaco-vscode-api 33.0.9)
+
+The bundled csharp TextMate grammar lumps **all** C# type positions (`void`, `string`,
+class name, generic params) into one flat scope `type.cs`. Any TextMate rule with
+`scope: "type.cs"` will paint `void` pink too.
+
+**Fix**: abandon TextMate rules for csharp, use only Roslyn LSP semantic tokens.
+Roslyn's LSP semantic token treats `void` as `keyword` (default keyword color, not
+pink) and `string` / `Player` / `List<>` as `type` (pink). Configure via
+`editor.semanticTokenColorCustomizations.rules` with keys `"type"` / `"type.class"` /
+`"type.readonly"` — **do NOT add a pink rule for `"keyword"`**, void immediately loses
+its distinction.
+
+**Trade-off**: ~500ms after file open, types aren't pink (waiting for Roslyn first
+semantic token response). User accepted this — "all pink" is a worse state.
+
+### monaco token rule scope matching (short vs full)
+
+`defineTheme().rules[i].token: "scope.cs"` does **segment-includes** matching on the
+TextMate scope chain: `"type.cs"` matches any chain containing a `type` segment
+(including `entity.name.type.class.cs`). One rule with `token: "type.cs"` is enough to
+hook all type-class tokens — Locus csharp Monarch emits `type.cs`, csharp TextMate
+emits `entity.name.type.*.cs`, both pass.
+
+**Reverse doesn't work**: `token: "entity.name.type.class.cs"` does NOT match
+`type.cs` (Monarch scope missing entity.name.type.class segments). **Prefer the
+shortest matching scope as the primary hook**, keep long chain as safety net.
+
+LSP semantic tokens use a separate token type/modifier channel (not TextMate scope)
+— hook via `editor.semanticTokenColorCustomizations.rules` with keys like
+`"type"` / `"type.class"` / `"variable.class"`, **which goes through ConfigurationService**
+and requires the schema registration above.
+
+### csharp Monarch 500ms fallback limitation
+
+Locus csharp Monarch grammar (fallback, first ~500ms) emits `identifier` for both
+**class field** (`_lastScreenHeight`) and **local variable** (`var x = 1;`) — Monarch
+regex can't do context-aware distinction.
+
+**Result**: 500ms after open, fields render in default color (mtk1 white). After
+TextMate takes over + Roslyn semantic tokens arrive, fields turn indigo and locals
+stay default. **User accepted the 500ms delay.**
+
+To根治 the options:
+- **Option A**: context-aware Monarch grammar (regex can't — needs PEG/LR, not
+  natively supported by monaco)
+- **Option B**: Roslyn bridge sends `textDocument/semanticTokens/full` synchronously
+  on `didOpen`; editor waits for tokens before render (trade-off: cold-start +500ms+)
+- **Option C**: accept the 500ms (current user choice)
+
+### `bun.lock` discipline
+
+Locus submodule tracks `bun.lock` (~600 lines). The outer `QxLocusProject/.gitignore`
+excludes `bun.lock` (under "Locus submodule boundaries" block), but **the submodule's
+internal tracking is unaffected** — submodule-internal deletion/modification goes
+into real commits.
+
+**Discipline**:
+- When fixing 0.4.1-era `monaco-vscode-api` 33.0.9 hacks, **do NOT casually `rm
+  bun.lock`**
+- If you must delete `bun.lock`, do it in a single dedicated commit with explicit
+  motivation — never piggyback on a feature commit
+- Accidental-deletion recovery: `git checkout HEAD -- bun.lock` (one line, no admin)
+
+## Locus project context
+
+### Product positioning
+
+Locus is the user's **actively-developed** product — a Cursor-for-Unity AI development
+tool. Primary Unity project for testing is
+`C:\Users\dd\Documents\slg_gameclient\Project` (an SLG game client with heavy
+`Microsoft.Unity.Analyzers` C# code).
+
+### Repository layout (recap)
+
+```
+QxLocusProject/                  ← outer repo, tracks submodule pointer only
+├── Locus/                       ← submodule (amostalong/Locus fork, develop branch)
+├── Me/                          ← personal notes + merge plans (this is where you write)
+├── start-locus.bat / .ps1       ← launcher (interactive menu)
+└── commit-locus.bat             ← commit helper (auto-adds design-by footer)
+```
+
+All production code lives in `Locus/`. The outer repo just tracks the submodule HEAD
+via pointer commits. See outer `CLAUDE.md` for the launch + commit workflow.
+
+### Stack (0.4.1-era baseline, still in use)
+
+- Vue 3 + Tauri 2 + monaco-editor
+- `@codingame/monaco-vscode-api` 33.0.9 (fork baseline; v0.5.7 doesn't ship it at all
+  — see "Monaco editor subsystem" above)
+- `@codingame/monaco-vscode-csharp-default-extension` 33.0.9
+
+### Diagnostic entry points
+
+- **Tuanjie / Unity console** for C# plugin issues — read the `[Locus] Bridge started
+  listening on pipe: locus_unity_*` vs `[Locus] Native broker bridge active` line to
+  distinguish old plugin install vs fork bug (see "Unity bridge" above)
+- **`locus-console-*.log`** for Monaco / LSP / extension frontend issues — full chain
+  is `console.*` → `src/services/debugConsole.ts:captureConsole` →
+  `queueForwardToFile` (400ms batch, 128 entries) → `invoke("append_frontend_logs")` →
+  `src-tauri/src/commands/log.rs:append_frontend_logs` → `file_sink.enqueue` →
+  `locus-console-*.log`. **DevTools console is not enough** — cross-worker threads
+  make it incomplete
+- **PowerShell visibility**: by default, PowerShell `bun tauri dev` doesn't see
+  frontend `app-log` events. To make them visible, the `append_frontend_logs` Rust
+  handler must call `tracing::*!` to re-emit. Done in 2026-07-03 (reference
+  implementation). **Use `console.log` (not `console.debug`)** for diagnostics —
+  `console.debug` is gated by `LOCUS_DEBUG=1` (start-locus.bat option 3) and won't
+  show in default `bun tauri dev` output. `console.log` is INFO → `tracing::info!` →
+  default-pass. For high-frequency events (e.g. caret move) where 400ms+400ms
+  batch-forward latency is too much, use a direct IPC `invoke` instead of `console.log`.
+- **Filter noise**: 76 existing `console.log` calls in the frontend are noisy. Add a
+  module-name whitelist in `emit_frontend_to_tracing` to filter by prefix
+  (`[tab-switch]` / `[chat-stream]` / `[workspace-switch]`)
+
+### Why "monaco-vscode-api 33.0.9" specifically (not "upgrade to 34+")
+
+The 33.0.9 version has **multiple race / not-ready issues** that were individually
+worked around in 0.4.1-era work. Upgrade to 34+ likely re-introduces the same class
+of bugs with new surface area. **Always prefer workaround (try/catch, fire-and-forget,
+direct DOM overlay, `setLanguageConfiguration` after `registerLanguage`) over upgrade**.
+
+Known 33.0.9 bugs that have fork-specific workarounds:
+- `"Default api is not ready yet"` race (`vscode.commands.executeCommand` before
+  extension host worker is up)
+- `defineTheme` throws `"is not a function"` in `IStandaloneThemeService` override
+- `ConfiguredStandaloneEditor.addContentWidget` throws `_widgets[getId()]` miss on
+  `setWidgetPosition`
+
+**Full detail**: `~/.mavis/agents/mavis/memory/locus-project.md`.
