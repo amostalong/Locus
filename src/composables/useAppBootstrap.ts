@@ -184,7 +184,7 @@ export function useAppBootstrap() {
   watch(
     () => uiStore.activeTab,
     (tab) => {
-      if (tab === "home" && !skillsLoaded) {
+      if (tab === "chat" && !skillsLoaded) {
         loadSkills();
         skillsLoaded = true;
       }
@@ -201,6 +201,7 @@ export function useAppBootstrap() {
         chatStore.loadToolPermissionMode(),
         modelStore.loadModelDefaults(),
         modelStore.loadLastModel(),
+        modelStore.loadCodexFastMode(),
         modelStore.loadCustomEndpoints(),
         modelStore.loadCodexModelConfig(),
       ]);
@@ -687,6 +688,7 @@ export function useAppBootstrap() {
       authStore.checkAuth(),
       modelStore.loadModelDefaults(),
       modelStore.loadLastModel(),
+      modelStore.loadCodexFastMode(),
       modelStore.loadCustomEndpoints(),
       modelStore.loadCodexModelConfig(),
     ]);

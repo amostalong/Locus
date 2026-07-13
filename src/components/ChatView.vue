@@ -41,7 +41,6 @@ import { useChatChangesStore } from "../stores/chatChanges";
 import { useChatStore } from "../stores/chat";
 import { useUiStore } from "../stores/ui";
 import { useNotificationStore } from "../stores/notification";
-import { useEditorStore } from "../stores/editor";
 import {
   captureScrollAnchor,
   captureLiveScrollAnchor,
@@ -68,12 +67,17 @@ import {
 } from "../composables/resizeObserver";
 import { forwardWheelToElement } from "../composables/chatWheelPassthrough";
 import { STREAMING_RENDER_THROTTLE_MS } from "../composables/streamingRenderThrottle";
-import { createCoalesceRunner } from "../composables/coalesceRunner";
 import type { StreamingTextSource } from "../composables/streamingTextChunks";
 import { canOpenInEditor } from "../composables/useHideMeta";
 import { useDiffProgress } from "../composables/useDiffProgress";
 import { acquireSelectionLock } from "../composables/useSelectionLock";
-import { matchesShortcut, useKeyboardShortcuts } from "../composables/useKeyboardShortcuts";
+import {
+  createDoublePressShortcutTracker,
+  DOUBLE_PRESS_SHORTCUT_INTERVAL_MS,
+  formatShortcut,
+  matchesShortcut,
+  useKeyboardShortcuts,
+} from "../composables/useKeyboardShortcuts";
 import {
   getChatSubmitModifierLabel,
   useChatInputSettings,
@@ -99,7 +103,6 @@ const chatChangesStore = useChatChangesStore();
 const chatStore = useChatStore();
 const uiStore = useUiStore();
 const notificationStore = useNotificationStore();
-const editorStore = useEditorStore();
 const { state: shortcutState } = useKeyboardShortcuts();
 const { state: chatInputSettings } = useChatInputSettings();
 const { state: displaySettings } = useDisplaySettings();
@@ -208,6 +211,8 @@ const props = defineProps<{
   effort: EffortLevel;
   effortSupported: boolean;
   effortLevels: EffortLevel[];
+  fastModeEnabled: boolean;
+  fastModeAvailable: boolean;
   tokenUsage: TokenUsage;
   pendingQuestion: PendingQuestion | null;
   pendingToolConfirms: PendingToolConfirm[];
@@ -240,12 +245,6 @@ function hasRunningUnityRecompile(calls: ToolCallDisplay[] | undefined): boolean
 
 const unityRecompileActive = computed(() => hasRunningUnityRecompile(props.activeToolCalls));
 
-// Fingerprint covering all activeToolCalls changes that can affect outer viewport layout:
-// - length (new tool added/removed)
-// Excludes deep output/arguments/progress changes — those scroll inside the tool block,
-// not the outer viewport. The shallow identity-only watch below handles this without
-// a separate fingerprint composable.
-
 const emit = defineEmits<{
   send: [text: string, images: ImageAttachment[], assetRefs: AssetRefAttachment[], overrides?: { displayText?: string; mode?: string; userIntent?: UserIntentMeta | null }];
   compact: [];
@@ -254,6 +253,7 @@ const emit = defineEmits<{
   selectAgent: [id: string];
   selectModel: [id: string];
   selectEffort: [level: EffortLevel];
+  selectFastMode: [enabled: boolean];
   saveRawContext: [request: SaveRawContextRequest];
   answerQuestion: [answer: string];
   answerToolConfirm: [questionId: string, answer: string];
@@ -385,20 +385,6 @@ const assetRefContextCanOpenLocusInspector = computed(() => {
     return shouldUseUnitySceneObjectRef(target.scenePath, target.objectPath);
   }
   return target.kind === "asset";
-});
-
-// Editor View is the in-app Monaco-backed editor added in this fork. It can
-// only open text-editable files, so we mirror `canOpenInEditor` here for the
-// context menu gate.
-const assetRefContextCanOpenInEditorView = computed(() => {
-  const target = assetRefCtxMenu.value?.target;
-  if (!target) return false;
-  const candidate = (() => {
-    if (target.kind === "asset") return target.assetPath;
-    if (target.kind === "file" && target.entryKind === "file") return target.filePath;
-    return null;
-  })();
-  return candidate !== null && canOpenInEditor(candidate);
 });
 
 const assetRefContextSupportsUnity = computed(() => {
@@ -826,41 +812,10 @@ function openAssetRefInUnityInspector(target: AssetRefClickTarget) {
   });
 }
 
-/**
- * Open an asset ref in the in-app Editor View (Monaco-backed editor added in
- * this fork). Falls back to legacy behavior (open externally / select in
- * Unity) for targets that can't be loaded into Monaco — scene objects,
- * folders, and binary/serialized Unity assets.
- */
-async function openAssetRefInEditorView(target: AssetRefClickTarget) {
-  const filePath = target.kind === "asset" ? target.assetPath : null;
-  // Scene objects, folders, and binary/serialized files can't be opened in
-  // Monaco; mirror legacy behavior for those.
-  if (!filePath || target.kind === "sceneObject"
-    || (target.kind === "asset" && target.entryKind === "folder")
-    || !canOpenInEditor(filePath)) {
-    legacyAssetRefClick(target);
-    return;
-  }
-  try {
-    await editorStore.openFile(filePath);
-    uiStore.setTab("editor");
-  } catch (error) {
-    console.warn("editorStore.openFile failed for", filePath, error);
-    // Last resort: try the OS-default editor so the user still gets to see
-    // the file rather than a silent no-op.
-    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
-  }
-}
-
 function runAssetRefClickAction(target: AssetRefClickTarget) {
   const action = isUnityEmbeddedWindow()
     ? displaySettings.unityEmbedAssetRefClickAction
     : displaySettings.assetRefClickAction;
-  if (action === "editor") {
-    void openAssetRefInEditorView(target);
-    return;
-  }
   if (action === "unityInspector") {
     openAssetRefInUnityInspector(target);
     return;
@@ -941,24 +896,6 @@ async function doAssetRefOpenInEditor() {
   } catch (error) {
     console.warn("openFileExternal failed:", error);
     notifyAssetRefContextMenuError(error, "assetRefOpenInEditor", "Failed to open file");
-  }
-}
-
-// Context-menu variant of openAssetRefInEditorView — opens the in-app Editor
-// View directly instead of routing through `runAssetRefClickAction`. We pull
-// the path off the context-menu target (which carries both `assetPath` for
-// Unity assets and `filePath` for plain file refs) and reuse the same gate.
-async function doAssetRefOpenInEditorView() {
-  const target = assetRefCtxMenu.value?.target;
-  if (!target || !assetRefContextCanOpenInEditorView.value) return;
-  closeAssetRefContextMenu();
-  const filePath = target.kind === "asset" ? target.assetPath : target.filePath;
-  try {
-    await editorStore.openFile(filePath);
-    uiStore.setTab("editor");
-  } catch (error) {
-    console.warn("editorStore.openFile failed for", filePath, error);
-    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
   }
 }
 
@@ -1765,51 +1702,6 @@ function cancelViewportFrame(handle: number) {
   window.clearTimeout(handle);
 }
 
-// --- Coalesced viewport reconcile ---
-// Multiple reactive triggers (messages, displayedStreamingText,
-// pendingQuestion, ...) can fire within the same
-// frame, especially during streaming where displayedStreamingText + tool-call
-// status + messages.append all land in one tick. Each direct reconcileViewport
-// call does its own DOM reads (getBoundingClientRect + getComputedStyle + chat
-// store queries). Coalescing them into a single per-frame pass keeps main-thread
-// time bounded when chat + a heavy right-tab (editor / knowledge) are both
-// competing for the rAF budget.
-//
-// During streaming, additionally throttle the high-frequency trigger sources
-// (token flushes, tool-call status, message appends) to one run every
-// STREAMING_RECONCILE_INTERVAL_MS. The user-visible scroll-to-bottom still
-// happens within 120ms of a token batch landing, which is below the threshold
-// of perception for a chat panel; what we avoid is running getBoundingClientRect
-// + getComputedStyle + chat-store reads 60 times per second on a panel that
-// is also competing with a heavy right-tab (editor mount, knowledge tree
-// render) for the rAF budget. One-shot user events (tool confirm, question
-// answered, transcript resize settled) still run at rAF speed.
-const STREAMING_RECONCILE_INTERVAL_MS = 120;
-const STREAMING_RECONCILE_REASONS = new Set([
-  "messages",
-  "messages-length",
-  "streaming-text",
-  "tool-calls",
-]);
-const coalesceReconcile = createCoalesceRunner({
-  schedule: requestViewportFrame,
-  cancel: cancelViewportFrame,
-  onRun: (reasons) => {
-    if (reasons.length > 1) {
-      recordLayoutDiagnostic("chat.reconcile.coalesced", {
-        reasons,
-        count: reasons.length,
-      });
-    }
-    reconcileViewport();
-  },
-  minIntervalMs: (reason) => {
-    if (!props.isStreaming) return 0;
-    if (!STREAMING_RECONCILE_REASONS.has(reason)) return 0;
-    return STREAMING_RECONCILE_INTERVAL_MS;
-  },
-});
-
 function cancelSessionRestoreFrame() {
   if (!sessionRestoreFrame) return;
   cancelViewportFrame(sessionRestoreFrame);
@@ -2047,7 +1939,7 @@ watch(toolHandoffViewportQuiet, (quiet, previousQuiet) => {
     return;
   }
   if (previousQuiet) {
-    coalesceReconcile.schedule("tool-handoff-end");
+    reconcileViewport();
   }
 });
 
@@ -2237,15 +2129,7 @@ function performTranscriptResizeReconcile() {
   if (restoreToolViewportAnchor()) {
     return;
   }
-  scheduleCoalescedReconcile("resize-observer");
-}
-
-function scheduleCoalescedReconcile(reason: string) {
-  coalesceReconcile.schedule(reason);
-}
-
-function cancelCoalescedReconcile() {
-  coalesceReconcile.cancel();
+  reconcileViewport();
 }
 
 function scheduleTranscriptResizeReconcile(reason: string) {
@@ -2327,7 +2211,6 @@ watch(
     } else {
       cancelSessionRestoreLayoutStabilization();
     }
-    cancelCoalescedReconcile();
     clearToolViewportAnchor();
     scrollToBottomScheduler.cancel();
     streamEndScrollScheduler.cancel();
@@ -2363,14 +2246,14 @@ watch(
   () => props.messages,
   (messages, previous) => {
     if (messages === previous || pendingRestoreSessionId.value) return;
-    scheduleCoalescedReconcile("messages");
+    reconcileViewport();
   },
   { flush: "post" },
 );
 watch(
   () => props.messages.length,
   () => {
-    scheduleCoalescedReconcile("messages-length");
+    reconcileViewport();
   },
   { flush: "post" },
 );
@@ -2403,12 +2286,12 @@ watch(
     }
   },
 );
-watch(isWaitingForResponse, (v) => { if (v) scheduleCoalescedReconcile("waiting"); });
+watch(isWaitingForResponse, (v) => { if (v) reconcileViewport(); });
 watch(() => props.pendingQuestion?.questionId ?? null, (q) => {
-  if (q) scheduleCoalescedReconcile("pending-question");
+  if (q) reconcileViewport();
 });
 watch(() => props.pendingToolConfirms.map((item) => item.questionId).join(":"), (value) => {
-  if (value) scheduleCoalescedReconcile("pending-tool-confirm");
+  if (value) reconcileViewport();
 });
 
 const keepBatchToolConfirmLayout = ref(false);
@@ -2588,17 +2471,74 @@ function setSessionPanelCollapsed(value: boolean) {
   try { localStorage.setItem(sessionPanelCollapsedStorageKey.value, value ? "1" : "0"); } catch {}
 }
 
+const CANCEL_SHORTCUT_CONFIRM_OPERATION = "chat.cancelShortcutConfirm";
+const cancelShortcutTracker = createDoublePressShortcutTracker();
+
+function clearCancelShortcutConfirmation() {
+  cancelShortcutTracker.reset();
+  notificationStore.clearByOperation(CANCEL_SHORTCUT_CONFIRM_OPERATION);
+}
+
 function onGlobalChatKeydown(e: KeyboardEvent) {
-  if (uiStore.activeTab !== "home") return;
+  if (uiStore.activeTab !== "chat") return;
+
+  if (e.key === "Escape" && showInlineDiff.value) {
+    e.preventDefault();
+    clearCancelShortcutConfirmation();
+    chatChangesStore.closeInlineDiff();
+    return;
+  }
+
+  if (e.defaultPrevented) {
+    clearCancelShortcutConfirmation();
+    return;
+  }
+
+  if (!e.repeat && props.isStreaming && matchesShortcut(e, shortcutState.cancelRun)) {
+    e.preventDefault();
+    if (props.isCancelling) {
+      clearCancelShortcutConfirmation();
+      return;
+    }
+
+    if (cancelShortcutTracker.press()) {
+      clearCancelShortcutConfirmation();
+      emit("cancel");
+      return;
+    }
+
+    notificationStore.addNotice(
+      "info",
+      t("chat.cancelShortcut.confirm", formatShortcut(shortcutState.cancelRun)),
+      {
+        operation: CANCEL_SHORTCUT_CONFIRM_OPERATION,
+        replaceOperation: true,
+        ttl: DOUBLE_PRESS_SHORTCUT_INTERVAL_MS,
+        skipConsoleLog: true,
+      },
+    );
+    return;
+  }
+
+  if (!e.repeat && !["Control", "Meta", "Alt", "Shift"].includes(e.key)) {
+    clearCancelShortcutConfirmation();
+  }
+
   if (!e.repeat && matchesShortcut(e, shortcutState.newChat)) {
     e.preventDefault();
     handleNewChatRequest();
     return;
   }
-  if (e.key === "Escape" && showInlineDiff.value) {
-    chatChangesStore.closeInlineDiff();
-  }
 }
+
+watch(
+  () => [props.isStreaming, props.isCancelling] as const,
+  ([isStreaming, isCancelling]) => {
+    if (!isStreaming || isCancelling) {
+      clearCancelShortcutConfirmation();
+    }
+  },
+);
 
 onMounted(() => {
   window.addEventListener("keydown", onGlobalChatKeydown);
@@ -2619,6 +2559,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalChatKeydown);
+  clearCancelShortcutConfirmation();
   rememberScrollForSession();
   clearInputControlsSwitchTimer();
   scrollToBottomScheduler.cancel();
@@ -2975,6 +2916,7 @@ onUnmounted(() => {
         :cancel-label="t('common.cancel')"
         :compact="inputControlsCollapsed"
         :asset-ref-sync-key="composerAssetRefSyncKey"
+        :message-history="messages"
         @send="handleComposerSend"
         @compact="emit('compact')"
         @fork="emit('fork')"
@@ -2990,9 +2932,12 @@ onUnmounted(() => {
             :effort="effort"
             :efforts="effortLevels"
             :effort-supported="effortSupported"
+            :fast-mode-enabled="fastModeEnabled"
+            :fast-mode-available="fastModeAvailable"
             :disabled="isStreaming"
             @select-model="emit('selectModel', $event)"
             @select-effort="emit('selectEffort', $event)"
+            @select-fast-mode="emit('selectFastMode', $event)"
           />
           <TokenUsageBar
             :token-usage="tokenUsage"
@@ -3144,14 +3089,6 @@ onUnmounted(() => {
             @click="doAssetRefOpenInEditor"
           >
             {{ t("common.openInEditor") }}
-          </button>
-          <button
-            v-if="assetRefContextCanOpenInEditorView"
-            type="button"
-            class="asset-ref-ctx-item"
-            @click="doAssetRefOpenInEditorView"
-          >
-            {{ t("common.openInEditorView") }}
           </button>
           <button type="button" class="asset-ref-ctx-item" @click="doAssetRefShowInFolder">
             {{ t("common.openInFileExplorer") }}

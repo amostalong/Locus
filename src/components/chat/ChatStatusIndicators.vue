@@ -1702,7 +1702,8 @@ function runStatusAction(item: StatusItem) {
 }
 
 function onDocumentKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") {
+  if (event.key === "Escape" && activePopover.value) {
+    event.preventDefault();
     closePopover();
   }
 }

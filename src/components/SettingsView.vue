@@ -52,7 +52,7 @@ const {
   startEdit, cancelEdit, saveKey, deleteKey, handleKeydown,
   dynamicToolLoadingMode, dynamicToolLoadingBusy, setDynamicToolLoadingMode,
   oauthStep, oauthCode, startOAuthLogin, submitOAuthCode, cancelOAuth, oauthLogout, importClaudeCodeOAuth, handleOAuthKeydown, anthropicQuota, loadAnthropicRateLimits,
-  codexStep, codexStatus, codexQuota, codexRetrying, codexModelConfig, codexUserCode, codexUrl, codexCodeCopied, cancelCodexLogin, codexLogout, importCodexCli, retryCodexValidation, copyCode, setCodexTransportMode, loadCodexRateLimits,
+  codexStep, codexStatus, codexQuota, codexResetCreditBusyId, codexRetrying, codexModelConfig, codexUserCode, codexUrl, codexCodeCopied, cancelCodexLogin, codexLogout, importCodexCli, retryCodexValidation, copyCode, setCodexTransportMode, loadCodexRateLimits, consumeCodexResetCredit,
   requestCodexLogin,
   modelDefaults, modelSaveMsg, saveModelDefaults,
   workspaceOverride, workspaceOverrideSaveMsg, saveWorkspaceOverride, disableWorkspaceOverride,
@@ -259,6 +259,7 @@ watch(
           :codex-step="codexStep"
           :codex-status="codexStatus"
           :codex-quota="codexQuota"
+          :codex-reset-credit-busy-id="codexResetCreditBusyId"
           :codex-retrying="codexRetrying"
           :codex-transport="codexModelConfig.transport"
           :dynamic-tool-loading-mode="dynamicToolLoadingMode"
@@ -290,6 +291,7 @@ watch(
           @codex-logout="codexLogout"
           @retry-codex-validation="retryCodexValidation"
           @refresh-codex-quota="loadCodexRateLimits"
+          @consume-codex-reset-credit="consumeCodexResetCredit"
           @copy-code="copyCode"
           @update:codex-transport="setCodexTransportMode"
           @update:dynamic-tool-loading-mode="setDynamicToolLoadingMode"

@@ -382,7 +382,7 @@ watch(() => uiStore.editorMounted, (mounted) => {
 
 watch([() => uiStore.activeTab, visibleTopTabs], () => {
   if (isTopTabVisible(uiStore.activeTab)) return;
-  uiStore.setTab("home");
+  uiStore.setTab("chat");
 }, { immediate: true });
 
 // -- Workspace dropdown (local UI) --
@@ -994,14 +994,14 @@ watch(() => projectStore.workingDir, () => {
     @dragover.capture="handleMainUnityAssetDrag"
     @drop.capture="handleMainUnityAssetDrop"
   >
-    <div class="split-layout" ref="splitContainerRef" :class="{ 'is-home-mode': uiStore.activeTab === 'home' }">
+    <div class="split-layout" ref="splitContainerRef" :class="{ 'is-home-mode': uiStore.activeTab === 'chat' }">
       <div class="tab-bar" @pointerdown="onTabBarPointerDown">
         <div class="tab-drag-region" aria-hidden="true"></div>
         <button
           type="button"
           class="tab-brand"
-          :class="{ active: uiStore.activeTab === 'home' }"
-          @click="uiStore.setTab('home')"
+          :class="{ active: uiStore.activeTab === 'chat' }"
+          @click="uiStore.setTab('chat')"
         >L<span class="locus-o">o</span>cus</button>
         <button
           v-for="tab in visibleTopTabs"
@@ -1112,7 +1112,7 @@ watch(() => projectStore.workingDir, () => {
         </div>
       </div>
       <div class="split-body">
-      <div class="chat-panel-left" :style="uiStore.activeTab === 'home' ? { width: '100%' } : { width: chatPanelWidth + 'px' }">
+      <div class="chat-panel-left" :style="uiStore.activeTab === 'chat' ? { width: '100%' } : { width: chatPanelWidth + 'px' }">
         <component
           :is="chatViewComponent"
           v-if="chatViewComponent"

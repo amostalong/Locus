@@ -34,7 +34,7 @@ export const useUiStore = defineStore("ui", () => {
   // Local added "editor" for Monaco editor tab; upstream kept the rest unchanged.
   // Fork P5 (home mode) routes "chat" through the "home" top tab; no separate
   // chat top tab is exposed.
-  const activeTab = ref<"home" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("home");
+  const activeTab = ref<"chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
   // Union of local (knowledge) + upstream (hotReload | unityConnection | testing).
   // Upstream removed the standalone Knowledge tab in SettingsView; local code may still reference it.
   const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
@@ -195,10 +195,10 @@ export const useUiStore = defineStore("ui", () => {
       }
     }
     try {
-      setTab("home");
+      setTab("chat");
       showOnboarding.value = !localStorage.getItem("locus-onboarding-completed");
     } catch (error) {
-      setTab("home");
+      setTab("chat");
       console.error("Failed to read onboarding completion state:", error);
       showOnboarding.value = false;
     }

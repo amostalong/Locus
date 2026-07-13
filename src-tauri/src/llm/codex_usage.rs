@@ -1,4 +1,5 @@
 use super::CODEX_CLIENT_VERSION;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -8,8 +9,12 @@ const DEFAULT_CODEX_PROVIDER_BASE_URL: &str = "https://chatgpt.com/backend-api/c
 const RESPONSES_ENDPOINT_PATH: &str = "/responses";
 const MODELS_ENDPOINT_PATH: &str = "/models";
 const USAGE_ENDPOINT_PATH: &str = "/usage";
+const RATE_LIMIT_RESET_CREDITS_ENDPOINT_PATH: &str = "/rate-limit-reset-credits";
+const RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT_PATH: &str = "/rate-limit-reset-credits/consume";
 const CODEX_ORIGINATOR_HEADER_VALUE: &str = "opencode";
 const USAGE_REFRESH_TIMEOUT_SECS: u64 = 8;
+const RESET_CREDIT_DETAILS_TIMEOUT_SECS: u64 = 5;
+const RESET_CREDIT_CONSUME_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug)]
 pub enum CodexRateLimitsFetchError {
@@ -39,6 +44,7 @@ pub struct CodexRateLimitsResponse {
     pub fetched_at_ms: i64,
     pub rate_limits: CodexRateLimitSnapshot,
     pub rate_limits_by_limit_id: HashMap<String, CodexRateLimitSnapshot>,
+    pub rate_limit_reset_credits: Option<CodexRateLimitResetCreditsSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -70,6 +76,41 @@ pub struct CodexCreditsSnapshot {
     pub balance: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimitResetCreditsSummary {
+    pub available_count: i64,
+    pub credits: Option<Vec<CodexRateLimitResetCredit>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimitResetCredit {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: i64,
+    pub expires_at: Option<i64>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub enum CodexRateLimitResetOutcome {
+    Reset,
+    NothingToReset,
+    NoCredit,
+    AlreadyRedeemed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimitResetConsumeResponse {
+    pub outcome: CodexRateLimitResetOutcome,
+    pub windows_reset: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct CodexUsagePayload {
@@ -83,6 +124,8 @@ struct CodexUsagePayload {
     additional_rate_limits: Option<Vec<CodexAdditionalRateLimit>>,
     #[serde(default)]
     rate_limit_reached_type: Option<CodexRateLimitReachedPayload>,
+    #[serde(default)]
+    rate_limit_reset_credits: Option<CodexUsageRateLimitResetCreditsSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +172,42 @@ struct CodexRateLimitReachedPayload {
     kind: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CodexUsageRateLimitResetCreditsSummary {
+    available_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexUsageRateLimitResetCreditsDetails {
+    credits: Vec<CodexUsageRateLimitResetCreditDetails>,
+    available_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexUsageRateLimitResetCreditDetails {
+    id: String,
+    reset_type: String,
+    status: String,
+    granted_at: String,
+    expires_at: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexRateLimitResetConsumeRequest<'a> {
+    redeem_request_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credit_id: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexUsageRateLimitResetConsumeResponse {
+    code: CodexRateLimitResetOutcome,
+    #[serde(default)]
+    windows_reset: i64,
+}
+
 pub async fn fetch_codex_rate_limits(
     access_token: &str,
     account_id: Option<&str>,
@@ -143,27 +222,105 @@ pub async fn fetch_codex_rate_limits(
         CodexRateLimitsFetchError::Other(format!("Failed to create Codex usage client: {e}"))
     })?;
 
-    let url = codex_usage_endpoint(base_url);
-    let mut request = client
-        .get(&url)
+    let usage_url = codex_usage_endpoint(base_url);
+    let details_url = codex_rate_limit_reset_credits_endpoint(base_url);
+    let usage_request =
+        authenticated_codex_request(client.get(&usage_url), access_token, account_id);
+    let details_request =
+        authenticated_codex_request(client.get(&details_url), access_token, account_id);
+
+    let (usage_result, details_result) = tokio::join!(
+        execute_codex_json_request::<CodexUsagePayload>(usage_request, "usage"),
+        tokio::time::timeout(
+            Duration::from_secs(RESET_CREDIT_DETAILS_TIMEOUT_SECS),
+            execute_codex_json_request::<CodexUsageRateLimitResetCreditsDetails>(
+                details_request,
+                "rate-limit reset credits",
+            ),
+        ),
+    );
+
+    let mut response = rate_limits_from_payload(usage_result?);
+    match details_result {
+        Ok(Ok(details)) => match rate_limit_reset_credits_from_details(details) {
+            Ok(summary) => response.rate_limit_reset_credits = Some(summary),
+            Err(error) => eprintln!(
+                "[Codex] Failed to parse rate-limit reset credit details; using usage summary: {error}"
+            ),
+        },
+        Ok(Err(error)) => eprintln!(
+            "[Codex] Failed to fetch rate-limit reset credit details; using usage summary: {error}"
+        ),
+        Err(_) => eprintln!(
+            "[Codex] Rate-limit reset credit detail request timed out; using usage summary"
+        ),
+    }
+    Ok(response)
+}
+
+pub async fn consume_codex_rate_limit_reset_credit(
+    access_token: &str,
+    account_id: Option<&str>,
+    base_url: Option<&str>,
+    redeem_request_id: &str,
+    credit_id: Option<&str>,
+) -> Result<CodexRateLimitResetConsumeResponse, CodexRateLimitsFetchError> {
+    let client = crate::network::reqwest_client(
+        crate::network::ReqwestClientOptions::new()
+            .connect_timeout(Duration::from_secs(RESET_CREDIT_CONSUME_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(RESET_CREDIT_CONSUME_TIMEOUT_SECS)),
+    )
+    .map_err(|error| {
+        CodexRateLimitsFetchError::Other(format!(
+            "Failed to create Codex rate-limit reset client: {error}"
+        ))
+    })?;
+    let url = codex_rate_limit_reset_credits_consume_endpoint(base_url);
+    let request = authenticated_codex_request(client.post(&url), access_token, account_id).json(
+        &CodexRateLimitResetConsumeRequest {
+            redeem_request_id,
+            credit_id,
+        },
+    );
+    let response = execute_codex_json_request::<CodexUsageRateLimitResetConsumeResponse>(
+        request,
+        "rate-limit reset consume",
+    )
+    .await?;
+    Ok(CodexRateLimitResetConsumeResponse {
+        outcome: response.code,
+        windows_reset: response.windows_reset.max(0),
+    })
+}
+
+fn authenticated_codex_request(
+    request: reqwest::RequestBuilder,
+    access_token: &str,
+    account_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let request = request
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
         .header("originator", CODEX_ORIGINATOR_HEADER_VALUE)
         .header("version", CODEX_CLIENT_VERSION);
-
-    if let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) {
-        request = request.header("ChatGPT-Account-ID", account_id);
+    match account_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(account_id) => request.header("ChatGPT-Account-ID", account_id),
+        None => request,
     }
+}
 
-    let response = request.send().await.map_err(|e| {
-        CodexRateLimitsFetchError::Other(format!("Codex usage request failed: {e}"))
+async fn execute_codex_json_request<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    operation: &str,
+) -> Result<T, CodexRateLimitsFetchError> {
+    let response = request.send().await.map_err(|error| {
+        CodexRateLimitsFetchError::Other(format!("Codex {operation} request failed: {error}"))
     })?;
-
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let message = format!(
-            "Codex usage API error ({} {}): {}",
+            "Codex {operation} API error ({} {}): {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or(""),
             body
@@ -173,11 +330,52 @@ pub async fn fetch_codex_rate_limits(
         }
         return Err(CodexRateLimitsFetchError::Other(message));
     }
+    response.json::<T>().await.map_err(|error| {
+        CodexRateLimitsFetchError::Other(format!(
+            "Failed to parse Codex {operation} response: {error}"
+        ))
+    })
+}
 
-    let payload = response.json::<CodexUsagePayload>().await.map_err(|e| {
-        CodexRateLimitsFetchError::Other(format!("Failed to parse Codex usage response: {e}"))
-    })?;
-    Ok(rate_limits_from_payload(payload))
+fn rate_limit_reset_credits_from_details(
+    details: CodexUsageRateLimitResetCreditsDetails,
+) -> Result<CodexRateLimitResetCreditsSummary, String> {
+    let credits = details
+        .credits
+        .into_iter()
+        .map(|credit| {
+            let granted_at = parse_reset_credit_timestamp(&credit.granted_at).map_err(|error| {
+                format!("invalid granted_at for credit `{}`: {error}", credit.id)
+            })?;
+            let expires_at = credit
+                .expires_at
+                .as_deref()
+                .map(parse_reset_credit_timestamp)
+                .transpose()
+                .map_err(|error| {
+                    format!("invalid expires_at for credit `{}`: {error}", credit.id)
+                })?;
+            Ok(CodexRateLimitResetCredit {
+                id: credit.id,
+                reset_type: credit.reset_type,
+                status: credit.status,
+                granted_at,
+                expires_at,
+                title: credit.title,
+                description: credit.description,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(CodexRateLimitResetCreditsSummary {
+        available_count: details.available_count.max(0),
+        credits: Some(credits),
+    })
+}
+
+fn parse_reset_credit_timestamp(value: &str) -> Result<i64, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.timestamp())
+        .map_err(|error| format!("failed to parse timestamp `{value}`: {error}"))
 }
 
 fn rate_limits_from_payload(payload: CodexUsagePayload) -> CodexRateLimitsResponse {
@@ -230,11 +428,19 @@ fn rate_limits_from_payload(payload: CodexUsagePayload) -> CodexRateLimitsRespon
         .get("codex")
         .cloned()
         .unwrap_or_else(|| snapshots[0].clone());
+    let rate_limit_reset_credits =
+        payload
+            .rate_limit_reset_credits
+            .map(|summary| CodexRateLimitResetCreditsSummary {
+                available_count: summary.available_count.max(0),
+                credits: None,
+            });
 
     CodexRateLimitsResponse {
         fetched_at_ms: chrono::Utc::now().timestamp_millis(),
         rate_limits,
         rate_limits_by_limit_id,
+        rate_limit_reset_credits,
     }
 }
 
@@ -308,7 +514,7 @@ fn normalize_plan_type(value: String) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-fn codex_usage_endpoint(base_url: Option<&str>) -> String {
+fn codex_endpoint(base_url: Option<&str>, path: &str) -> String {
     let base_url = base_url
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -319,12 +525,29 @@ fn codex_usage_endpoint(base_url: Option<&str>) -> String {
         .or_else(|| base_url.strip_suffix(MODELS_ENDPOINT_PATH))
         .or_else(|| base_url.strip_suffix(USAGE_ENDPOINT_PATH))
         .unwrap_or(base_url);
-    format!("{base_url}{USAGE_ENDPOINT_PATH}")
+    format!("{base_url}{path}")
+}
+
+fn codex_usage_endpoint(base_url: Option<&str>) -> String {
+    codex_endpoint(base_url, USAGE_ENDPOINT_PATH)
+}
+
+fn codex_rate_limit_reset_credits_endpoint(base_url: Option<&str>) -> String {
+    codex_endpoint(base_url, RATE_LIMIT_RESET_CREDITS_ENDPOINT_PATH)
+}
+
+fn codex_rate_limit_reset_credits_consume_endpoint(base_url: Option<&str>) -> String {
+    codex_endpoint(base_url, RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT_PATH)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_usage_endpoint, rate_limits_from_payload, CodexUsagePayload};
+    use super::{
+        codex_rate_limit_reset_credits_consume_endpoint, codex_rate_limit_reset_credits_endpoint,
+        codex_usage_endpoint, rate_limit_reset_credits_from_details, rate_limits_from_payload,
+        CodexRateLimitResetOutcome, CodexUsagePayload, CodexUsageRateLimitResetConsumeResponse,
+        CodexUsageRateLimitResetCreditsDetails,
+    };
     use serde_json::json;
 
     #[test]
@@ -340,6 +563,18 @@ mod tests {
         assert_eq!(
             codex_usage_endpoint(Some("https://example.test/backend-api/codex/models")),
             "https://example.test/backend-api/codex/usage"
+        );
+        assert_eq!(
+            codex_rate_limit_reset_credits_endpoint(Some(
+                "https://example.test/backend-api/codex/responses"
+            )),
+            "https://example.test/backend-api/codex/rate-limit-reset-credits"
+        );
+        assert_eq!(
+            codex_rate_limit_reset_credits_consume_endpoint(Some(
+                "https://example.test/backend-api/codex/responses"
+            )),
+            "https://example.test/backend-api/codex/rate-limit-reset-credits/consume"
         );
     }
 
@@ -366,6 +601,9 @@ mod tests {
             },
             "rate_limit_reached_type": {
                 "type": "workspace_member_usage_limit_reached"
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 4
             },
             "additional_rate_limits": [
                 {
@@ -396,5 +634,43 @@ mod tests {
             Some("workspace_member_usage_limit_reached")
         );
         assert!(response.rate_limits_by_limit_id.contains_key("codex_other"));
+        assert_eq!(
+            response
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(|summary| summary.available_count),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn maps_rate_limit_reset_credit_details_and_consume_outcome() {
+        let details: CodexUsageRateLimitResetCreditsDetails = serde_json::from_value(json!({
+            "credits": [{
+                "id": "credit-1",
+                "reset_type": "codex_rate_limits",
+                "status": "available",
+                "granted_at": "2026-06-17T00:00:00Z",
+                "expires_at": "2026-07-17T00:00:00Z",
+                "title": "Full reset (Weekly + 5 hr)",
+                "description": "Ready to redeem"
+            }],
+            "available_count": 1
+        }))
+        .expect("reset credit details should parse");
+        let summary = rate_limit_reset_credits_from_details(details)
+            .expect("reset credit timestamps should parse");
+        assert_eq!(summary.available_count, 1);
+        let credit = &summary.credits.expect("detailed credits")[0];
+        assert_eq!(credit.id, "credit-1");
+        assert_eq!(credit.expires_at, Some(1_784_246_400));
+
+        let response: CodexUsageRateLimitResetConsumeResponse = serde_json::from_value(json!({
+            "code": "already_redeemed",
+            "windows_reset": 2
+        }))
+        .expect("consume response should parse");
+        assert_eq!(response.code, CodexRateLimitResetOutcome::AlreadyRedeemed);
+        assert_eq!(response.windows_reset, 2);
     }
 }

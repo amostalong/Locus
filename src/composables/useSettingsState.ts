@@ -13,6 +13,7 @@ import {
   anthropicRateLimits as fetchAnthropicRateLimits,
   codexStatus as fetchCodexStatus,
   codexRateLimits as fetchCodexRateLimits,
+  codexConsumeRateLimitResetCredit as serviceConsumeCodexRateLimitResetCredit,
   codexStartLogin,
   codexPollLogin,
   codexLogout as serviceCodexLogout,
@@ -55,6 +56,7 @@ import {
   normalizeCustomEndpointTestErrorMessage,
 } from "../services/customEndpointTestResult";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { normalizeAppError } from "../services/errors";
 import { useNotificationStore } from "../stores/notification";
 import type {
@@ -107,6 +109,13 @@ export interface CodexQuotaCreditsState {
   balance: string | null;
 }
 
+export interface CodexQuotaResetCreditState {
+  id: string | null;
+  title: string | null;
+  description: string | null;
+  expiresAt: number | null;
+}
+
 export interface CodexQuotaState {
   loading: boolean;
   loaded: boolean;
@@ -114,6 +123,8 @@ export interface CodexQuotaState {
   fetchedAtMs: number | null;
   windows: CodexQuotaWindowState[];
   credits: CodexQuotaCreditsState | null;
+  resetCreditsAvailable: number | null;
+  resetCredits: CodexQuotaResetCreditState[];
   planType: string | null;
 }
 
@@ -153,6 +164,8 @@ export function useSettingsState(emit: SettingsEmit) {
       fetchedAtMs: null,
       windows: [],
       credits: null,
+      resetCreditsAvailable: null,
+      resetCredits: [],
       planType: null,
     };
   }
@@ -249,6 +262,36 @@ export function useSettingsState(emit: SettingsEmit) {
           balance: response.rateLimits.credits.balance ?? null,
         }
       : null;
+    const resetCreditsAvailable = typeof response.rateLimitResetCredits?.availableCount === "number"
+      && Number.isFinite(response.rateLimitResetCredits.availableCount)
+      ? Math.max(0, Math.trunc(response.rateLimitResetCredits.availableCount))
+      : null;
+    const resetCreditLimit = resetCreditsAvailable ?? 0;
+    const resetCredits = (response.rateLimitResetCredits?.credits ?? [])
+      .filter((credit) => credit.status.trim().toLowerCase() === "available")
+      .map((credit): CodexQuotaResetCreditState | null => {
+        const id = credit.id.trim();
+        if (!id) return null;
+        const expiresAt = typeof credit.expiresAt === "number"
+          && Number.isFinite(credit.expiresAt)
+          && credit.expiresAt > 0
+          ? credit.expiresAt
+          : null;
+        const title = credit.title?.trim() || null;
+        const description = credit.description?.trim() || null;
+        return { id, title, description, expiresAt };
+      })
+      .filter((credit): credit is CodexQuotaResetCreditState => credit !== null)
+      .sort((left, right) => (left.expiresAt ?? Number.MAX_SAFE_INTEGER) - (right.expiresAt ?? Number.MAX_SAFE_INTEGER))
+      .slice(0, resetCreditLimit);
+    if (resetCreditLimit > 0 && resetCredits.length === 0) {
+      resetCredits.push({
+        id: null,
+        title: null,
+        description: null,
+        expiresAt: null,
+      });
+    }
 
     return {
       loading: false,
@@ -257,6 +300,8 @@ export function useSettingsState(emit: SettingsEmit) {
       fetchedAtMs: response.fetchedAtMs,
       windows,
       credits,
+      resetCreditsAvailable,
+      resetCredits,
       planType: response.rateLimits.planType ?? null,
     };
   }
@@ -332,6 +377,7 @@ export function useSettingsState(emit: SettingsEmit) {
     codexRetrying.value = false;
     codexStatus.value = normalizeCodexStatus();
     codexQuota.value = emptyCodexQuota();
+    codexResetCreditBusyId.value = null;
     codexModelConfig.value = normalizeCodexModelConfig();
     codexUserCode.value = "";
     codexUrl.value = "";
@@ -663,6 +709,7 @@ export function useSettingsState(emit: SettingsEmit) {
   const codexStep = ref<CodexStep>("idle");
   const codexStatus = ref<CodexStatusState>(normalizeCodexStatus());
   const codexQuota = ref<CodexQuotaState>(emptyCodexQuota());
+  const codexResetCreditBusyId = ref<string | null>(null);
   const codexRetrying = ref(false);
   const codexModelConfig = ref<CodexModelConfig>(normalizeCodexModelConfig());
   const codexUserCode = ref("");
@@ -694,6 +741,7 @@ export function useSettingsState(emit: SettingsEmit) {
       codexStatus.value = normalizeCodexStatus(await fetchCodexStatus());
       if (!codexStatus.value.authenticated || codexStatus.value.validationFailed) {
         codexQuota.value = emptyCodexQuota();
+        codexResetCreditBusyId.value = null;
       }
     } catch { /* ignore */ }
   }
@@ -701,6 +749,7 @@ export function useSettingsState(emit: SettingsEmit) {
   async function loadCodexRateLimits() {
     if (!codexStatus.value.authenticated || codexStatus.value.validationFailed) {
       codexQuota.value = emptyCodexQuota();
+      codexResetCreditBusyId.value = null;
       return;
     }
 
@@ -719,6 +768,59 @@ export function useSettingsState(emit: SettingsEmit) {
         loading: false,
         error: err.message,
       };
+    }
+  }
+
+  async function consumeCodexResetCredit(creditId: string | null) {
+    if (
+      codexResetCreditBusyId.value !== null
+      || !codexStatus.value.authenticated
+      || codexStatus.value.validationFailed
+    ) {
+      return;
+    }
+
+    const confirmed = await confirm(t("settings.codex.resetCreditConsumeConfirm"), {
+      title: t("settings.codex.resetCredits"),
+      kind: "warning",
+    });
+    if (!confirmed) return;
+
+    codexResetCreditBusyId.value = creditId ?? "__next_available__";
+    try {
+      const response = await serviceConsumeCodexRateLimitResetCredit(creditId);
+      await loadCodexRateLimits();
+      const notificationStore = useNotificationStore();
+      switch (response.outcome) {
+        case "reset":
+        case "alreadyRedeemed":
+          notificationStore.addNotice("success", t("settings.codex.resetCreditConsumeSuccess"), {
+            operation: "codexRateLimitResetConsume",
+          });
+          break;
+        case "nothingToReset":
+          notificationStore.addNotice("warning", t("settings.codex.resetCreditNothingToReset"), {
+            operation: "codexRateLimitResetConsume",
+          });
+          break;
+        case "noCredit":
+          notificationStore.addNotice("warning", t("settings.codex.resetCreditUnavailable"), {
+            operation: "codexRateLimitResetConsume",
+          });
+          break;
+      }
+    } catch (e) {
+      const err = normalizeAppError(e);
+      useNotificationStore().addNotice(
+        "error",
+        t("settings.codex.resetCreditConsumeFailed", err.message),
+        {
+          code: err.code,
+          operation: "codexRateLimitResetConsume",
+        },
+      );
+    } finally {
+      codexResetCreditBusyId.value = null;
     }
   }
 
@@ -814,6 +916,7 @@ export function useSettingsState(emit: SettingsEmit) {
       await serviceCodexLogout();
       codexStatus.value = normalizeCodexStatus();
       codexQuota.value = emptyCodexQuota();
+      codexResetCreditBusyId.value = null;
       emit("authChanged");
       successMsg.value = t("settings.codex.logoutSuccess");
       setTimeout(() => { successMsg.value = ""; }, 2000);
@@ -1438,6 +1541,7 @@ export function useSettingsState(emit: SettingsEmit) {
     codexStep,
     codexStatus,
     codexQuota,
+    codexResetCreditBusyId,
     codexRetrying,
     codexModelConfig,
     codexUserCode,
@@ -1447,6 +1551,7 @@ export function useSettingsState(emit: SettingsEmit) {
     codexInterval,
     loadCodexStatus,
     loadCodexRateLimits,
+    consumeCodexResetCredit,
     loadCodexModelConfig,
     startCodexLogin,
     pollCodex,
