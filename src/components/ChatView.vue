@@ -258,7 +258,7 @@ const emit = defineEmits<{
   answerQuestion: [answer: string];
   answerToolConfirm: [questionId: string, answer: string];
   answerAllToolConfirms: [questionIds: string[], answer: string];
-  openThinking: [content: string];
+  openThinking: [payload: { content: string; targetKey: string }];
   selectSession: [id: string];
   newChat: [];
   renameSession: [id: string, title: string];

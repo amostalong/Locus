@@ -451,7 +451,7 @@ onUnmounted(() => {
       :is-thinking="chatStore.isThinking && !chatStore.thinkingPanelContent"
       :layout="isVerticalLayout ? 'bottom' : 'side'"
       :max-side-width="thinkingPanelMaxSideWidth"
-      @close="chatStore.showThinkingPanel = false"
+      @close="chatStore.closeThinkingPanel"
     />
     <Transition
       :css="false"

@@ -172,7 +172,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: "applyKnowledgeProposal", proposalId: string): void;
   (e: "ignoreKnowledgeProposal", proposalId: string): void;
-  (e: "openThinking", content: string): void;
+  (e: "openThinking", payload: { content: string; targetKey: string }): void;
   (e: "openImage", src: string): void;
   (e: "scroll", event: Event): void;
   (e: "contentClick", event: MouseEvent): void;
@@ -1601,6 +1601,13 @@ const hasVisibleActiveThinkingBlock = computed(() =>
 const hasVisibleTransientThinkingBlock = computed(
   () => hasVisibleActiveThinkingBlock.value || hasVisibleCompletedThinkingContent.value,
 );
+// Stable messageId for the in-flight streaming assistant message. During a
+// stream this is the trailing assistant placeholder in `props.messages`;
+// after the stream completes the same id becomes the history messageId,
+// so a `${messageId}:${partId}` key stays valid across the transition.
+const streamingMessageId = computed(
+  () => props.messages[props.messages.length - 1]?.id ?? "",
+);
 const hasStreamingContent = computed(() =>
   hasVisibleStreamingText.value
   || canonicalLiveRenderParts.value.some((part) => part.kind === "text" || part.kind === "toolCall")
@@ -2893,7 +2900,7 @@ function openImage(src: string) {
                     v-if="variant === 'session'"
                     type="button"
                     class="chat-transcript-thinking-header is-clickable"
-                    @click="emit('openThinking', segment.content)"
+                    @click="emit('openThinking', { content: segment.content, targetKey: segment.key })"
                   >
                     <svg class="chat-transcript-thinking-chevron" viewBox="0 0 16 16" fill="currentColor" width="12" height="12">
                       <path d="M6 3l5 5-5 5V3z" />
@@ -3014,7 +3021,7 @@ function openImage(src: string) {
                     type="button"
                     class="chat-transcript-thinking-header"
                     :class="{ active: segment.active, 'is-clickable': true }"
-                    @click="emit('openThinking', '')"
+                    @click="emit('openThinking', { content: '', targetKey: `${streamingMessageId}:${segment.part.id}` })"
                   >
                     <svg class="chat-transcript-thinking-chevron" viewBox="0 0 16 16" fill="currentColor" width="12" height="12">
                       <path d="M6 3l5 5-5 5V3z" />

@@ -334,6 +334,11 @@ export const useChatStore = defineStore("chat", () => {
   const thinkingDuration = ref(0);
   const showThinkingPanel = ref(false);
   const thinkingPanelContent = ref("");
+  // Stable identity (`${messageId}:${partId}`) of the thinking block the
+  // panel is currently showing. Used to toggle the panel closed when the
+  // user re-clicks the same block on the transcript. Cleared whenever the
+  // panel is closed or its target goes away (session switch / new chat).
+  const currentThinkingTargetKey = ref<string | null>(null);
   const activeToolCalls = ref<ToolCallDisplay[]>([]);
   const tokenUsage = ref<TokenUsage>(emptyTokenUsage());
   const todos = ref<TodoItem[]>([]);
@@ -1932,6 +1937,7 @@ export const useChatStore = defineStore("chat", () => {
     currentRunId.value = sessionRunIds.value.get(id) ?? null;
     resetStreamRuntimeState();
     showThinkingPanel.value = false;
+    currentThinkingTargetKey.value = null;
     thinkingPanelContent.value = "";
     todoWriteVersion.value = 0;
     showTodoPanel.value = false;
@@ -1987,6 +1993,7 @@ export const useChatStore = defineStore("chat", () => {
     showTodoPanel.value = false;
     todoMode.value = "current";
     showThinkingPanel.value = false;
+    currentThinkingTargetKey.value = null;
     thinkingPanelContent.value = "";
     undoableMessageIds.value = new Set();
     sessionAgentId.value = null;
@@ -2030,6 +2037,7 @@ export const useChatStore = defineStore("chat", () => {
     sessionLatestTodoRunIds.value = new Map();
     sessionLatestCompletedRunIds.value = new Map();
     showThinkingPanel.value = false;
+    currentThinkingTargetKey.value = null;
     thinkingPanelContent.value = "";
     sessionAgentId.value = null;
     useAgentStore().resetToDefault();
@@ -2046,9 +2054,28 @@ export const useChatStore = defineStore("chat", () => {
     setTodoPanelVisible(!showTodoPanel.value);
   }
 
-  function openThinkingPanel(content: string) {
+  function openThinkingPanel(payload: { content: string; targetKey?: string }) {
+    const { content, targetKey } = payload;
+    // Toggle: clicking the same thinking block the panel is already showing
+    // closes the panel instead of re-opening it (matches the rest of the
+    // sidebar/inspector toggle affordances in this workspace).
+    if (
+      showThinkingPanel.value
+      && targetKey
+      && currentThinkingTargetKey.value === targetKey
+    ) {
+      closeThinkingPanel();
+      return;
+    }
     thinkingPanelContent.value = content || "";
+    currentThinkingTargetKey.value = targetKey ?? null;
     showThinkingPanel.value = true;
+  }
+
+  function closeThinkingPanel() {
+    showThinkingPanel.value = false;
+    currentThinkingTargetKey.value = null;
+    thinkingPanelContent.value = "";
   }
 
   async function renameSession(id: string, title: string) {
@@ -2896,6 +2923,7 @@ export const useChatStore = defineStore("chat", () => {
     thinkingDuration,
     showThinkingPanel,
     thinkingPanelContent,
+    currentThinkingTargetKey,
     activeToolCalls,
     tokenUsage,
     todos,
@@ -2939,6 +2967,7 @@ export const useChatStore = defineStore("chat", () => {
     newChat,
     resetWorkspaceScope,
     openThinkingPanel,
+    closeThinkingPanel,
     renameSession,
     archiveSession,
     deleteSession,

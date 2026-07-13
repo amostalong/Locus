@@ -152,6 +152,10 @@ const liveStream = computed(() => (props.text ? null : props.stream ?? null));
  * v-for, so a flush re-renders only the active tail span. */
 const liveParts = shallowRef<{ frozen: readonly string[]; active: string } | null>(null);
 let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+// Declared before flushLiveParts: the immediate-effect watcher below fires
+// synchronously during setup, which would otherwise hit a TDZ when
+// scheduleScrollToBottom reads `scrollFrame` before this line executes.
+let scrollFrame: number | null = null;
 
 function clearLiveFlushTimer() {
   if (liveFlushTimer === null) return;
@@ -168,6 +172,15 @@ function flushLiveParts() {
   scheduleScrollToBottom();
 }
 
+function scheduleScrollToBottom() {
+  if (scrollFrame !== null) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null;
+    const el = contentRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
 watch(
   () => liveStream.value?.version.value,
   () => {
@@ -179,17 +192,6 @@ watch(
 // Stream identity or mode changes swap the content outright: flush
 // immediately so stale parts never linger.
 watch([liveStream, () => props.text], flushLiveParts, { immediate: true });
-
-let scrollFrame: number | null = null;
-
-function scheduleScrollToBottom() {
-  if (scrollFrame !== null) return;
-  scrollFrame = requestAnimationFrame(() => {
-    scrollFrame = null;
-    const el = contentRef.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-}
 
 onBeforeUnmount(() => {
   clearLiveFlushTimer();
