@@ -1835,7 +1835,7 @@ body.is-dragging-select-lock * {
 }
 
 .tab-brand .locus-o {
-  color: #B8860B;
+  color: #6169D5;
 }
 
 .tab-brand:hover .locus-o {
