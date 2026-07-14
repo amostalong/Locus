@@ -14,6 +14,7 @@ import {
 } from "../services/systemNotifications";
 import { getLocusRuntime, type RuntimeUnsubscribe } from "../services/locusRuntime";
 import { markStartupPhase, measureStartupAsync } from "../services/startupPerf";
+import { listenInAppEditorOpens } from "../services/inAppEditorOpen";
 import { setScope, setWarmup, clearWarmup } from "./warmupCache";
 import {
   getProviders,
@@ -108,6 +109,7 @@ export function useAppBootstrap() {
   let unlistenKnowledgeChanged: RuntimeUnsubscribe | null = null;
   let unlistenSessionContentChanged: RuntimeUnsubscribe | null = null;
   let unlistenPluginsChanged: RuntimeUnsubscribe | null = null;
+  let unlistenInAppEditorOpen: RuntimeUnsubscribe | null = null;
   let lastAutoOpenedLexicalProgressRun = "";
 
   // -- Cross-domain watchers --
@@ -516,6 +518,13 @@ export function useAppBootstrap() {
       void agentStore.loadAgents();
       void loadSkills();
     });
+    // Cross-window: sub-windows (e.g. ChatDiffReviewWindow) emit
+    // `locus:open-in-editor` to ask the main window to open a file in
+    // the in-app Monaco editor instead of the OS default. The handler
+    // (`openInAppEditorDirect`) drives the editor store and switches
+    // the active tab. See `services/inAppEditorOpen.ts` for the full
+    // routing logic.
+    unlistenInAppEditorOpen = await listenInAppEditorOpens();
     markStartupPhase("register_listeners_subscriptions_ready");
 
     // Initial Unity/AssetDb state
@@ -540,6 +549,8 @@ export function useAppBootstrap() {
     unlistenKnowledgeChanged?.();
     unlistenSessionContentChanged?.();
     unlistenPluginsChanged?.();
+    unlistenInAppEditorOpen?.();
+    unlistenInAppEditorOpen = null;
     lastAutoOpenedLexicalProgressRun = "";
     resetSystemNotificationState();
     uiStore.cleanup();
