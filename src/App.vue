@@ -38,6 +38,7 @@ import { isUnityReferenceImportWindowLocation } from "./services/unityReferenceI
 import { isReferenceExternalImportWindowLocation } from "./services/referenceExternalImportWindow";
 import { isCollabSearchWindowLocation } from "./services/collabSearchWindow";
 import { isChatDiffReviewWindowLocation } from "./services/chatDiffReviewWindow";
+import { isPlanViewWindowLocation } from "./services/planViewWindow";
 import {
   setLocusAssetInspectorPanelHostAvailable,
   useLocusAssetInspectorPanel,
@@ -65,6 +66,7 @@ const isUnityReferenceImportWindow = isUnityReferenceImportWindowLocation();
 const isReferenceExternalImportWindow = isReferenceExternalImportWindowLocation();
 const isCollabSearchWindow = isCollabSearchWindowLocation();
 const isChatDiffReviewWindow = isChatDiffReviewWindowLocation();
+const isPlanViewWindow = isPlanViewWindowLocation();
 const isUnityValueEditorWindow = isUnityValueEditorWindowLocation();
 const isViewHostWindow = isViewHostWindowLocation();
 const isViewContentWindow = isViewContentWindowLocation();
@@ -78,6 +80,7 @@ const isStandaloneWindow = isUnityEmbedWindow
   || isReferenceExternalImportWindow
   || isCollabSearchWindow
   || isChatDiffReviewWindow
+  || isPlanViewWindow
   || isUnityValueEditorWindow
   || isViewHostWindow
   || isViewContentWindow
@@ -90,6 +93,7 @@ const UnityReferenceImportProgressWindow = defineAsyncComponent(() => import("./
 const ReferenceExternalImportWindow = defineAsyncComponent(() => import("./components/ReferenceExternalImportWindow.vue"));
 const CollabSearchWindow = defineAsyncComponent(() => import("./components/CollabSearchWindow.vue"));
 const ChatDiffReviewWindow = defineAsyncComponent(() => import("./components/ChatDiffReviewWindow.vue"));
+const PlanViewWindow = defineAsyncComponent(() => import("./components/PlanViewWindow.vue"));
 const UnityValueEditorWindow = defineAsyncComponent(() => import("./components/UnityValueEditorWindow.vue"));
 const ViewHostWindow = defineAsyncComponent(() => import("./components/ViewHostWindow.vue"));
 const AgentGraphToolWindow = defineAsyncComponent(() => import("./components/AgentGraphToolWindow.vue"));
@@ -976,6 +980,7 @@ watch(() => projectStore.workingDir, () => {
   <ReferenceExternalImportWindow v-else-if="isReferenceExternalImportWindow" />
   <CollabSearchWindow v-else-if="isCollabSearchWindow" />
   <ChatDiffReviewWindow v-else-if="isChatDiffReviewWindow" />
+  <PlanViewWindow v-else-if="isPlanViewWindow" />
   <UnityValueEditorWindow v-else-if="isUnityValueEditorWindow" />
   <ViewHostWindow v-else-if="isViewContentWindow" embedded />
   <ViewHostWindow v-else-if="isViewHostWindow" />

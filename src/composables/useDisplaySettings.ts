@@ -8,6 +8,7 @@ export type FontSlot = "ui" | "prose" | "monoInline" | "monoBlock" | "monoEditor
 export type DiffReviewTarget = "inline" | "window";
 export type ChatDiffReviewTarget = DiffReviewTarget;
 export type GitDiffReviewTarget = DiffReviewTarget;
+export type PlanApprovalTarget = "card" | "window";
 export type AssetRefClickAction =
   | "editor"
   | "unitySelect"
@@ -44,6 +45,8 @@ export interface DisplaySettings {
   chatDiffReviewTarget: DiffReviewTarget;
   /** Default target for reviewing Git file diffs */
   gitDiffReviewTarget: DiffReviewTarget;
+  /** Default surface for the exit_plan_mode approval (inline card or standalone window) */
+  planApprovalTarget: PlanApprovalTarget;
   /** Default action when clicking a Unity asset reference in chat messages */
   assetRefClickAction: AssetRefClickAction;
   /** Click action override for chat running inside the Unity embed window */
@@ -120,6 +123,7 @@ const defaults: DisplaySettings = {
   fileChangePopoverEnabled: true,
   chatDiffReviewTarget: "window",
   gitDiffReviewTarget: "window",
+  planApprovalTarget: "card",
   // Fork default: route asset ref clicks to the in-app Editor View when the
   // file is text-editable. This fork ships its own Monaco-backed Editor View
   // (see components/editor/EditorView.vue) so users get a code editor instead
