@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listDirEntries, type DirEntry } from "../../services/project";
+import { deriveAutoExpandPaths } from "./fileTreeAutoExpand";
 import FileTreeNode from "./FileTreeNode.vue";
 
 const props = withDefaults(defineProps<{
@@ -19,6 +20,11 @@ const entries = ref<DirEntry[]>([]);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const unityView = ref(true);
+
+// Ancestor directory paths of the active file. Each FileTreeNode that
+// matches its own relPath against this list is forced open so the active
+// row becomes reachable without the user having to navigate the tree first.
+const autoExpandPaths = computed<string[]>(() => deriveAutoExpandPaths(props.activePath));
 
 function sortEntries(list: DirEntry[]): DirEntry[] {
   return [...list].sort((a, b) => {
@@ -71,14 +77,60 @@ function handleOpen(relPath: string) {
   emit("open", relPath);
 }
 
+// -- Reveal active file: scroll the active row into view ---------------
+// The ancestor chain may need to be loaded asynchronously (one Tauri
+// `list_dir` per level), so we poll for the row rather than assuming
+// it's in the DOM on the same tick that `activePath` changes.
+const rootEl = ref<HTMLElement | null>(null);
+let scrollPollTimer: number | null = null;
+const SCROLL_POLL_INTERVAL_MS = 60;
+const SCROLL_POLL_MAX_ATTEMPTS = 25; // ~1.5s — covers a few deep levels
+
+function stopScrollPoll() {
+  if (scrollPollTimer !== null) {
+    window.clearInterval(scrollPollTimer);
+    scrollPollTimer = null;
+  }
+}
+
+function scrollActiveIntoView() {
+  stopScrollPoll();
+  if (!props.activePath) return;
+  const root = rootEl.value;
+  if (!root) return;
+  let attempts = 0;
+  scrollPollTimer = window.setInterval(() => {
+    const row = root.querySelector<HTMLElement>(".ed-tree-row.is-active");
+    if (row) {
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      stopScrollPoll();
+      return;
+    }
+    if (++attempts >= SCROLL_POLL_MAX_ATTEMPTS) {
+      stopScrollPoll();
+    }
+  }, SCROLL_POLL_INTERVAL_MS);
+}
+
 onMounted(loadRoot);
 watch(() => props.workingDir, loadRoot);
+
+// Trigger reveal whenever the active file changes (covers FileTree click,
+// QuickOpen, F12 goto, Chat code refs, Diff open, etc., since they all
+// flow through `editorStore.activeFileId` → `active-path`).
+watch(
+  () => props.activePath,
+  () => scrollActiveIntoView(),
+  { immediate: true },
+);
+
+onBeforeUnmount(stopScrollPoll);
 
 defineExpose({ refresh: loadRoot });
 </script>
 
 <template>
-  <div class="ed-tree" :data-empty="entries.length === 0">
+  <div ref="rootEl" class="ed-tree" :data-empty="entries.length === 0">
     <div class="ed-tree-header">
       <span class="ed-tree-title">Files</span>
       <button
@@ -122,6 +174,7 @@ defineExpose({ refresh: loadRoot });
         :depth="0"
         :active-path="activePath"
         :auto-expand-names="autoExpandNames"
+        :auto-expand-paths="autoExpandPaths"
         :unity-view="unityView"
         @open="handleOpen"
       />

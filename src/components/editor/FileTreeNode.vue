@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { listDirEntries, type DirEntry } from "../../services/project";
 import { editorReadFile } from "../../services/editorFs";
 import { languageFromPath } from "../../services/editorLanguage";
@@ -13,9 +13,16 @@ const props = withDefaults(defineProps<{
   depth: number;
   activePath: string | null;
   autoExpandNames?: string[];
+  /**
+   * Full directory paths that should be auto-expanded to reveal `activePath`.
+   * Computed by the parent FileTree from the active file's ancestor chain.
+   * Matching is by exact `entry.relPath` (forward-slash normalized).
+   */
+  autoExpandPaths?: string[];
   unityView?: boolean;
 }>(), {
   autoExpandNames: () => [],
+  autoExpandPaths: () => [],
   unityView: false,
 });
 
@@ -106,6 +113,23 @@ const expanded = ref(shouldExpand);
 const children = ref<DirEntry[] | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
+
+// Reveal the active file: when `autoExpandPaths` (derived by the parent
+// from the active file's ancestor chain) matches this directory, force
+// it open so the active row is reachable. `immediate: true` covers the
+// first mount when the tree is being revealed at app start.
+watch(
+  () => props.autoExpandPaths,
+  (paths) => {
+    if (!props.entry.isDir) return;
+    if (!paths || paths.length === 0) return;
+    if (paths.includes(props.entry.relPath)) {
+      expanded.value = true;
+      void ensureChildren();
+    }
+  },
+  { immediate: true },
+);
 
 // -- Context menu --
 const ctxMenu = ref<{ x: number; y: number; relPath: string; name: string } | null>(null);
@@ -342,6 +366,8 @@ function bubbleOpen(relPath: string) {
         :entry="child"
         :depth="depth + 1"
         :active-path="activePath"
+        :auto-expand-names="autoExpandNames"
+        :auto-expand-paths="autoExpandPaths"
         :unity-view="unityView"
         @open="bubbleOpen"
       />
