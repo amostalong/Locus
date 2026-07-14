@@ -84,13 +84,18 @@ export function splitHighlightedHtmlLines(source: string): string[] {
   return lines;
 }
 
-export function renderHighlightedCodeLines(source: string, showLineNumbers = true): string {
+export function renderHighlightedCodeLines(
+  source: string,
+  showLineNumbers = true,
+  startLine = 1,
+): string {
   const lines = splitHighlightedHtmlLines(source);
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const baseLine = Number.isFinite(startLine) && startLine > 0 ? Math.floor(startLine) : 1;
   return lines
     .map((line, i) => (
       showLineNumbers
-        ? `<span class="code-line"><span class="line-number">${i + 1}</span><span class="line-content">${line || " "}</span></span>`
+        ? `<span class="code-line"><span class="line-number">${baseLine + i}</span><span class="line-content">${line || " "}</span></span>`
         : `<span class="code-line code-line-tree"><span class="line-content">${line || " "}</span></span>`
     ))
     .join("");

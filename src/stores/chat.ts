@@ -1324,6 +1324,26 @@ export const useChatStore = defineStore("chat", () => {
         // the authoritative full text for the message that lands in history.
         ensureLivePartStream(m.partId).append(m.text);
         break;
+      case "appendLiveCodeBlockContent": {
+        // Stage 2: code blocks are rendered with their full content
+        // (CodeBlockView reads `part.content`); appending to a chunk
+        // stream like text parts would leave the visible content at the
+        // empty baseline. Update `part.content` in place and re-emit the
+        // surrounding array so Vue picks up the change.
+        const index = liveRenderParts.value.findIndex((part) => part.id === m.partId);
+        if (index >= 0) {
+          const target = liveRenderParts.value[index]!;
+          if (target.kind === "codeBlock") {
+            const next = [...liveRenderParts.value];
+            next.splice(index, 1, {
+              ...target,
+              content: target.content + m.text,
+            } as AssistantRenderPart);
+            liveRenderParts.value = next;
+          }
+        }
+        break;
+      }
       case "deactivateLiveThinkingParts":
         // Keep the array's identity when there is nothing to deactivate —
         // downstream computeds and throttles key off it.

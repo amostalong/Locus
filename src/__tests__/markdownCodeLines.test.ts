@@ -75,4 +75,44 @@ describe("markdown code line rendering", () => {
     expect(rendered).not.toContain("</span>\n<span");
     expect(rendered).toContain('</span></span><span class="code-line">');
   });
+
+  it("renders line numbers starting at startLine when provided", () => {
+    const rendered = renderHighlightedCodeLines("alpha\nbeta\ngamma", true, 50);
+    const fragment = parseFragment(`<code>${rendered}</code>`) as ParseNode;
+    const codeElement = fragment.childNodes?.find((child) => child.tagName === "code");
+    const directCodeLines = codeElement?.childNodes?.filter((child) => hasClass(child, "code-line")) ?? [];
+
+    expect(directCodeLines.map((line) => textContent(childByClass(line, "line-number")).trim())).toEqual([
+      "50",
+      "51",
+      "52",
+    ]);
+  });
+
+  it("falls back to line 1 when startLine is missing or non-positive", () => {
+    const fromZero = renderHighlightedCodeLines("alpha\nbeta", true, 0);
+    const fromNegative = renderHighlightedCodeLines("alpha\nbeta", true, -5);
+    const fromUndefined = renderHighlightedCodeLines("alpha\nbeta", true, Number.NaN);
+
+    for (const rendered of [fromZero, fromNegative, fromUndefined]) {
+      const fragment = parseFragment(`<code>${rendered}</code>`) as ParseNode;
+      const codeElement = fragment.childNodes?.find((child) => child.tagName === "code");
+      const directCodeLines = codeElement?.childNodes?.filter((child) => hasClass(child, "code-line")) ?? [];
+      expect(directCodeLines.map((line) => textContent(childByClass(line, "line-number")).trim())).toEqual([
+        "1",
+        "2",
+      ]);
+    }
+  });
+
+  it("preserves line numbers when startLine is a non-integer floor value", () => {
+    const rendered = renderHighlightedCodeLines("alpha\nbeta", true, 49.7);
+    const fragment = parseFragment(`<code>${rendered}</code>`) as ParseNode;
+    const codeElement = fragment.childNodes?.find((child) => child.tagName === "code");
+    const directCodeLines = codeElement?.childNodes?.filter((child) => hasClass(child, "code-line")) ?? [];
+    expect(directCodeLines.map((line) => textContent(childByClass(line, "line-number")).trim())).toEqual([
+      "49",
+      "50",
+    ]);
+  });
 });

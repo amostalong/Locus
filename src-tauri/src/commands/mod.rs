@@ -121,6 +121,39 @@ pub enum StreamEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_seq: Option<u32>,
     },
+    /// Streaming counterpart of `TextDelta` for fenced code blocks. The
+    /// fence state machine in `crate::markdown::fence_stream` slices the
+    /// text stream at ` ``` ` boundaries and emits these three events
+    /// (start / delta / done) so the chat view can render a code block
+    /// with correct line numbers in real time. See
+    /// `Me/code-block-render-part.md` for the design rationale.
+    #[serde(rename_all = "camelCase")]
+    CodeBlockStart {
+        session_id: String,
+        id: String,
+        language: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_line: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render_seq: Option<u32>,
+    },
+    #[serde(rename_all = "camelCase")]
+    CodeBlockDelta {
+        session_id: String,
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<u32>,
+    },
+    #[serde(rename_all = "camelCase")]
+    CodeBlockDone {
+        session_id: String,
+        id: String,
+    },
     #[serde(rename_all = "camelCase")]
     ThinkingDelta {
         session_id: String,

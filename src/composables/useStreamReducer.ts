@@ -34,6 +34,8 @@ export type StreamMutation =
   | { type: "setThinkingOrder"; order: number }
   | { type: "upsertLiveRenderPart"; part: AssistantRenderPart }
   | { type: "appendLiveRenderPartContent"; partId: string; text: string }
+  | { type: "appendLiveCodeBlockContent"; partId: string; text: string }
+  | { type: "completeLiveCodeBlock"; partId: string }
   | { type: "deactivateLiveThinkingParts"; duration?: number }
   | { type: "updateLiveToolPart"; toolCallId: string; updates: Partial<ToolCallInfo> }
   | { type: "clearLiveRenderParts" }
@@ -438,6 +440,69 @@ export function reduceStreamEvent(state: StreamState, event: StreamEvent): Strea
         mutations.push({ type: "setThinking", value: false });
       }
       break;
+
+    case "codeBlockStart": {
+      // Stage 2: the fence state machine has opened a new fenced code block.
+      // Allocate (or reuse) a codeBlock part. The backend part-id scheme is
+      // already stable (`{runId}:codeblock:N`); we just upsert it into the
+      // live render parts so the transcript can switch to a CodeBlockView.
+      const order = liveOrderFromEvent(
+        event,
+        nextStreamOrder(),
+        event.id,
+      );
+      // Mirror the text-delta bookkeeping: a fence opening is a structural
+      // boundary that bumps the stream-sequence cursor so subsequent
+      // deltas (prose after the fence, or further fences) order correctly.
+      if (order.order.seq > streamSequenceCursor) {
+        streamSequenceCursor = order.order.seq;
+        mutations.push({ type: "setStreamSequence", value: order.order.seq });
+      }
+      const hasActiveThinkingPart = state.liveRenderParts.some(
+        (part) => part.kind === "thinking" && part.active,
+      );
+      if (state.isThinking || hasActiveThinkingPart) {
+        mutations.push({ type: "deactivateLiveThinkingParts", duration: currentThinkingDuration(state) });
+      }
+      const existing = existingLivePart(state, "codeBlock", event.id);
+      if (!existing) {
+        mutations.push({
+          type: "upsertLiveRenderPart",
+          part: {
+            kind: "codeBlock",
+            id: event.id,
+            order: order.order,
+            language: event.language,
+            content: "",
+            filePath: event.filePath,
+            startLine: event.startLine,
+          },
+        });
+      }
+      break;
+    }
+
+    case "codeBlockDelta": {
+      // Stage 2: append to the existing codeBlock part's content. The
+      // Start must have arrived earlier; if not, the delta is dropped
+      // (the round-finalize render_parts will surface the final content
+      // with the right metadata).
+      const existing = existingLivePart(state, "codeBlock", event.id);
+      if (existing) {
+        mutations.push({ type: "appendLiveCodeBlockContent", partId: event.id, text: event.text });
+      }
+      break;
+    }
+
+    case "codeBlockDone": {
+      // The code block is fully streamed. The part's content is already
+      // authoritative; we just flag it so a future freeze / re-upsert can
+      // skip a re-create. The transcript's `codeBlock` segment path reads
+      // `part.content` so a no-op mutation is fine here, but emitting one
+      // keeps reducers that filter on part-completeness consistent.
+      mutations.push({ type: "completeLiveCodeBlock", partId: event.id });
+      break;
+    }
 
     case "thinkingDelta":
       markThinkingOrder(event.order);

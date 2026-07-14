@@ -274,6 +274,21 @@ pub enum AssistantRenderPart {
         order: RenderOrderKey,
         message: Box<ChatMessage>,
     },
+    /// Fenced code block extracted from the round's text content. Carries
+    /// optional `filePath` / `startLine` metadata parsed from the fence
+    /// info string so the chat view can render correct line numbers.
+    /// See `crate::markdown::parts` for the splitter.
+    #[serde(rename_all = "camelCase")]
+    CodeBlock {
+        id: String,
+        order: RenderOrderKey,
+        language: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_line: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

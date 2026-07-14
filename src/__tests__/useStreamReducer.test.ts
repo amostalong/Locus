@@ -1382,4 +1382,192 @@ describe("reduceStreamEvent", () => {
       expect(mutations).toContainEqual({ type: "setStreaming", value: false });
     });
   });
+
+  describe("codeBlockStart / codeBlockDelta / codeBlockDone", () => {
+    it("upserts a codeBlock part on start with the right metadata", () => {
+      const state = makeState({ isStreaming: true, streamSequence: 4 });
+      const event: StreamEvent = {
+        runId: "test-run",
+        type: "codeBlockStart",
+        sessionId: "s1",
+        id: "test-run:codeblock:1",
+        language: "csharp",
+        filePath: "Assets/Player.cs",
+        startLine: 50,
+        order: 5,
+        renderSeq: 5,
+      };
+      const mutations = reduceStreamEvent(state, event);
+
+      const upsert = mutations.find((m) => m.type === "upsertLiveRenderPart");
+      expect(upsert).toBeDefined();
+      if (upsert?.type === "upsertLiveRenderPart") {
+        expect(upsert.part).toMatchObject({
+          kind: "codeBlock",
+          id: "test-run:codeblock:1",
+          language: "csharp",
+          filePath: "Assets/Player.cs",
+          startLine: 50,
+          content: "",
+        });
+      }
+      expect(mutations).toContainEqual({ type: "setStreamSequence", value: 5 });
+    });
+
+    it("appends codeBlock content via appendLiveCodeBlockContent (not the stream path)", () => {
+      const state = makeState({
+        isStreaming: true,
+        streamSequence: 5,
+        liveRenderParts: [
+          {
+            kind: "codeBlock",
+            id: "test-run:codeblock:1",
+            order: { runId: "test-run", seq: 5 },
+            language: "csharp",
+            content: "int x = 1;\n",
+            filePath: undefined,
+            startLine: undefined,
+          },
+        ],
+      });
+      const event: StreamEvent = {
+        runId: "test-run",
+        type: "codeBlockDelta",
+        sessionId: "s1",
+        id: "test-run:codeblock:1",
+        text: "int y = 2;\n",
+        order: 6,
+      };
+      const mutations = reduceStreamEvent(state, event);
+
+      const append = mutations.find((m) => m.type === "appendLiveCodeBlockContent");
+      expect(append).toBeDefined();
+      if (append?.type === "appendLiveCodeBlockContent") {
+        expect(append.partId).toBe("test-run:codeblock:1");
+        expect(append.text).toBe("int y = 2;\n");
+      }
+      // Must NOT use the text-part chunk-stream path.
+      expect(mutations.filter((m) => m.type === "appendLiveRenderPartContent")).toHaveLength(0);
+    });
+
+    it("drops a codeBlockDelta when no matching start has been seen", () => {
+      const state = makeState({ isStreaming: true });
+      const event: StreamEvent = {
+        runId: "test-run",
+        type: "codeBlockDelta",
+        sessionId: "s1",
+        id: "test-run:codeblock:99",
+        text: "ghost code\n",
+        order: 9,
+      };
+      const mutations = reduceStreamEvent(state, event);
+
+      expect(mutations).toEqual([]);
+    });
+
+    it("codeBlockDone emits a completeLiveCodeBlock hint for downstream freezers", () => {
+      const state = makeState({ isStreaming: true });
+      const event: StreamEvent = {
+        runId: "test-run",
+        type: "codeBlockDone",
+        sessionId: "s1",
+        id: "test-run:codeblock:1",
+      };
+      const mutations = reduceStreamEvent(state, event);
+
+      expect(mutations).toContainEqual({
+        type: "completeLiveCodeBlock",
+        partId: "test-run:codeblock:1",
+      });
+    });
+
+    it("full streaming round-trip: prose → codeBlock → done → prose", () => {
+      // Build up state step by step as the LLM would stream.
+      let state = makeState({ isStreaming: true, streamSequence: 0 });
+      const events: StreamEvent[] = [
+        { runId: "r1", type: "textDelta", sessionId: "s1", text: "intro\n", partId: "r1:text:1", renderSeq: 1, order: 1 },
+        {
+          runId: "r1", type: "codeBlockStart", sessionId: "s1",
+          id: "r1:codeblock:1", language: "rust",
+          order: 2, renderSeq: 2,
+        },
+        { runId: "r1", type: "codeBlockDelta", sessionId: "s1", id: "r1:codeblock:1", text: "let _x = 1;\n", order: 3 },
+        { runId: "r1", type: "codeBlockDone", sessionId: "s1", id: "r1:codeblock:1" },
+        { runId: "r1", type: "textDelta", sessionId: "s1", text: "trailer\n", partId: "r1:text:2", renderSeq: 4, order: 4 },
+      ];
+      for (const event of events) {
+        // Apply the resulting mutations to the state for the next iteration.
+        const mutations = reduceStreamEvent(state, event);
+        state = applyMutations(state, mutations);
+      }
+      // Final live parts list must contain a text part, a codeBlock part,
+      // and another text part — in source order.
+      expect(state.liveRenderParts.map((p) => p.kind)).toEqual([
+        "text",
+        "codeBlock",
+        "text",
+      ]);
+      const codeBlock = state.liveRenderParts[1];
+      expect(codeBlock?.kind).toBe("codeBlock");
+      if (codeBlock?.kind === "codeBlock") {
+        expect(codeBlock.content).toBe("let _x = 1;\n");
+        expect(codeBlock.language).toBe("rust");
+      }
+    });
+  });
 });
+
+/**
+ * Apply a batch of mutations to a state object — this is a tiny inline
+ * reducer for the test fixture (not the production reducer; the
+ * production one runs inside the chat store). Only the mutations the
+ * new codeBlock round-trip test needs are honoured.
+ */
+function applyMutations(state: StreamState, mutations: StreamMutation[]): StreamState {
+  let next = state;
+  for (const m of mutations) {
+    if (m.type === "setStreamSequence") {
+      next = { ...next, streamSequence: Math.max(next.streamSequence, m.value) };
+    } else if (m.type === "setStreamingTextOrder") {
+      next = { ...next, streamingTextOrder: m.order };
+    } else if (m.type === "setThinkingOrder") {
+      next = { ...next, thinkingOrder: m.order };
+    } else if (m.type === "upsertLiveRenderPart") {
+      const index = next.liveRenderParts.findIndex((p) => p.id === m.part.id);
+      if (index < 0) {
+        next = { ...next, liveRenderParts: [...next.liveRenderParts, m.part] };
+      } else {
+        const list = [...next.liveRenderParts];
+        list[index] = { ...list[index]!, ...m.part } as (typeof list)[number];
+        next = { ...next, liveRenderParts: list };
+      }
+    } else if (m.type === "appendLiveRenderPartContent") {
+      // Text / thinking part content growth: not exercised by the
+      // codeBlock round-trip test but kept for completeness.
+      const index = next.liveRenderParts.findIndex((p) => p.id === m.partId);
+      if (index >= 0) {
+        const target = next.liveRenderParts[index]!;
+        if (target.kind === "text" || target.kind === "thinking") {
+          const list = [...next.liveRenderParts];
+          list[index] = { ...target, content: target.content + m.text } as (typeof list)[number];
+          next = { ...next, liveRenderParts: list };
+        }
+      }
+    } else if (m.type === "appendLiveCodeBlockContent") {
+      const index = next.liveRenderParts.findIndex((p) => p.id === m.partId);
+      if (index >= 0) {
+        const target = next.liveRenderParts[index]!;
+        if (target.kind === "codeBlock") {
+          const list = [...next.liveRenderParts];
+          list[index] = { ...target, content: target.content + m.text } as (typeof list)[number];
+          next = { ...next, liveRenderParts: list };
+        }
+      }
+    } else if (m.type === "appendRawText") {
+      next = { ...next, rawStreamText: next.rawStreamText + m.text };
+    } else if (m.type === "clearLiveRenderParts") {
+      next = { ...next, liveRenderParts: [] };
+    }
+  }
+  return next;
+}

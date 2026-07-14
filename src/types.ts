@@ -65,6 +65,20 @@ export type AssistantRenderPart =
       id: string;
       order: RenderOrderKey;
       message: ChatMessage;
+    }
+  | {
+      /** Fenced code block extracted from the round's text content.
+       *  Carries optional `filePath` / `startLine` metadata parsed from
+       *  the fence info string so the chat view can render correct line
+       *  numbers. Mirror of the Rust `AssistantRenderPart::CodeBlock`
+       *  variant in `src-tauri/src/session/models.rs`. */
+      kind: "codeBlock";
+      id: string;
+      order: RenderOrderKey;
+      language: string;
+      content: string;
+      filePath?: string;
+      startLine?: number;
     };
 
 export interface ImageAttachment {
@@ -847,6 +861,27 @@ export type StreamEvent = { runId: string } & (
   | { type: "pendingInputDeleted"; sessionId: string; pendingInputId: string }
   | { type: "pendingInputAccepted"; sessionId: string; pendingInputId: string; messageId: string }
   | { type: "textDelta"; sessionId: string; text: string; order?: number; partId?: string; renderSeq?: number }
+  | {
+      type: "codeBlockStart";
+      sessionId: string;
+      /** Stable part ID the backend allocated for the in-flight code block
+       * (e.g. `r1:codeblock:1`). Mirrors the backend's
+       * `crate::markdown::fence_emit::FenceStreamContext` part-id scheme. */
+      id: string;
+      language: string;
+      filePath?: string;
+      startLine?: number;
+      order?: number;
+      renderSeq?: number;
+    }
+  | {
+      type: "codeBlockDelta";
+      sessionId: string;
+      id: string;
+      text: string;
+      order?: number;
+    }
+  | { type: "codeBlockDone"; sessionId: string; id: string }
   | { type: "thinkingDelta"; sessionId: string; text: string; order?: number; partId?: string; renderSeq?: number }
   | {
       type: "toolCallStart";

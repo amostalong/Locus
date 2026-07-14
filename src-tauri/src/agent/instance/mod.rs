@@ -28,6 +28,8 @@ use crate::commands::{
 };
 use crate::compact;
 use crate::llm::{anthropic, chat_completions, codex, openrouter, responses};
+use crate::markdown::fence_emit::FenceStreamContext;
+use crate::markdown::parts::{split_markdown_parts, MarkdownPart as MdPart};
 use crate::session::models::{
     AssistantRenderPart, ChatMessage, ImageData, MessageRole, PendingSessionInput, RenderOrderKey,
     TodoItem, ToolCallInfo,
@@ -380,9 +382,9 @@ struct StreamRenderOrderTracker {
 }
 
 #[derive(Debug, Clone)]
-struct RenderPartMark {
-    id: String,
-    seq: u32,
+pub struct RenderPartMark {
+    pub id: String,
+    pub seq: u32,
 }
 
 impl StreamRenderOrderTracker {
@@ -454,7 +456,7 @@ fn render_order_key(run_id: &str, seq: u32) -> RenderOrderKey {
     }
 }
 
-fn assistant_render_parts_for_response(
+pub fn assistant_render_parts_for_response(
     run_id: &str,
     text_part: Option<RenderPartMark>,
     text: &str,
@@ -478,11 +480,36 @@ fn assistant_render_parts_for_response(
         });
     }
     if let Some(mark) = text_part.filter(|_| !text.is_empty()) {
-        parts.push(AssistantRenderPart::Text {
-            id: mark.id,
-            order: render_order_key(run_id, mark.seq),
-            content: text.to_string(),
-        });
+        // Phase 1: split the round's text content by fenced code blocks so
+        // the chat view can render correct source line numbers. Each split
+        // segment gets a fresh order key under the same run, with the
+        // original mark's seq as the base — the trailing sort by
+        // `render_part_seq` keeps the visual order matching the source.
+        let split = split_markdown_parts(text);
+        let base_seq = mark.seq;
+        for (offset, md_part) in split.iter().enumerate() {
+            let seq = base_seq.saturating_add(offset as u32);
+            let order = render_order_key(run_id, seq);
+            match md_part {
+                MdPart::Text { content } => {
+                    parts.push(AssistantRenderPart::Text {
+                        id: format!("{}:text:{}", run_id, seq),
+                        order,
+                        content: content.clone(),
+                    });
+                }
+                MdPart::CodeBlock { info, content } => {
+                    parts.push(AssistantRenderPart::CodeBlock {
+                        id: format!("{}:codeblock:{}", run_id, seq),
+                        order,
+                        language: info.language.clone(),
+                        content: content.clone(),
+                        file_path: info.file_path.clone(),
+                        start_line: info.start_line,
+                    });
+                }
+            }
+        }
     }
     for tool_call in tool_calls {
         if let Some(seq) = tool_call.order {
@@ -502,7 +529,8 @@ fn render_part_seq(part: &AssistantRenderPart) -> u32 {
         AssistantRenderPart::Thinking { order, .. }
         | AssistantRenderPart::Text { order, .. }
         | AssistantRenderPart::ToolCall { order, .. }
-        | AssistantRenderPart::KnowledgeProposal { order, .. } => order.seq,
+        | AssistantRenderPart::KnowledgeProposal { order, .. }
+        | AssistantRenderPart::CodeBlock { order, .. } => order.seq,
     }
 }
 
@@ -8099,7 +8127,6 @@ impl AgentInstance {
                 let hdl = handle.clone();
                 let ptc = parent_tc.clone();
                 let rid = run_id.clone();
-                let render_order_for_text = render_order_tracker.clone();
                 let text_block_id = format!("iteration:{}:attempt:{}:text", iteration, attempt_number);
                 let partial_for_text = self.partial_assistant.clone();
                 let agent_id_for_text = self.id.clone();
@@ -8107,6 +8134,14 @@ impl AgentInstance {
                 let first_text_delta_logged_for_cb = first_text_delta_logged.clone();
                 let attempt_emitted_output = Arc::new(AtomicBool::new(false));
                 let emitted_output_for_text = attempt_emitted_output.clone();
+                // Stage 2: per-round fence state machine. Owned by an
+                // Arc<Mutex<_>> so the on_text_delta closure (Fn, not
+                // FnMut) can push into it; the loop body below drives
+                // flush + reset_round once the call_llm future resolves.
+                let fence_ctx: Arc<Mutex<FenceStreamContext>> = Arc::new(Mutex::new(
+                    FenceStreamContext::new(self.session_id.clone(), run_id.clone()),
+                ));
+                let fence_ctx_for_cb = fence_ctx.clone();
 
                 let sid2 = session_id.clone();
                 let hdl2 = handle.clone();
@@ -8141,13 +8176,6 @@ impl AgentInstance {
                         &api_tools,
                         move |delta| {
                             emitted_output_for_text.store(true, Ordering::Relaxed);
-                            let mark = render_order_for_text
-                                .lock()
-                                .map(|mut tracker| tracker.mark_text(&rid, &text_block_id))
-                                .unwrap_or(RenderPartMark {
-                                    id: format!("{}:text:{}", rid, text_block_id),
-                                    seq: 1,
-                                });
                             if !first_text_delta_logged_for_cb.swap(true, Ordering::Relaxed) {
                                 eprintln!(
                                     "[Agent {}] first text delta: session={} run={} iteration={} attempt={}/{} elapsed_ms={} delta_len={}",
@@ -8161,17 +8189,18 @@ impl AgentInstance {
                                     delta.len()
                                 );
                             }
-                            emit_stream(&hdl, &rid, StreamEvent::TextDelta {
-                                session_id: sid.clone(),
-                                text: delta.clone(),
-                                order: Some(mark.seq),
-                                part_id: Some(mark.id.clone()),
-                                render_seq: Some(mark.seq),
-                            });
+                            // Stage 2: feed the delta through the fence
+                            // state machine. A single delta may produce
+                            // multiple events (prose / CodeBlockStart /
+                            // CodeBlockDelta / CodeBlockDone).
+                            if let Ok(mut ctx) = fence_ctx_for_cb.lock() {
+                                ctx.push(&hdl, &delta);
+                            }
                             partial_for_text.append_text(&delta);
                             if let Some(ref parent) = ptc {
                                 emit_parent_stream(&hdl, parent.tool_call_delta(delta));
                             }
+                            let _ = text_block_id; // was used for the old mark; kept alive for logs
                         },
                         move |thinking| {
                             emitted_output_for_thinking.store(true, Ordering::Relaxed);
@@ -8361,6 +8390,12 @@ impl AgentInstance {
                                 });
                         }
                         response = Some(resp);
+                        // Stage 2: emit a final CodeBlockDone for any
+                        // unclosed fence before the round ends, so the
+                        // chat view never sees a hanging code-block part.
+                        if let Ok(mut ctx) = fence_ctx.lock() {
+                            ctx.flush(&handle);
+                        }
                         break;
                     }
                     Some(Err(e)) => {
@@ -19087,5 +19122,129 @@ Search, install, audit, and export a plugin.
             0,
             "all slots released"
         );
+    }
+
+    fn make_text_mark(id: &str, seq: u32) -> super::RenderPartMark {
+        super::RenderPartMark {
+            id: id.to_string(),
+            seq,
+        }
+    }
+
+    #[test]
+    fn assistant_render_parts_split_text_with_code_block_metadata() {
+        let text = "intro\n```csharp{path=Assets/Player.cs startLine=50}\nFoo\n```\ntail";
+        let parts = super::assistant_render_parts_for_response(
+            "run-1",
+            Some(make_text_mark("run-1:text:base", 5)),
+            text,
+            None,
+            "",
+            None,
+            None,
+            &[],
+        );
+
+        // Expect 3 parts: text-intro, codeblock, text-tail — sorted by seq.
+        assert_eq!(parts.len(), 3, "expected 3 split parts, got {:?}", parts);
+
+        match &parts[0] {
+            super::AssistantRenderPart::Text { content, order, .. } => {
+                assert_eq!(content, "intro");
+                assert_eq!(order.seq, 5);
+            }
+            other => panic!("expected text, got {:?}", other),
+        }
+        match &parts[1] {
+            super::AssistantRenderPart::CodeBlock {
+                content,
+                language,
+                file_path,
+                start_line,
+                order,
+                ..
+            } => {
+                assert_eq!(content, "Foo");
+                assert_eq!(language, "csharp");
+                assert_eq!(file_path.as_deref(), Some("Assets/Player.cs"));
+                assert_eq!(*start_line, Some(50));
+                assert_eq!(order.seq, 6);
+            }
+            other => panic!("expected codeBlock, got {:?}", other),
+        }
+        match &parts[2] {
+            super::AssistantRenderPart::Text { content, order, .. } => {
+                assert_eq!(content, "tail");
+                assert_eq!(order.seq, 7);
+            }
+            other => panic!("expected text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assistant_render_parts_passthrough_when_no_fence() {
+        let parts = super::assistant_render_parts_for_response(
+            "run-1",
+            Some(make_text_mark("run-1:text:base", 5)),
+            "just plain text",
+            None,
+            "",
+            None,
+            None,
+            &[],
+        );
+
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            super::AssistantRenderPart::Text { content, order, id } => {
+                assert_eq!(content, "just plain text");
+                assert_eq!(order.seq, 5);
+                assert_eq!(id, "run-1:text:5");
+            }
+            other => panic!("expected text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assistant_render_parts_unclosed_fence_renders_as_text() {
+        // Without a closing fence the splitter falls back to a single text
+        // part — preserves backward compatibility with the inline-text path.
+        let parts = super::assistant_render_parts_for_response(
+            "run-1",
+            Some(make_text_mark("run-1:text:base", 5)),
+            "intro\n```csharp\nunfinished",
+            None,
+            "",
+            None,
+            None,
+            &[],
+        );
+
+        // intro (text) + unclosed-fence-as-text = 2 parts.
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            super::AssistantRenderPart::Text { content, .. } if content == "intro"
+        ));
+        assert!(matches!(
+            &parts[1],
+            super::AssistantRenderPart::Text { content, .. } if content.contains("```csharp")
+        ));
+    }
+
+    #[test]
+    fn assistant_render_parts_empty_text_emits_no_text_part() {
+        let parts = super::assistant_render_parts_for_response(
+            "run-1",
+            Some(make_text_mark("run-1:text:base", 5)),
+            "",
+            None,
+            "",
+            None,
+            None,
+            &[],
+        );
+
+        assert!(parts.is_empty(), "empty text must not produce a part");
     }
 }

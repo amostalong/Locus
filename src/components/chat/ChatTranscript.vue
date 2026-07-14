@@ -55,6 +55,7 @@ import StreamingMarkdownRenderer from "./StreamingMarkdownRenderer.vue";
 import type { StreamingTextSource } from "../../composables/streamingTextChunks";
 import ToolCallCollection from "../ToolCallCollection.vue";
 import ToolCallBlock from "../ToolCallBlock.vue";
+import CodeBlockView from "./CodeBlockView.vue";
 import KnowledgeProposalCard from "./KnowledgeProposalCard.vue";
 import ChatWaitingIndicator from "./ChatWaitingIndicator.vue";
 import AssetChip from "../AssetChip.vue";
@@ -1764,6 +1765,16 @@ type HistoryRenderSegment =
   | { type: "thinking"; key: string; part: AssistantRenderPart; itemId: string; content: string; duration?: number }
   | { type: "toolCalls"; key: string; part: Extract<AssistantRenderPart, { kind: "toolCall" }>; itemId: string; itemIds: string[]; toolCalls: ToolCallDisplay[] }
   | { type: "content"; key: string; part: AssistantRenderPart; itemId: string; content: string }
+  | {
+      type: "codeBlock";
+      key: string;
+      part: Extract<AssistantRenderPart, { kind: "codeBlock" }>;
+      itemId: string;
+      language: string;
+      content: string;
+      filePath?: string;
+      startLine?: number;
+    }
   | { type: "knowledgeProposal"; key: string; part: AssistantRenderPart; itemId: string; message: ChatMessage };
 
 type TransientRenderSegment =
@@ -1786,6 +1797,15 @@ type TransientRenderSegment =
       content: string;
       stream?: StreamingTextSource | null;
       streamInitial?: string;
+    }
+  | {
+      type: "codeBlock";
+      key: string;
+      part: Extract<AssistantRenderPart, { kind: "codeBlock" }>;
+      language: string;
+      content: string;
+      filePath?: string;
+      startLine?: number;
     };
 
 function renderPartsForMessage(item: MessageRenderItem): AssistantRenderPart[] {
@@ -1912,6 +1932,18 @@ function historyRenderSegments(item: MessageRenderItem): HistoryRenderSegment[] 
         part,
         itemId: item.id,
         content: part.content,
+      });
+    } else if (part.kind === "codeBlock") {
+      flushPendingTools();
+      segments.push({
+        type: "codeBlock",
+        key: `${item.id}:${part.id}`,
+        part,
+        itemId: item.id,
+        language: part.language,
+        content: part.content,
+        filePath: part.filePath,
+        startLine: part.startLine,
       });
     } else if (part.kind === "toolCall") {
       const toolCall = toolCallDisplayForPart(part);
@@ -2194,6 +2226,22 @@ const transientRenderSegments = computed<TransientRenderSegment[]>(() => {
         pendingToolPartIds.push(part.id);
         pendingToolCalls.push(toolCall);
       }
+    } else if (part.kind === "codeBlock") {
+      // Stage 2: real-time code-block rendering. The reducer keeps
+      // `part.content` authoritative (each CodeBlockDelta appends to it
+      // directly — see `appendLiveCodeBlockContent` in useStreamReducer).
+      // The segment's `content` is what the CodeBlockView renders, so we
+      // pass the live content straight through.
+      flushPendingTools();
+      segments.push({
+        type: "codeBlock",
+        key: `transient:${part.id}`,
+        part,
+        language: part.language,
+        content: part.content,
+        filePath: part.filePath,
+        startLine: part.startLine,
+      });
     }
   }
   flushPendingTools();
@@ -2350,6 +2398,17 @@ function transientSegmentPaintState() {
         key: segment.key,
         textLength: segment.content.length,
         textPreview: previewTraceText(segment.content, 48),
+      };
+    }
+    if (segment.type === "codeBlock") {
+      return {
+        index,
+        type: segment.type,
+        key: segment.key,
+        language: segment.language,
+        contentLength: segment.content.length,
+        startLine: segment.startLine ?? null,
+        filePath: segment.filePath ?? null,
       };
     }
     return {
@@ -2957,6 +3016,20 @@ function openImage(src: string) {
                   :content="segment.content"
                   :unity-preview-state-scope="markdownUnityPreviewStateScope(segment)"
                   enable-file-refs
+                  @open-image="openImage"
+                />
+
+                <CodeBlockView
+                  v-else-if="segment.type === 'codeBlock'"
+                  data-render-part-kind="codeBlock"
+                  data-render-part-scope="history"
+                  :data-render-part-key="segment.key"
+                  :data-chat-message-id="segment.itemId"
+                  data-chat-message-role="assistant"
+                  :language="segment.language"
+                  :content="segment.content"
+                  :file-path="segment.filePath"
+                  :start-line="segment.startLine"
                   @open-image="openImage"
                 />
 

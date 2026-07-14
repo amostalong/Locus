@@ -531,6 +531,26 @@ function applyMutation(state: EmbeddedChatState, mutation: StreamMutation) {
       // authoritative full text (see the chat store's counterpart).
       ensureEmbeddedPartStream(state, mutation.partId).append(mutation.text);
       break;
+    case "appendLiveCodeBlockContent": {
+      // Stage 2: code blocks are rendered with their full content; append
+      // directly to the part's `content` field rather than a chunk stream.
+      const index = state.liveRenderParts.findIndex((part) => part.id === mutation.partId);
+      const target = index >= 0 ? state.liveRenderParts[index] : undefined;
+      if (target && target.kind === "codeBlock") {
+        const next = [...state.liveRenderParts];
+        next.splice(index, 1, {
+          ...target,
+          content: target.content + mutation.text,
+        } as AssistantRenderPart);
+        state.liveRenderParts = next;
+      }
+      break;
+    }
+    case "completeLiveCodeBlock":
+      // No-op for state — the code-block part is already authoritative at
+      // the matching `codeBlockDone` boundary. The transcript may use this
+      // hint to skip a future freeze re-create.
+      break;
     case "deactivateLiveThinkingParts":
       // Keep the array's identity when there is nothing to deactivate.
       if (state.liveRenderParts.some((part) => part.kind === "thinking" && part.active)) {

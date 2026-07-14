@@ -2915,7 +2915,9 @@ impl SessionStore {
                 AssistantRenderPart::KnowledgeProposal { message, .. } => {
                     Self::mark_missing_persisted_outputs_in_message(message);
                 }
-                AssistantRenderPart::Thinking { .. } | AssistantRenderPart::Text { .. } => {}
+                AssistantRenderPart::Thinking { .. }
+                | AssistantRenderPart::Text { .. }
+                | AssistantRenderPart::CodeBlock { .. } => {}
             }
         }
     }

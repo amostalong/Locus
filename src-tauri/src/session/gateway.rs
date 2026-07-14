@@ -20,6 +20,9 @@ fn event_session_id(event: &StreamEvent) -> &str {
         | StreamEvent::PendingInputDeleted { session_id, .. }
         | StreamEvent::PendingInputAccepted { session_id, .. }
         | StreamEvent::TextDelta { session_id, .. }
+        | StreamEvent::CodeBlockStart { session_id, .. }
+        | StreamEvent::CodeBlockDelta { session_id, .. }
+        | StreamEvent::CodeBlockDone { session_id, .. }
         | StreamEvent::ThinkingDelta { session_id, .. }
         | StreamEvent::ToolCallStart { session_id, .. }
         | StreamEvent::ToolCallDone { session_id, .. }
@@ -51,6 +54,9 @@ fn event_type(event: &StreamEvent) -> &'static str {
         StreamEvent::PendingInputDeleted { .. } => "pendingInputDeleted",
         StreamEvent::PendingInputAccepted { .. } => "pendingInputAccepted",
         StreamEvent::TextDelta { .. } => "textDelta",
+        StreamEvent::CodeBlockStart { .. } => "codeBlockStart",
+        StreamEvent::CodeBlockDelta { .. } => "codeBlockDelta",
+        StreamEvent::CodeBlockDone { .. } => "codeBlockDone",
         StreamEvent::ThinkingDelta { .. } => "thinkingDelta",
         StreamEvent::ToolCallStart { .. } => "toolCallStart",
         StreamEvent::ToolCallDone { .. } => "toolCallDone",
@@ -79,6 +85,9 @@ fn run_status_for_event(event: &StreamEvent) -> Option<(&'static str, Option<Str
         StreamEvent::RunStart { .. }
         | StreamEvent::UserMessage { .. }
         | StreamEvent::TextDelta { .. }
+        | StreamEvent::CodeBlockStart { .. }
+        | StreamEvent::CodeBlockDelta { .. }
+        | StreamEvent::CodeBlockDone { .. }
         | StreamEvent::ThinkingDelta { .. }
         | StreamEvent::ToolCallStart { .. }
         | StreamEvent::ToolCallDone { .. }

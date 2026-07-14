@@ -8,6 +8,7 @@ use super::{
     AssistantStreamState, ExecutedToolResult, StreamRenderOrderTracker,
 };
 use crate::commands::{StreamEvent, ToolCallOutcome};
+use crate::markdown::fence_emit::FenceStreamContext;
 use crate::llm::claude_code_cli::{
     self, ClaudeCodeAssistantMessage, ClaudeCodeCliOptions, ClaudeCodeHost, ClaudeCodeHostFuture,
     ClaudeCodeToolDefinition, ClaudeCodeToolResult,
@@ -56,6 +57,11 @@ struct ClaudeCodeRoundHost<'a> {
     last_assistant: Option<ClaudeCodeAssistantMessage>,
     last_persisted_assistant_message_id: Option<String>,
     render_order: StreamRenderOrderTracker,
+    /// Streams the round's text through the fence state machine so the
+    /// chat view can render fenced code blocks in real time. Owned (not
+    /// borrowed) because the host is constructed once and lives for the
+    /// whole turn.
+    fence_ctx: FenceStreamContext,
 }
 
 fn save_claude_code_tool_result(
@@ -500,22 +506,19 @@ impl<'a> ClaudeCodeRoundHost<'a> {
 
 impl<'a> ClaudeCodeHost for ClaudeCodeRoundHost<'a> {
     fn on_text_delta(&mut self, delta: String) {
-        let mark = self
-            .render_order
-            .mark_text(self.run_id, "claude-code-stream-text");
+        // The fence context allocates render_seq / part_id for prose and
+        // code blocks, so we no longer need `render_order.mark_text` here
+        // — its mark would be unused. The `mark_text_round_text` call in
+        // `on_assistant_message` still drives round-finalize ordering.
         self.streamed_text.push_str(&delta);
         self.partial_assistant.append_text(&delta);
-        emit_stream(
-            self.app_handle,
-            self.run_id,
-            StreamEvent::TextDelta {
-                session_id: self.agent.session_id.clone(),
-                text: delta.clone(),
-                order: Some(mark.seq),
-                part_id: Some(mark.id),
-                render_seq: Some(mark.seq),
-            },
-        );
+        // Stage 2: route the delta through the fence state machine. The
+        // machine may split a single delta into multiple events
+        // (Prose / CodeBlockStart / CodeBlockDelta / CodeBlockDone).
+        // `streamed_text` and `partial_assistant` still get the raw delta
+        // because they mirror the full text for round-finalize and
+        // persistence, which always re-splits via `split_markdown_parts`.
+        self.fence_ctx.push(self.app_handle, &delta);
         if let Some(ref parent) = self.agent.parent_tool_call {
             emit_parent_stream(self.app_handle, parent.tool_call_delta(delta));
         }
@@ -546,6 +549,11 @@ impl<'a> ClaudeCodeHost for ClaudeCodeRoundHost<'a> {
 
     fn on_assistant_message(&mut self, message: ClaudeCodeAssistantMessage) -> Result<(), String> {
         if message.tool_calls.is_empty() {
+            // No tool calls: the round is text-only and the CLI turn will
+            // finish shortly. Reset the fence state so any unclosed fence
+            // from this round does not leak into the next round's stream.
+            self.fence_ctx.flush(self.app_handle);
+            self.fence_ctx.reset_round();
             self.last_assistant = Some(message);
             return Ok(());
         }
@@ -647,6 +655,13 @@ impl<'a> ClaudeCodeHost for ClaudeCodeRoundHost<'a> {
         });
         self.last_persisted_assistant_message_id = Some(message_id);
         self.streamed_text.clear();
+        // Flush any unclosed fence before the round ends so the chat view
+        // does not leave a hanging code-block part. The reducer will clear
+        // `liveRenderParts` on the `toolCallRoundDone` boundary; we just
+        // need to make sure the in-flight state machine is in `Prose` for
+        // the next round (in case the LLM truncated the source mid-fence).
+        self.fence_ctx.flush(self.app_handle);
+        self.fence_ctx.reset_round();
         self.maybe_finish_pending_round();
         Ok(())
     }
@@ -921,6 +936,7 @@ impl AgentInstance {
             last_assistant: None,
             last_persisted_assistant_message_id: None,
             render_order: StreamRenderOrderTracker::default(),
+            fence_ctx: FenceStreamContext::new(self.session_id.clone(), run_id.to_string()),
         };
 
         let options = ClaudeCodeCliOptions {

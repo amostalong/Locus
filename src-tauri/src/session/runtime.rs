@@ -226,6 +226,9 @@ fn runtime_status_for_event(event: &StreamEvent) -> Option<&'static str> {
         StreamEvent::RunStart { .. }
         | StreamEvent::UserMessage { .. }
         | StreamEvent::TextDelta { .. }
+        | StreamEvent::CodeBlockStart { .. }
+        | StreamEvent::CodeBlockDelta { .. }
+        | StreamEvent::CodeBlockDone { .. }
         | StreamEvent::ThinkingDelta { .. }
         | StreamEvent::ToolCallStart { .. }
         | StreamEvent::ToolCallDone { .. }
@@ -261,6 +264,9 @@ fn event_session_id(event: &StreamEvent) -> &str {
         | StreamEvent::PendingInputDeleted { session_id, .. }
         | StreamEvent::PendingInputAccepted { session_id, .. }
         | StreamEvent::TextDelta { session_id, .. }
+        | StreamEvent::CodeBlockStart { session_id, .. }
+        | StreamEvent::CodeBlockDelta { session_id, .. }
+        | StreamEvent::CodeBlockDone { session_id, .. }
         | StreamEvent::ThinkingDelta { session_id, .. }
         | StreamEvent::ToolCallStart { session_id, .. }
         | StreamEvent::ToolCallDone { session_id, .. }
@@ -312,6 +318,43 @@ fn apply_event_to_snapshot(
                 *render_seq,
             );
         }
+        StreamEvent::CodeBlockStart {
+            id,
+            language,
+            file_path,
+            start_line,
+            order,
+            render_seq,
+            ..
+        } => {
+            let fallback_order = order.or_else(|| Some(next_stream_order(snapshot)));
+            let render_order =
+                resolve_live_render_order(snapshot, run_id, fallback_order.unwrap_or(0), *render_seq);
+            if let Some(order) = fallback_order {
+                mark_stream_sequence(snapshot, order);
+            }
+            deactivate_live_thinking_parts(snapshot);
+            upsert_live_code_block_part(
+                &mut snapshot.live_render_parts,
+                id.clone(),
+                render_order,
+                language.clone(),
+                file_path.clone(),
+                *start_line,
+                "",
+            );
+        }
+        StreamEvent::CodeBlockDelta { id, text, order, .. } => {
+            // The order from the wire is the render_seq we already used
+            // for the matching Start. The part should already exist; we
+            // just append the delta to its content.
+            let _ = order;
+            append_code_block_delta(&mut snapshot.live_render_parts, id, text);
+        }
+        // CodeBlockDone is a no-op for the snapshot: the code-block part is
+        // already fully populated by the Start/Delta pair. The frontend
+        // reducer uses Done as a hint to keep the part frozen.
+        StreamEvent::CodeBlockDone { .. } => {}
         StreamEvent::ThinkingDelta {
             text,
             order,
@@ -658,6 +701,79 @@ fn upsert_live_text_part(
         order,
         content: delta.to_string(),
     });
+}
+
+fn upsert_live_code_block_part(
+    parts: &mut Vec<AssistantRenderPart>,
+    id: String,
+    order: RenderOrderKey,
+    language: String,
+    file_path: Option<String>,
+    start_line: Option<u32>,
+    initial_content: &str,
+) {
+    for part in parts.iter_mut() {
+        if let AssistantRenderPart::CodeBlock {
+            id: existing_id,
+            order: existing_order,
+            language: existing_language,
+            file_path: existing_file_path,
+            start_line: existing_start_line,
+            content: existing_content,
+        } = part
+        {
+            if *existing_id == id {
+                *existing_order = order;
+                // Language / file_path / start_line are stable for the
+                // lifetime of a code-block part; ignore duplicate Start
+                // events (the reducer occasionally re-emits one on
+                // hydration).
+                let _ = existing_language;
+                let _ = existing_file_path;
+                let _ = existing_start_line;
+                if initial_content.is_empty() {
+                    return;
+                }
+                existing_content.push_str(initial_content);
+                return;
+            }
+        }
+    }
+    parts.push(AssistantRenderPart::CodeBlock {
+        id,
+        order,
+        language,
+        content: initial_content.to_string(),
+        file_path,
+        start_line,
+    });
+}
+
+fn append_code_block_delta(
+    parts: &mut Vec<AssistantRenderPart>,
+    id: &str,
+    delta: &str,
+) {
+    for part in parts.iter_mut() {
+        if let AssistantRenderPart::CodeBlock {
+            id: existing_id,
+            content,
+            ..
+        } = part
+        {
+            if existing_id == id {
+                content.push_str(delta);
+                return;
+            }
+        }
+    }
+    // No matching part — the chat view dropped the Start (e.g. round
+    // boundary cleared the parts list). We don't recreate the part from
+    // a lone delta because we'd be missing the fence info (language,
+    // file_path, start_line); the chat view's reducer will surface the
+    // final content via the round-finalize render_parts.
+    let _ = id;
+    let _ = delta;
 }
 
 fn upsert_live_thinking_part(
