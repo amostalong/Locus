@@ -54,22 +54,28 @@ export interface InAppEditorOpenPayload {
  * File extensions that should default-open in Locus's Monaco editor
  * instead of the OS system-default app.
  *
- * Default scope: `.cs` only. The fork's primary win is Unity C# code
- * staying in Locus so Roslyn semantic tokens + csharp_field decoration
- * + goto-definition / references stay live. Extend this set to bring
- * other code languages in-app — for example:
+ * Scope:
+ *   - `cs`        — Unity C# code (Roslyn semantic tokens, csharp_field
+ *                   decoration, goto-definition / references all live
+ *                   in the in-app editor; routing to VS Code defeats
+ *                   every Locus advantage for the file type the
+ *                   product is built around).
+ *   - `csproj`    — MSBuild C# project file (XML; Locus renders fine).
+ *   - `sln`       — MSBuild solution file (plaintext; Locus renders).
+ *   - `shader`    — Unity ShaderLab (text; Locus renders).
+ *   - `hlsl`      — HLSL shader include / source (text; Locus renders).
  *
- *   "cs", "csproj", "sln"   // Unity C# + MSBuild project files
- *   "shader", "hlsl", "compute"  // Unity shader languages
- *   "ts", "tsx", "js", "jsx"     // web/extension code
- *
- * Keep it minimal: every addition changes the user-visible default
- * for "open in editor" buttons, and the user can still explicitly
- * open any file in the system default via `showInFolder` (Windows
- * Explorer) + double-click.
+ * Add more here as the workflow demands (e.g. `compute`, `glsl`,
+ * `ts`/`tsx`). Every addition changes the user-visible default for
+ * "open in editor" buttons — the user can still explicitly hand any
+ * file off to the system default via `showInFolder` + double-click.
  */
 const INAPP_EDITOR_EXTS: ReadonlySet<string> = new Set([
   "cs",
+  "csproj",
+  "sln",
+  "shader",
+  "hlsl",
 ]);
 
 /**
