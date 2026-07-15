@@ -1,3 +1,4 @@
+import { openInAppEditor, shouldOpenInAppEditor } from "./inAppEditorOpen";
 import { ipcInvoke } from "./ipc";
 import { getLocusRuntime } from "./locusRuntime";
 import type {
@@ -356,6 +357,15 @@ export function sendUnityLog(message: string): Promise<void> {
 }
 
 export function openFileExternal(filePath: string): Promise<void> {
+  // `.cs` (and other in-app-editor extensions — see INAPP_EDITOR_EXTS) should
+  // default-open in Locus's own Monaco editor instead of being handed to the
+  // OS system-default app via `open_file_external`. The routing — including
+  // cross-window delivery from sub-windows like ChatDiffReviewWindow — lives
+  // in `inAppEditorOpen.ts`. If the file is outside the active working
+  // directory, `openInAppEditor` is a no-op and we fall back to the IPC.
+  if (shouldOpenInAppEditor(filePath)) {
+    return openInAppEditor(filePath);
+  }
   return ipcInvoke("open_file_external", { filePath });
 }
 

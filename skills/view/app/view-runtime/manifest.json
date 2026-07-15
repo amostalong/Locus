@@ -309,7 +309,7 @@
     },
     {
       "path": "src/services/diff.ts",
-      "bytes": 5288
+      "bytes": 5803
     },
     {
       "path": "src/services/refGraph.ts",
@@ -321,7 +321,7 @@
     },
     {
       "path": "src/services/unity.ts",
-      "bytes": 11816
+      "bytes": 12439
     },
     {
       "path": "src/services/unitySerializedProperty.ts",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/types.ts",
-      "bytes": 75903
+      "bytes": 77071
     }
   ]
 }
