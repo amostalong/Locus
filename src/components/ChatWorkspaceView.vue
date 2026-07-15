@@ -311,6 +311,7 @@ function updateWorkspaceWidth() {
 }
 
 function handleWorkspaceResize(entries: ResizeObserverEntry[]) {
+  if (uiStore.isLayoutTransitioning) return;
   const width = entries[0]?.contentRect.width ?? workspaceRef.value?.clientWidth ?? 0;
   setWorkspaceWidth(width);
 }

@@ -24,10 +24,14 @@ const ENDPOINT_TEST_HTML_RESPONSE_CODE: &str = "endpoint_test.html_response";
 /// On Windows this resolves under `%APPDATA%\\locus`, which keeps model config
 /// under the app-data tree while staying outside Tauri's bundle-specific
 /// `app_data_dir` that may be cleared during reinstall.
+///
+/// Debug builds use a separate `locus-dev` directory so a release instance and
+/// a `bun tauri dev` instance do not share config, logs, or storage overrides.
 pub(crate) fn persistent_config_dir() -> Result<std::path::PathBuf, String> {
     let config_dir =
         dirs::config_dir().ok_or_else(|| "Failed to get config directory".to_string())?;
-    let dir = config_dir.join("locus");
+    let dir_name = if cfg!(debug_assertions) { "locus-dev" } else { "locus" };
+    let dir = config_dir.join(dir_name);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create persistent config dir: {}", e))?;
     Ok(dir)

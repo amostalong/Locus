@@ -340,7 +340,13 @@ function isTopTabVisible(tab: AppTab) {
 void chatView.ensureLoaded();
 
 // 离开设置页时做一次兜底刷新（顶栏切 Tab 不走 setTab 之外的逻辑，原 closeSettings 的副作用迁移到这里）。
+// Tab 切换会导致 split layout 剧烈变化（例如 chat 面板从固定宽度变为 100%），
+// 期间抑制 chat 相关 ResizeObserver，避免大量 DOM 重排造成卡顿。
 watch(() => uiStore.activeTab, (tab, prev) => {
+  if (prev !== tab) {
+    uiStore.beginLayoutTransition();
+    setTimeout(() => uiStore.endLayoutTransition(), 250);
+  }
   if (prev === "settings" && tab !== "settings") void refreshAfterSettings();
 });
 

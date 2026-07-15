@@ -2157,6 +2157,10 @@ function scheduleTranscriptResizeReconcile(reason: string) {
 }
 
 function handleTranscriptResize() {
+  if (uiStore.isLayoutTransitioning) {
+    transcriptResizeReconcilePending = true;
+    return;
+  }
   const viewportResizing = noteTranscriptViewportResize();
   if (viewportResizing || isLiveResizeInProgress()) {
     transcriptResizeReconcilePending = true;
@@ -2562,6 +2566,15 @@ watch(
   ([isStreaming, isCancelling]) => {
     if (!isStreaming || isCancelling) {
       clearCancelShortcutConfirmation();
+    }
+  },
+);
+
+watch(
+  () => uiStore.isLayoutTransitioning,
+  (transitioning) => {
+    if (!transitioning && transcriptResizeReconcilePending) {
+      flushPendingTranscriptResizeReconcile("layout-transition-end");
     }
   },
 );

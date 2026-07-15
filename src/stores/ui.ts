@@ -43,6 +43,8 @@ export const useUiStore = defineStore("ui", () => {
   const isWindowResizing = ref(false);
   const assistantSidebarTransitionCount = ref(0);
   const isAssistantSidebarTransitioning = computed(() => assistantSidebarTransitionCount.value > 0);
+  const layoutTransitionCount = ref(0);
+  const isLayoutTransitioning = computed(() => layoutTransitionCount.value > 0);
   const nativeWindowWidth = ref<number | null>(null);
   const nativeWindowHeight = ref<number | null>(null);
   const showOnboarding = ref(false);
@@ -152,6 +154,14 @@ export const useUiStore = defineStore("ui", () => {
 
   function endAssistantSidebarTransition() {
     assistantSidebarTransitionCount.value = Math.max(0, assistantSidebarTransitionCount.value - 1);
+  }
+
+  function beginLayoutTransition() {
+    layoutTransitionCount.value += 1;
+  }
+
+  function endLayoutTransition() {
+    layoutTransitionCount.value = Math.max(0, layoutTransitionCount.value - 1);
   }
 
   function scheduleWindowResizeSettle(width?: number, height?: number) {
@@ -334,6 +344,7 @@ export const useUiStore = defineStore("ui", () => {
     isMaximized,
     isWindowResizing,
     isAssistantSidebarTransitioning,
+    isLayoutTransitioning,
     nativeWindowWidth,
     nativeWindowHeight,
     showOnboarding,
@@ -366,6 +377,8 @@ export const useUiStore = defineStore("ui", () => {
     winClose,
     beginAssistantSidebarTransition,
     endAssistantSidebarTransition,
+    beginLayoutTransition,
+    endLayoutTransition,
     completeOnboarding,
     resetOnboarding,
   };

@@ -5,6 +5,10 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+// @ts-expect-error process is a nodejs global
+const devPort = Number(process.env.LOCUS_DEV_PORT ?? 14901);
+// @ts-expect-error process is a nodejs global
+const devHmrPort = Number(process.env.LOCUS_DEV_HMR_PORT ?? 1421);
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
@@ -121,14 +125,14 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 14901,
+    port: devPort,
     strictPort: true,
     host: host || false,
     hmr: host
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          port: devHmrPort,
         }
       : undefined,
     watch: {

@@ -63,6 +63,13 @@ fn legacy_app_storage_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    // Debug builds keep their storage in a `dev/` subdirectory so they do not
+    // collide with a running release instance that uses the same app_data_dir.
+    let dir = if cfg!(debug_assertions) {
+        dir.join("dev")
+    } else {
+        dir
+    };
     ensure_storage_dir(&dir, "app data dir")
 }
 
