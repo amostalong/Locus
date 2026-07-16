@@ -1944,7 +1944,7 @@ watch(toolHandoffViewportQuiet, (quiet, previousQuiet) => {
   }
 });
 
-function reconcileViewport(forceBottom = false) {
+function runReconcileViewport(forceBottom = false) {
   if (toolHandoffViewportQuiet.value) {
     return;
   }
@@ -1969,6 +1969,23 @@ function reconcileViewport(forceBottom = false) {
   }
 
   preserveScrollAnchor();
+}
+
+let reconcileViewportFrame = 0;
+let reconcileViewportForceBottom = false;
+
+function reconcileViewport(forceBottom = false) {
+  if (toolHandoffViewportQuiet.value) {
+    return;
+  }
+  reconcileViewportForceBottom ||= forceBottom;
+  if (reconcileViewportFrame) return;
+  reconcileViewportFrame = requestAnimationFrame(() => {
+    reconcileViewportFrame = 0;
+    const force = reconcileViewportForceBottom;
+    reconcileViewportForceBottom = false;
+    runReconcileViewport(force);
+  });
 }
 
 function settleStreamEndScroll() {
@@ -2615,6 +2632,10 @@ onUnmounted(() => {
   document.removeEventListener("mouseup", onSessionSplitterMouseUp);
   releaseSessionSelectionLock?.();
   releaseSessionSelectionLock = null;
+  if (reconcileViewportFrame) {
+    cancelViewportFrame(reconcileViewportFrame);
+    reconcileViewportFrame = 0;
+  }
 });
 </script>
 

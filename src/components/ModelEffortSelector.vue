@@ -153,6 +153,7 @@ function selectFastMode(enabled: boolean) {
 }
 
 function onClickOutside(event: MouseEvent) {
+  if (!open.value) return;
   if (selectorRef.value && !selectorRef.value.contains(event.target as Node)) {
     open.value = false;
   }
@@ -249,6 +250,9 @@ onUnmounted(() => document.removeEventListener("click", onClickOutside));
   flex-shrink: 1;
   min-width: 0;
   margin-right: 4px;
+  /* Isolate layout so the dropdown open/close does not force reflow
+     across the whole header/chat tree. */
+  contain: layout style paint;
 }
 
 .model-effort-trigger {

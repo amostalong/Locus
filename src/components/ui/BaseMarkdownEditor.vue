@@ -52,6 +52,7 @@ let editor: Vditor | null = null;
 let themeObserver: MutationObserver | null = null;
 let layoutSync: { disconnect(): void } | null = null;
 let pasteInterceptorCleanup: (() => void) | null = null;
+let pendingInitHandle: number | null = null;
 
 const editorCdnBase = computed(() => {
   const base = import.meta.env.BASE_URL || "/";
@@ -127,6 +128,10 @@ function syncPanelLayout() {
 }
 
 function destroyEditor() {
+  if (pendingInitHandle != null) {
+    window.cancelAnimationFrame(pendingInitHandle);
+    pendingInitHandle = null;
+  }
   pasteInterceptorCleanup?.();
   pasteInterceptorCleanup = null;
   layoutSync?.disconnect();
@@ -181,9 +186,15 @@ function handleNativeInput(event: Event) {
 
 function mountEditor() {
   const target = mountRef.value;
-  if (!target || editor) return;
+  if (!target || editor || pendingInitHandle != null) return;
 
-  editor = new Vditor(target, {
+  // Defer heavy Vditor construction so it does not block the frame that
+  // triggers the editor mount (e.g. switching into markdown edit mode).
+  pendingInitHandle = window.requestAnimationFrame(() => {
+    pendingInitHandle = null;
+    if (!mountRef.value || editor) return;
+
+    editor = new Vditor(mountRef.value, {
     value: props.modelValue,
     height: MARKDOWN_EDITOR_PANEL_HEIGHT,
     minHeight: 0,
@@ -245,6 +256,7 @@ function mountEditor() {
       layoutSync?.disconnect();
       layoutSync = createMarkdownEditorResizeSync(mountRef.value, syncPanelLayout);
     },
+  });
   });
 }
 
@@ -438,6 +450,9 @@ onBeforeUnmount(() => {
   border: none;
   background: transparent;
   font-family: var(--font-prose);
+  /* Isolate Vditor's layout/paint so its internal recalculations do not
+     dirty the whole application tree. */
+  contain: layout paint;
 }
 
 .base-markdown-editor :deep(.vditor-toolbar) {

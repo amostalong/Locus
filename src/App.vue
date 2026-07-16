@@ -175,6 +175,7 @@ const KNOWLEDGE_RUNTIME_STARTUP_POLL_COUNT = 16;
 let knowledgeRuntimeStatusTimer: ReturnType<typeof setTimeout> | null = null;
 let knowledgeRuntimeStartupPollsRemaining = 0;
 let appCloseRequestUnlisten: UnlistenFn | null = null;
+let longFrameObserver: PerformanceObserver | null = null;
 
 // -- Diff overlay provider (must be called in App setup so all children can inject) --
 const diffOverlay = provideDiffOverlay();
@@ -757,6 +758,7 @@ async function removeContextRecentDir() {
 }
 
 function handleDirClickOutside(e: MouseEvent) {
+  if (!showDirDropdown.value && !recentDirContextMenu.value) return;
   const target = e.target as Node;
   const targetElement = target instanceof Element ? target : target.parentElement;
   if (targetElement?.closest(".recent-dir-ctx-menu")) return;
@@ -919,6 +921,31 @@ onMounted(async () => {
     return;
   }
   document.addEventListener("click", handleDirClickOutside, true);
+
+  // Surface expensive frames in DevTools console so future regressions are
+  // visible without manually capturing a trace every time.
+  if (
+    typeof PerformanceObserver !== "undefined"
+    && PerformanceObserver.supportedEntryTypes?.includes("long-animation-frame")
+  ) {
+    longFrameObserver = new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        const entry = e as any;
+        if (entry.duration > 100) {
+          const scripts = (entry.scripts || [])
+            .map((s: any) => `${s.name}@${s.sourceURL}:${s.lineNumber}`)
+            .slice(0, 5);
+          console.warn(
+            "[perf] long-animation-frame",
+            `${Math.round(entry.duration)}ms`,
+            scripts,
+          );
+        }
+      }
+    });
+    longFrameObserver.observe({ type: "long-animation-frame", buffered: true });
+  }
+
   await registerAppCloseRequestListener();
   markStartupPhase("main_dom_listeners_ready");
   markStartupPhase("main_bootstrap_critical_start");
@@ -956,6 +983,8 @@ onUnmounted(() => {
   document.removeEventListener("click", handleDirClickOutside, true);
   appCloseRequestUnlisten?.();
   appCloseRequestUnlisten = null;
+  longFrameObserver?.disconnect();
+  longFrameObserver = null;
   notificationStore.clearByOperation(KNOWLEDGE_RUNTIME_LOADING_OPERATION);
   clearKnowledgeRuntimeStatusTimer();
   cleanup();
@@ -1801,6 +1830,8 @@ body.is-dragging-select-lock * {
   transition: color 0.15s ease;
   line-height: 1;
   white-space: nowrap;
+  /* Keep the non-composited color transition repaint local. */
+  contain: paint;
 }
 
 .tab-item:hover {
@@ -1916,6 +1947,8 @@ body.is-dragging-select-lock * {
   max-width: 220px;
   position: relative;
   margin-right: 6px;
+  /* Contain the dropdown so its show/hide does not force a full header layout. */
+  contain: layout paint;
 }
 
 .workspace-btn {

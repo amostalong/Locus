@@ -1609,6 +1609,7 @@ function applySegmentedMode(id: StatusId, mode: string) {
 }
 
 function closePopover() {
+  if (activePopover.value === null) return;
   activePopover.value = null;
 }
 
@@ -1919,6 +1920,9 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   min-width: 0;
+  /* Isolate this component's layout so popover open/close does not dirty
+     the rest of the chat/editor layout tree. */
+  contain: layout style paint;
 }
 
 .chat-status-icon-row {
@@ -1943,6 +1947,8 @@ onUnmounted(() => {
   cursor: pointer;
   box-shadow: none;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  /* Keep background/border/color repaint local. */
+  contain: paint;
 }
 
 .chat-status-icon-btn:hover,

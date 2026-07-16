@@ -367,6 +367,8 @@ onBeforeUnmount(() => {
   letter-spacing: 0.06em;
   user-select: none;
   transition: border-color 0.3s, color 0.3s, background 0.3s;
+  /* Keep border/color repaint local to this pill. */
+  contain: paint;
 }
 
 /* ---------- disabled: mute + static ---------- */

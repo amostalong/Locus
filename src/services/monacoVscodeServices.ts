@@ -189,6 +189,9 @@ function resolveVscodeTheme(): string {
   return themeAttr === "light" ? VSCODE_THEME_LIGHT : VSCODE_THEME_DARK;
 }
 
+let lastAppliedVscodeTheme: string | null = null;
+let applyingThemePromise: Promise<void> | null = null;
+
 function peekViewColorCustomizations(isDark: boolean): Record<string, string> {
   if (isDark) {
     // 编辑器背景默认 #1e1e1e，调成 #1d1d1d 微微不一样
@@ -506,7 +509,11 @@ function pickPinkThemeName(isDark: boolean): string {
 
 export async function applyVscodeColorTheme(): Promise<void> {
   const theme = resolveVscodeTheme();
-  const isDark = theme === VSCODE_THEME_DARK;
+  if (theme === lastAppliedVscodeTheme) return;
+  if (applyingThemePromise) return applyingThemePromise;
+
+  applyingThemePromise = (async () => {
+    const isDark = theme === VSCODE_THEME_DARK;
 
   // === [classTypeColor] [D] Register pink-overlay Monaco themes ===
   // 直接 monaco.editor.defineTheme + setTheme,绕开 workbenchThemeService
@@ -754,6 +761,14 @@ export async function applyVscodeColorTheme(): Promise<void> {
   }
 
   console.log("[classTypeColor] diagnostic complete");
+    lastAppliedVscodeTheme = theme;
+  })();
+
+  try {
+    await applyingThemePromise;
+  } finally {
+    applyingThemePromise = null;
+  }
 }
 
 function installWorkerEnvironment(): void {

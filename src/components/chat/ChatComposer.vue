@@ -88,13 +88,27 @@ const actionLabel = computed(() => {
     : (props.sendLabel || t("common.send"));
 });
 
+let resizeTextareaFrame: number | null = null;
+let resizeTextareaTarget: HTMLTextAreaElement | null = null;
+
 function resizeTextarea(textarea: HTMLTextAreaElement | null = textareaRef.value) {
   if (!textarea) return;
-  const minHeight = props.compact ? COMPACT_TEXTAREA_MIN_HEIGHT : DEFAULT_TEXTAREA_MIN_HEIGHT;
-  textarea.style.height = "auto";
-  const contentHeight = textarea.scrollHeight;
-  textarea.style.height = `${Math.max(minHeight, Math.min(contentHeight, props.maxHeight))}px`;
-  textarea.style.overflowY = contentHeight > props.maxHeight ? "auto" : "hidden";
+  resizeTextareaTarget = textarea;
+  if (resizeTextareaFrame != null) return;
+
+  // Coalesce multiple resize triggers (input + watcher updates) into one
+  // animation frame to avoid forced synchronous layout per call.
+  resizeTextareaFrame = window.requestAnimationFrame(() => {
+    resizeTextareaFrame = null;
+    const textarea = resizeTextareaTarget ?? textareaRef.value;
+    resizeTextareaTarget = null;
+    if (!textarea) return;
+    const minHeight = props.compact ? COMPACT_TEXTAREA_MIN_HEIGHT : DEFAULT_TEXTAREA_MIN_HEIGHT;
+    textarea.style.height = "auto";
+    const contentHeight = textarea.scrollHeight;
+    textarea.style.height = `${Math.max(minHeight, Math.min(contentHeight, props.maxHeight))}px`;
+    textarea.style.overflowY = contentHeight > props.maxHeight ? "auto" : "hidden";
+  });
 }
 
 function handleInput(event: Event) {
@@ -436,6 +450,8 @@ watch(() => props.compact, () => {
   cursor: pointer;
   box-shadow: none;
   transition: opacity 0.15s ease, filter 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  /* Keep background/border-color repaint local to this button. */
+  contain: paint;
 }
 
 .chat-composer-inline-action {

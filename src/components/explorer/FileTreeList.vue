@@ -109,7 +109,9 @@ function scrollToIndex(index: number, options?: { align?: "auto" | "center" }) {
         ? top
         : bottom - element.clientHeight;
   element.scrollTop = Math.max(0, nextTop);
-  updateViewportMetrics();
+  // Defer the layout read to the next animation frame to avoid a forced
+  // synchronous layout right after mutating scrollTop.
+  scheduleViewportMetrics();
 }
 
 defineExpose({ scrollToIndex });
@@ -164,6 +166,8 @@ onUnmounted(() => {
   overflow-y: auto;
   overflow-x: hidden;
   overflow-anchor: none;
+  /* Keep scroll/virtual-window layout changes local. */
+  contain: layout;
 }
 
 .file-tree-list-spacer {

@@ -605,11 +605,17 @@ function clampSupportPrimaryWidth(next: number) {
   return Math.min(maxWidth, Math.max(minWidth, next));
 }
 
+let supportLayoutSyncFrame = 0;
+
 function syncSupportLayoutMetrics() {
-  const layoutWidth = currentSupportLayoutWidth();
-  supportLayoutCompact.value = !!layoutWidth && layoutWidth <= SUPPORT_LAYOUT_COMPACT_WIDTH;
-  supportStripHeight.value = clampSupportStripHeight(supportStripHeight.value);
-  supportPrimaryWidth.value = clampSupportPrimaryWidth(supportPrimaryWidth.value);
+  if (supportLayoutSyncFrame) return;
+  supportLayoutSyncFrame = requestAnimationFrame(() => {
+    supportLayoutSyncFrame = 0;
+    const layoutWidth = currentSupportLayoutWidth();
+    supportLayoutCompact.value = !!layoutWidth && layoutWidth <= SUPPORT_LAYOUT_COMPACT_WIDTH;
+    supportStripHeight.value = clampSupportStripHeight(supportStripHeight.value);
+    supportPrimaryWidth.value = clampSupportPrimaryWidth(supportPrimaryWidth.value);
+  });
 }
 
 function observeSupportLayout() {
@@ -965,6 +971,10 @@ onUnmounted(() => {
   layoutResizeObserver = null;
   cancelSearchMatchScroll();
   unlockResizeInteraction();
+  if (supportLayoutSyncFrame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(supportLayoutSyncFrame);
+    supportLayoutSyncFrame = 0;
+  }
 });
 
 function currentDraftValues() {

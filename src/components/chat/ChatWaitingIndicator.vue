@@ -60,12 +60,25 @@ withDefaults(defineProps<{
 }
 
 .chat-waiting-indicator.active .chat-waiting-indicator-label {
+  position: relative;
   background: linear-gradient(90deg, var(--text-secondary) 0%, var(--text-color) 50%, var(--text-secondary) 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* GPU-friendly shimmer: animate transform on a pseudo-element overlay instead
+   of background-position, which cannot be composited. */
+.chat-waiting-indicator.active .chat-waiting-indicator-label::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.25) 50%, transparent 100%);
+  transform: translateX(-100%);
   animation: chat-waiting-indicator-shimmer 2s ease-in-out infinite;
+  mix-blend-mode: overlay;
+  pointer-events: none;
 }
 
 @keyframes chat-waiting-indicator-spin {
@@ -76,11 +89,11 @@ withDefaults(defineProps<{
 
 @keyframes chat-waiting-indicator-shimmer {
   0% {
-    background-position: 100% 0;
+    transform: translateX(-100%);
   }
 
   100% {
-    background-position: -100% 0;
+    transform: translateX(100%);
   }
 }
 </style>
