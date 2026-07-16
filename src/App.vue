@@ -1947,8 +1947,9 @@ body.is-dragging-select-lock * {
   max-width: 220px;
   position: relative;
   margin-right: 6px;
-  /* Contain the dropdown so its show/hide does not force a full header layout. */
-  contain: layout paint;
+  /* Contain the dropdown layout so its show/hide does not force a full header
+     layout. Keep out `paint` so the dropdown is not clipped to this box. */
+  contain: layout;
 }
 
 .workspace-btn {

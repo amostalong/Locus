@@ -450,9 +450,10 @@ onBeforeUnmount(() => {
   border: none;
   background: transparent;
   font-family: var(--font-prose);
-  /* Isolate Vditor's layout/paint so its internal recalculations do not
-     dirty the whole application tree. */
-  contain: layout paint;
+  /* Isolate Vditor's layout so its internal recalculations do not dirty the
+     whole application tree. Keep out `paint` so Vditor's internal floating
+     tooltips/menus are not clipped to this box. */
+  contain: layout;
 }
 
 .base-markdown-editor :deep(.vditor-toolbar) {

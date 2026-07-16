@@ -1921,8 +1921,9 @@ onUnmounted(() => {
   align-items: center;
   min-width: 0;
   /* Isolate this component's layout so popover open/close does not dirty
-     the rest of the chat/editor layout tree. */
-  contain: layout style paint;
+     the rest of the chat/editor layout tree. Keep out `paint` so the
+     absolutely-positioned popover and icon labels are not clipped. */
+  contain: layout style;
 }
 
 .chat-status-icon-row {
@@ -1947,8 +1948,6 @@ onUnmounted(() => {
   cursor: pointer;
   box-shadow: none;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-  /* Keep background/border/color repaint local. */
-  contain: paint;
 }
 
 .chat-status-icon-btn:hover,

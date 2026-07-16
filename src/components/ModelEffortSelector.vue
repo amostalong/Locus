@@ -164,7 +164,7 @@ onUnmounted(() => document.removeEventListener("click", onClickOutside));
 </script>
 
 <template>
-  <div class="model-effort-selector" ref="selectorRef">
+  <div class="model-effort-selector" :class="{ open }" ref="selectorRef">
     <button
       class="model-effort-trigger ui-select-none"
       :class="{ open, disabled }"
@@ -251,8 +251,15 @@ onUnmounted(() => document.removeEventListener("click", onClickOutside));
   min-width: 0;
   margin-right: 4px;
   /* Isolate layout so the dropdown open/close does not force reflow
-     across the whole header/chat tree. */
-  contain: layout style paint;
+     across the whole header/chat tree. Keep out `paint` so the
+     absolutely-positioned dropdown is not clipped to this box. */
+  contain: layout style;
+}
+
+.model-effort-selector.open {
+  /* Raise above .input-backdrop-row (z-index: 3) when the dropdown is open
+     so the dropdown is not covered by the status icon row. */
+  z-index: 5;
 }
 
 .model-effort-trigger {
