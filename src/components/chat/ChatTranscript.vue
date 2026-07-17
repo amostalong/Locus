@@ -2717,6 +2717,34 @@ function emitKeyboardScrollIntent(event: KeyboardEvent) {
   }
 }
 
+function handleCopy(event: ClipboardEvent) {
+  const selection = window.getSelection();
+  const container = scrollRef.value;
+  if (!event.clipboardData || !selection || selection.isCollapsed || !container) {
+    return;
+  }
+  const anchorNode = selection.anchorNode;
+  if (!anchorNode || !container.contains(anchorNode)) {
+    return;
+  }
+  const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  const commonAncestor = range?.commonAncestorContainer ?? null;
+  const codeBlock =
+    (commonAncestor instanceof Element
+      ? commonAncestor.closest(".code-block-view, .markdown-body pre")
+      : commonAncestor?.parentElement?.closest(".code-block-view, .markdown-body pre"))
+    ?? null;
+  if (!codeBlock) {
+    return;
+  }
+  const text = selection.toString();
+  if (!text) {
+    return;
+  }
+  event.clipboardData.setData("text/plain", text);
+  event.preventDefault();
+}
+
 function emitContentClick(event: MouseEvent) {
   emit("contentClick", event);
 }
@@ -2749,6 +2777,7 @@ function openImage(src: string) {
     @touchstart.passive="emitUserScrollIntent"
     @pointerdown="emitPointerScrollIntent"
     @keydown="emitKeyboardScrollIntent"
+    @copy="handleCopy"
     @click="emitContentClick"
     @contextmenu="emitContentContextmenu"
   >

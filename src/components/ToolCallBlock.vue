@@ -229,9 +229,12 @@ interface EditDiffResult {
 }
 function parseEditStartLines(output: string | undefined): number[] {
   if (!output) return [];
-  const m = output.match(/\[lines:([0-9,]+)\]/);
+  const m = output.match(/\[lines:\s*([0-9,\s]+)\s*\]/);
   if (!m) return [];
-  return m[1].split(",").map(Number);
+  return m[1]
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
 }
 
 const editDiffData = computed((): EditDiffResult | null => {
@@ -239,7 +242,9 @@ const editDiffData = computed((): EditDiffResult | null => {
   try {
     const args = JSON.parse(props.toolCall.arguments);
     const filePath = args.filePath || args.file_path || args.path || "";
-    const startLines = parseEditStartLines(displayedToolOutput.value);
+    // Use the raw tool output instead of the throttled display copy so that
+    // the [lines:...] marker is available immediately after the tool finishes.
+    const startLines = parseEditStartLines(props.toolCall.output ?? "");
     const items: EditDiffItem[] = [];
     if (Array.isArray(args.edits)) {
       for (let i = 0; i < args.edits.length; i++) {
@@ -274,10 +279,16 @@ const editDiffData = computed((): EditDiffResult | null => {
 // `item.startLine` is the source-file line where the oldStr snippet starts;
 // newStr replaces oldStr in place, so its source line offset is the same.
 const editDiffPayloads = ref<Map<number, FileDiffPayload>>(new Map());
+const editDiffPayloadsLoading = ref(false);
 
 watch(editDiffData, async (data) => {
   editDiffPayloads.value = new Map();
-  if (!data) return;
+  if (!data) {
+    editDiffPayloadsLoading.value = false;
+    return;
+  }
+  editDiffPayloadsLoading.value = true;
+  const next = new Map<number, FileDiffPayload>();
   for (let i = 0; i < data.items.length; i++) {
     const item = data.items[i];
     try {
@@ -303,11 +314,13 @@ watch(editDiffData, async (data) => {
         previewSummary: [`+${additions} -${deletions}`],
         text: { hunks },
       };
-      editDiffPayloads.value.set(i, payload);
+      next.set(i, payload);
     } catch {
       // Fall through to old rendering if diff fails
     }
   }
+  editDiffPayloads.value = next;
+  editDiffPayloadsLoading.value = false;
 }, { immediate: true });
 
 /** Syntax-highlight diff content and return HTML with line numbers.
@@ -554,6 +567,9 @@ const highlightedOutput = computed(() => {
               :payload="editDiffPayloads.get(idx)!"
               :style="idx > 0 ? 'margin-top: 6px' : ''"
             />
+            <div v-else-if="editDiffPayloadsLoading" class="edit-diff-loading" :style="idx > 0 ? 'margin-top: 6px' : ''">
+              {{ t("tool.diff.loading") }}
+            </div>
             <div v-else class="edit-diff-container" :style="idx > 0 ? 'margin-top: 6px' : ''">
               <div class="edit-diff-panel edit-diff-old">
                 <div class="edit-diff-panel-header edit-diff-header-old">
@@ -1242,6 +1258,15 @@ const highlightedOutput = computed(() => {
 
 .edit-diff-code :deep(.edit-diff-line-content) {
   padding-left: 4px;
+}
+
+.edit-diff-loading {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--panel-bg) 86%, var(--sidebar-bg) 14%);
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: 6px;
 }
 
 .edit-diff-old .edit-diff-code {
