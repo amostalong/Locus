@@ -31,6 +31,7 @@ import BaseMarkdownEditor from "../ui/BaseMarkdownEditor.vue";
 import BaseSwitch from "../ui/BaseSwitch.vue";
 import MarkdownRenderer from "../MarkdownRenderer.vue";
 import SemanticCodeRenderer from "../ui/SemanticCodeRenderer.vue";
+import WorkerMarkdownRenderer from "../ui/WorkerMarkdownRenderer.vue";
 import KnowledgeChatPane from "./KnowledgeChatPane.vue";
 import {
   getSkillUnityInstallStatus,
@@ -146,6 +147,7 @@ const supportPrimaryWidth = ref(loadStoredPanelSize(
   DEFAULT_SUPPORT_SECTION_WIDTH,
 ));
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let skillUnityStatusRequestId = 0;
 let sideResizing = false;
 let supportHeightResizing = false;
 let supportWidthResizing = false;
@@ -1457,8 +1459,6 @@ function onSkillArgumentHintKeydown(event: KeyboardEvent) {
   }
 }
 
-let skillUnityStatusRequestId = 0;
-
 async function refreshSkillUnityStatus() {
   // Guard against stale responses: rapid package switches must not let a slow
   // earlier request overwrite the status of the currently shown package.
@@ -1795,6 +1795,23 @@ function labelForProvider(provider?: string | null): string {
                     :content="bodyDraft"
                     :highlight-terms="searchQueryTerms"
                   />
+                </div>
+                <div
+                  v-else-if="editorViewMode === 'rendered' && !isReadOnly"
+                  class="preview-body-worker-render"
+                >
+                  <!--
+                    Read-only worker-rendered preview. The vditor IR path that
+                    BaseMarkdownEditor would otherwise take runs lute.parse on
+                    the main thread, which freezes the entire UI for large
+                    documents. Offloading to the lute worker keeps the main
+                    thread free; editing in 'rendered' viewMode is dropped for
+                    the body — users edit in 'native' mode (textarea) instead.
+                    Other paths (read-only, search, summary, rules, native)
+                    remain untouched. See src/workers/markdown.worker.ts and
+                    src/services/markdownWorkerClient.ts.
+                  -->
+                  <WorkerMarkdownRenderer :content="bodyDraft" />
                 </div>
                 <BaseMarkdownEditor
                   v-else
@@ -2567,6 +2584,23 @@ function labelForProvider(provider?: string | null): string {
   flex: 1;
   min-height: 0;
   padding-bottom: 16px;
+}
+
+/* Worker-rendered body: mirror the BaseMarkdownEditor layout so the inner
+   markdown scrolls inside the pane instead of pushing the page-level
+   scrollbar out of view. Without these, the new branch has no intrinsic
+   height and the page scrolls instead of the pane. */
+.preview-body-worker-render {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 16px;
+}
+.preview-body-worker-render :deep(.worker-markdown-renderer) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .preview-search-hit {
