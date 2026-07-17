@@ -1310,7 +1310,7 @@ watch(() => projectStore.workingDir, () => {
           @auth-changed="handleSettingsAuthChanged"
           @model-defaults-changed="modelStore.applyModelDefaults"
           @codex-transport-changed="modelStore.applyCodexModelConfig"
-          @custom-endpoints-changed="modelStore.applyCustomEndpoints"
+          @custom-providers-changed="modelStore.applyCustomProviders"
           @workspace-override-changed="modelStore.loadWorkspaceDefaults"
           @reset-onboarding="onResetOnboarding"
         />

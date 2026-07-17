@@ -8,7 +8,8 @@ import type {
   ModelOption,
   ModelDefaults,
   WorkspaceModelOverride,
-  CustomEndpoint,
+  CustomProvider,
+  CustomProviderModel,
   EffortLevel,
   CodexModelConfig,
   CodexTransportMode,
@@ -262,11 +263,20 @@ function normalizeCodexModels(models?: ModelOption[] | null): ModelOption[] {
   return normalized;
 }
 
+export function customModelId(provider: CustomProvider, model: CustomProviderModel): string {
+  return `custom/${provider.id}/${model.id}`;
+}
+
+function customModelDisplayName(provider: CustomProvider, model: CustomProviderModel): string {
+  if (provider.models.length <= 1) return provider.name;
+  return `${provider.name} / ${model.name}`;
+}
+
 export const useModelStore = defineStore("model", () => {
   const authStore = useAuthStore();
   const projectStore = useProjectStore();
 
-  const customEndpoints = ref<CustomEndpoint[]>([]);
+  const customProviders = ref<CustomProvider[]>([]);
   const codexRemoteModels = ref<ModelOption[]>([]);
   const codexTransport = ref<CodexTransportMode>("websocket");
   const codexFastMode = ref(false);
@@ -298,12 +308,21 @@ export const useModelStore = defineStore("model", () => {
   );
 
   const allModels = computed<ModelOption[]>(() => {
-    const customs: ModelOption[] = customEndpoints.value.map((ep) => ({
-      id: `custom/${ep.id}`,
-      name: ep.name,
-      provider: "custom" as const,
-      supportedEfforts: normalizeCustomReasoningEfforts(ep.supportedReasoningEfforts),
-    }));
+    const customs: ModelOption[] = customProviders.value.flatMap((provider) =>
+      provider.models.map((model) => ({
+        id: customModelId(provider, model),
+        name: customModelDisplayName(provider, model),
+        provider: "custom" as const,
+        contextWindow: model.contextLength || undefined,
+        supportedEfforts:
+          model.reasoningParamFormat === "none"
+            ? []
+            : normalizeCustomReasoningEfforts(model.supportedReasoningEfforts),
+        customProviderId: provider.id,
+        customProviderName: provider.name,
+        customModelName: model.name || provider.name,
+      })),
+    );
     // Claude Code CLI models are opt-in: they only join the list after the
     // user explicitly enables them in model configuration.
     const models = [...builtinModels, ...codexModels.value, ...customs].filter(
@@ -322,9 +341,25 @@ export const useModelStore = defineStore("model", () => {
     return allModels.value.filter((m) => providers.has(m.provider));
   });
 
-  const selectedCustomEndpoint = computed<CustomEndpoint | null>(() =>
-    customEndpoints.value.find((ep) => `custom/${ep.id}` === selectedModelId.value) ?? null
-  );
+  /** Resolve a `custom/...` model id to its provider + model config. Accepts
+   *  the legacy single-segment form (first model of the provider). */
+  function findCustomModel(
+    modelId: string,
+  ): { provider: CustomProvider; model: CustomProviderModel } | null {
+    if (!modelId.startsWith("custom/")) return null;
+    const rest = modelId.slice("custom/".length);
+    const slash = rest.indexOf("/");
+    const providerId = slash >= 0 ? rest.slice(0, slash) : rest;
+    const modelRowId = slash >= 0 ? rest.slice(slash + 1) : null;
+    const provider = customProviders.value.find((p) => p.id === providerId);
+    if (!provider) return null;
+    const model = modelRowId
+      ? provider.models.find((m) => m.id === modelRowId)
+      : provider.models[0];
+    return model ? { provider, model } : null;
+  }
+
+  const selectedCustomModel = computed(() => findCustomModel(selectedModelId.value));
 
   const selectedModelOption = computed<ModelOption | null>(() =>
     allModels.value.find((model) => model.id === selectedModelId.value) ?? null
@@ -348,11 +383,9 @@ export const useModelStore = defineStore("model", () => {
     if (selected.startsWith("openai/")) {
       return selected.slice("openai/".length);
     }
-    if (
-      selected.startsWith("custom/")
-      && selectedCustomEndpoint.value?.apiFormat === "openai_responses"
-    ) {
-      return selectedCustomEndpoint.value.apiModel;
+    const custom = selectedCustomModel.value;
+    if (custom && custom.provider.apiFormat === "openai_responses") {
+      return custom.model.apiModel;
     }
     return null;
   });
@@ -360,9 +393,9 @@ export const useModelStore = defineStore("model", () => {
   const availableEfforts = computed<EffortLevel[]>(() => {
     const m = selectedModelId.value.toLowerCase();
     if (selectedModelId.value.startsWith("custom/")) {
-      const endpoint = selectedCustomEndpoint.value;
-      if (!endpoint || endpoint.reasoningParamFormat === "none") return [];
-      return normalizeCustomReasoningEfforts(endpoint.supportedReasoningEfforts);
+      const custom = selectedCustomModel.value;
+      if (!custom || custom.model.reasoningParamFormat === "none") return [];
+      return normalizeCustomReasoningEfforts(custom.model.supportedReasoningEfforts);
     }
     const catalogEfforts = selectedModelOption.value?.supportedEfforts ?? [];
     if (catalogEfforts.length > 0) return catalogEfforts;
@@ -460,9 +493,9 @@ export const useModelStore = defineStore("model", () => {
     }
   }
 
-  async function loadCustomEndpoints() {
+  async function loadCustomProviders() {
     try {
-      customEndpoints.value = await modelService.getCustomEndpoints();
+      customProviders.value = await modelService.getCustomProviders();
     } catch { /* ignore */ }
   }
 
@@ -562,8 +595,8 @@ export const useModelStore = defineStore("model", () => {
     resolveSelectedModel(true);
   }
 
-  function applyCustomEndpoints(endpoints: CustomEndpoint[]) {
-    customEndpoints.value = endpoints;
+  function applyCustomProviders(providers: CustomProvider[]) {
+    customProviders.value = providers;
   }
 
   function applyCodexModelConfig(config?: Partial<CodexModelConfig> | null) {
@@ -571,7 +604,7 @@ export const useModelStore = defineStore("model", () => {
   }
 
   return {
-    customEndpoints,
+    customProviders,
     codexRemoteModels,
     codexTransport,
     codexFastMode,
@@ -586,7 +619,8 @@ export const useModelStore = defineStore("model", () => {
     allModels,
     availableModels,
     codexModels,
-    selectedCustomEndpoint,
+    selectedCustomModel,
+    findCustomModel,
     selectedOpenAiReasoningModel,
     codexFastModeAvailable,
     effectiveCodexFastMode,
@@ -596,7 +630,7 @@ export const useModelStore = defineStore("model", () => {
     loadLastModel,
     loadLastEffort,
     loadCodexFastMode,
-    loadCustomEndpoints,
+    loadCustomProviders,
     loadCodexModelConfig,
     loadCodexAvailableModels,
     resolveSelectedModel,
@@ -610,7 +644,7 @@ export const useModelStore = defineStore("model", () => {
     loadWorkspaceDefaults,
     saveWorkspaceOverride,
     disableWorkspaceOverride,
-    applyCustomEndpoints,
+    applyCustomProviders,
     applyCodexModelConfig,
   };
 });

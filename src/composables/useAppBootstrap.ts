@@ -20,7 +20,7 @@ import {
   getProviders,
   codexStatus as fetchCodexStatus,
 } from "../services/auth";
-import { getModelDefaults, getCustomEndpoints } from "../services/model";
+import { getModelDefaults, getCustomProviders } from "../services/model";
 import { getToolPermissions } from "../services/permissions";
 import {
   gitProbe,
@@ -204,7 +204,7 @@ export function useAppBootstrap() {
         modelStore.loadModelDefaults(),
         modelStore.loadLastModel(),
         modelStore.loadCodexFastMode(),
-        modelStore.loadCustomEndpoints(),
+        modelStore.loadCustomProviders(),
         modelStore.loadCodexModelConfig(),
       ]);
     });
@@ -371,7 +371,7 @@ export function useAppBootstrap() {
         fetchCodexStatus(),
         getModelDefaults(),
         getToolPermissions(),
-        getCustomEndpoints(),
+        getCustomProviders(),
       ]);
       setWarmup(
         "settings:providers",
@@ -700,7 +700,7 @@ export function useAppBootstrap() {
       modelStore.loadModelDefaults(),
       modelStore.loadLastModel(),
       modelStore.loadCodexFastMode(),
-      modelStore.loadCustomEndpoints(),
+      modelStore.loadCustomProviders(),
       modelStore.loadCodexModelConfig(),
     ]);
     await modelStore.loadCodexAvailableModels();

@@ -43,6 +43,7 @@ function createDisplayState(): DisplaySettings {
     compactToolCalls: true,
     hideThinkingBlocks: true,
     showViewsInSessionPanel: false,
+    showViewLogBar: false,
     mergeGitTreeStatusIcon: true,
     hideGitCommandSuggestions: false,
     systemNotificationsEnabled: true,
