@@ -381,7 +381,7 @@ export function useAppBootstrap() {
       setWarmup("settings:codexStatus", codex, generation);
       setWarmup("settings:modelDefaults", defaults, generation);
       setWarmup("settings:toolPermissions", perms, generation);
-      setWarmup("settings:customEndpoints", endpoints, generation);
+      setWarmup("settings:customProviders", endpoints, generation);
     })();
     return _wpSettings;
   }

@@ -44,6 +44,13 @@ import {
   useLocusAssetInspectorPanel,
 } from "./composables/useLocusAssetInspectorPanel";
 import { isUnityValueEditorWindowLocation } from "./services/unityValueEditorWindow";
+import {
+  isExtraWorkdirsWindowLocation,
+  listenExtraWorkdirsUpdated,
+  openExtraWorkdirsWindow,
+} from "./services/extraWorkdirsWindow";
+import { prepareSubWindowPool } from "./services/subWindow";
+import type { ExtraWorkdirStatus } from "./services/extraWorkdirs";
 import { isViewContentWindowLocation, isViewHostWindowLocation } from "./services/view";
 import { isAgentGraphToolWindowLocation } from "./services/agentGraphTool";
 import {
@@ -68,6 +75,7 @@ const isCollabSearchWindow = isCollabSearchWindowLocation();
 const isChatDiffReviewWindow = isChatDiffReviewWindowLocation();
 const isPlanViewWindow = isPlanViewWindowLocation();
 const isUnityValueEditorWindow = isUnityValueEditorWindowLocation();
+const isExtraWorkdirsWindow = isExtraWorkdirsWindowLocation();
 const isViewHostWindow = isViewHostWindowLocation();
 const isViewContentWindow = isViewContentWindowLocation();
 const isAgentGraphToolWindow = isAgentGraphToolWindowLocation();
@@ -82,6 +90,7 @@ const isStandaloneWindow = isUnityEmbedWindow
   || isChatDiffReviewWindow
   || isPlanViewWindow
   || isUnityValueEditorWindow
+  || isExtraWorkdirsWindow
   || isViewHostWindow
   || isViewContentWindow
   || isAgentGraphToolWindow;
@@ -95,6 +104,7 @@ const CollabSearchWindow = defineAsyncComponent(() => import("./components/Colla
 const ChatDiffReviewWindow = defineAsyncComponent(() => import("./components/ChatDiffReviewWindow.vue"));
 const PlanViewWindow = defineAsyncComponent(() => import("./components/PlanViewWindow.vue"));
 const UnityValueEditorWindow = defineAsyncComponent(() => import("./components/UnityValueEditorWindow.vue"));
+const ExtraWorkdirsConfigWindow = defineAsyncComponent(() => import("./components/ExtraWorkdirsConfigWindow.vue"));
 const ViewHostWindow = defineAsyncComponent(() => import("./components/ViewHostWindow.vue"));
 const AgentGraphToolWindow = defineAsyncComponent(() => import("./components/AgentGraphToolWindow.vue"));
 const UnityEmbeddedSessionView = defineAsyncComponent(() => import("./components/UnityEmbeddedSessionView.vue"));
@@ -175,6 +185,7 @@ const KNOWLEDGE_RUNTIME_STARTUP_POLL_COUNT = 16;
 let knowledgeRuntimeStatusTimer: ReturnType<typeof setTimeout> | null = null;
 let knowledgeRuntimeStartupPollsRemaining = 0;
 let appCloseRequestUnlisten: UnlistenFn | null = null;
+let extraWorkdirsUpdatedUnlisten: UnlistenFn | null = null;
 let longFrameObserver: PerformanceObserver | null = null;
 
 // -- Diff overlay provider (must be called in App setup so all children can inject) --
@@ -486,9 +497,19 @@ function parentPath(dir: string): string {
 function toggleDirDropdown() {
   if (workspaceSwitchBusy.value) return;
   showDirDropdown.value = !showDirDropdown.value;
-  if (!showDirDropdown.value) {
+  if (showDirDropdown.value) {
+    void projectStore.loadExtraWorkdirs();
+  } else {
     recentDirContextMenu.value = null;
   }
+}
+
+function extraWorkdirsFor(dir: string): ExtraWorkdirStatus[] {
+  return projectStore.extraWorkdirs[dir] ?? [];
+}
+
+function extraWorkdirTooltip(extra: ExtraWorkdirStatus): string {
+  return extra.comment ? `${extra.path} — ${extra.comment}` : extra.path;
 }
 
 function closeRecentDirContextMenu() {
@@ -757,6 +778,23 @@ async function removeContextRecentDir() {
   }
 }
 
+async function configureContextRecentDirExtraWorkdirs() {
+  const dir = recentDirContextMenu.value?.dir;
+  if (!dir) return;
+  closeRecentDirContextMenu();
+  try {
+    await openExtraWorkdirsWindow({ workspacePath: dir });
+  } catch (error) {
+    const err = normalizeAppError(error);
+    notificationStore.addNotice("error", err.message, {
+      code: err.code,
+      operation: "openExtraWorkdirsWindow",
+      replaceOperation: true,
+      skipConsoleLog: true,
+    });
+  }
+}
+
 function handleDirClickOutside(e: MouseEvent) {
   if (!showDirDropdown.value && !recentDirContextMenu.value) return;
   const target = e.target as Node;
@@ -866,6 +904,17 @@ async function registerAppCloseRequestListener() {
   }
 }
 
+async function registerExtraWorkdirsUpdatedListener() {
+  if (isStandaloneWindow || extraWorkdirsUpdatedUnlisten) return;
+  try {
+    extraWorkdirsUpdatedUnlisten = await listenExtraWorkdirsUpdated(({ workspacePath }) => {
+      void projectStore.handleExtraWorkdirsUpdated(workspacePath);
+    });
+  } catch (error) {
+    console.warn("Failed to listen for extra workdirs updates:", error);
+  }
+}
+
 function revealMainWindow() {
   if (isStandaloneWindow) return;
   const currentTauriWindowLabel = getCurrentTauriWindowLabel();
@@ -933,7 +982,16 @@ onMounted(async () => {
         const entry = e as any;
         if (entry.duration > 100) {
           const scripts = (entry.scripts || [])
-            .map((s: any) => `${s.name}@${s.sourceURL}:${s.lineNumber}`)
+            .map((s: any) => ({
+              name: s.name,
+              sourceURL: s.sourceURL,
+              line: s.lineNumber,
+              column: s.columnNumber,
+              invoker: s.invoker,
+              invokerType: s.invokerType,
+              window: s.windowAttribution,
+              duration: s.duration ? Math.round(s.duration) : undefined,
+            }))
             .slice(0, 5);
           console.warn(
             "[perf] long-animation-frame",
@@ -947,6 +1005,10 @@ onMounted(async () => {
   }
 
   await registerAppCloseRequestListener();
+  await registerExtraWorkdirsUpdatedListener();
+  void prepareSubWindowPool().catch(() => {
+    // Sub-window pool warm-up is optional; failures are non-fatal.
+  });
   markStartupPhase("main_dom_listeners_ready");
   markStartupPhase("main_bootstrap_critical_start");
   await bootstrapCritical();
@@ -983,6 +1045,8 @@ onUnmounted(() => {
   document.removeEventListener("click", handleDirClickOutside, true);
   appCloseRequestUnlisten?.();
   appCloseRequestUnlisten = null;
+  extraWorkdirsUpdatedUnlisten?.();
+  extraWorkdirsUpdatedUnlisten = null;
   longFrameObserver?.disconnect();
   longFrameObserver = null;
   notificationStore.clearByOperation(KNOWLEDGE_RUNTIME_LOADING_OPERATION);
@@ -1017,6 +1081,7 @@ watch(() => projectStore.workingDir, () => {
   <ChatDiffReviewWindow v-else-if="isChatDiffReviewWindow" />
   <PlanViewWindow v-else-if="isPlanViewWindow" />
   <UnityValueEditorWindow v-else-if="isUnityValueEditorWindow" />
+  <ExtraWorkdirsConfigWindow v-else-if="isExtraWorkdirsWindow" />
   <ViewHostWindow v-else-if="isViewContentWindow" embedded />
   <ViewHostWindow v-else-if="isViewHostWindow" />
   <AgentGraphToolWindow v-else-if="isAgentGraphToolWindow" />
@@ -1096,27 +1161,48 @@ watch(() => projectStore.workingDir, () => {
           <Transition name="dropdown">
             <div v-if="showDirDropdown" class="dir-dropdown">
               <div class="dropdown-label">{{ t("app.dir.recentDirs") }}</div>
-              <div
-                v-for="dir in projectStore.recentDirs"
-                :key="dir"
-                class="dir-item"
-                :class="{
-                  active: dir === projectStore.workingDir,
-                  'context-selected': recentDirContextMenu?.dir === dir,
-                }"
-                @click="selectRecentDir(dir)"
-                @contextmenu.prevent.stop="openRecentDirContextMenu($event, dir)"
-                :title="dir"
-              >
-                <svg class="dir-item-icon" viewBox="0 0 16 16" fill="currentColor" width="12" height="12">
-                  <path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H13.5A1.5 1.5 0 0 1 15 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9z"/>
-                </svg>
-                <div class="dir-item-text">
-                  <span class="dir-item-name">{{ shortDir(dir) }}</span>
-                  <span class="dir-item-path">{{ parentPath(dir) }}</span>
+              <template v-for="dir in projectStore.recentDirs" :key="dir">
+                <div
+                  class="dir-item"
+                  :class="{
+                    active: dir === projectStore.workingDir,
+                    'context-selected': recentDirContextMenu?.dir === dir,
+                  }"
+                  @click="selectRecentDir(dir)"
+                  @contextmenu.prevent.stop="openRecentDirContextMenu($event, dir)"
+                  :title="dir"
+                >
+                  <svg class="dir-item-icon" viewBox="0 0 16 16" fill="currentColor" width="12" height="12">
+                    <path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H13.5A1.5 1.5 0 0 1 15 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9z"/>
+                  </svg>
+                  <div class="dir-item-text">
+                    <span class="dir-item-name">{{ shortDir(dir) }}</span>
+                    <span class="dir-item-path">{{ parentPath(dir) }}</span>
+                  </div>
+                  <span v-if="dir === projectStore.workingDir" class="dir-check">&#10003;</span>
                 </div>
-                <span v-if="dir === projectStore.workingDir" class="dir-check">&#10003;</span>
-              </div>
+                <div
+                  v-if="extraWorkdirsFor(dir).length > 0"
+                  class="dir-item-extras"
+                  @contextmenu.prevent.stop="openRecentDirContextMenu($event, dir)"
+                >
+                  <div
+                    v-for="extra in extraWorkdirsFor(dir)"
+                    :key="extra.path"
+                    class="dir-extra-row"
+                    :class="{ missing: !extra.exists }"
+                    :title="extraWorkdirTooltip(extra)"
+                    @click.stop
+                  >
+                    <svg class="dir-extra-icon" viewBox="0 0 16 16" fill="currentColor" width="10" height="10">
+                      <path d="M7.775 3.275a.75.75 0 0 0 1.06 1.06l1.25-1.25a2 2 0 1 1 2.83 2.83l-2.5 2.5a2 2 0 0 1-2.83 0 .75.75 0 0 0-1.06 1.06 3.5 3.5 0 0 0 4.95 0l2.5-2.5a3.5 3.5 0 0 0-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 0 1 0-2.83l2.5-2.5a2 2 0 0 1 2.83 0 .75.75 0 0 0 1.06-1.06 3.5 3.5 0 0 0-4.95 0l-2.5 2.5a3.5 3.5 0 0 0 4.95 4.95l1.25-1.25a.75.75 0 0 0-1.06-1.06l-1.25 1.25a2 2 0 0 1-2.83 0z"/>
+                    </svg>
+                    <span class="dir-extra-name">{{ shortDir(extra.path) }}</span>
+                    <span v-if="extra.comment" class="dir-extra-comment">{{ extra.comment }}</span>
+                    <span v-if="!extra.exists" class="dir-extra-missing">{{ t("extraWorkdirs.missingBadge") }}</span>
+                  </div>
+                </div>
+              </template>
               <div v-if="projectStore.recentDirs.length === 0" class="dropdown-empty">{{ t("app.dir.noRecords") }}</div>
               <div class="dropdown-divider"></div>
               <div class="dir-item browse" @click="browseFromDropdown">
@@ -1354,6 +1440,13 @@ watch(() => projectStore.workingDir, () => {
       @click="removeContextRecentDir"
     >
       {{ t("app.dir.removeRecent") }}
+    </button>
+    <button
+      type="button"
+      class="recent-dir-ctx-item"
+      @click="configureContextRecentDirExtraWorkdirs"
+    >
+      {{ t("app.dir.configureExtraWorkdirs") }}
     </button>
   </BaseContextMenu>
   <Transition name="workspace-picker-modal">
