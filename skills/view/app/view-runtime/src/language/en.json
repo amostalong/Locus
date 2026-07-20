@@ -1010,6 +1010,7 @@
   "tool.section.output": "Output",
   "tool.diff.old": "Original",
   "tool.diff.new": "Replace",
+  "tool.diff.loading": "Loading diff...",
   "tool.waiting": "Waiting for response...",
   "tool.subagentWaiting": "Waiting for Subagent to finish...",
   "tool.noOutput": "(No output)",

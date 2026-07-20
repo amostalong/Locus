@@ -233,7 +233,7 @@
     },
     {
       "path": "src/components/unity-preview/unityObjectPreview.ts",
-      "bytes": 13693
+      "bytes": 13271
     },
     {
       "path": "src/components/unity-preview/UnityObjectEditorPanel.vue",
@@ -245,7 +245,7 @@
     },
     {
       "path": "src/components/unity-preview/UnityObjectPreview.vue",
-      "bytes": 69532
+      "bytes": 67499
     },
     {
       "path": "src/components/ui/BaseButton.vue",
@@ -297,11 +297,11 @@
     },
     {
       "path": "src/language/en.json",
-      "bytes": 242211
+      "bytes": 244821
     },
     {
       "path": "src/language/zh.json",
-      "bytes": 236291
+      "bytes": 238372
     },
     {
       "path": "src/services/asset.ts",
@@ -317,7 +317,7 @@
     },
     {
       "path": "src/services/view.ts",
-      "bytes": 19677
+      "bytes": 18953
     },
     {
       "path": "src/services/unity.ts",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/types.ts",
-      "bytes": 78279
+      "bytes": 79926
     }
   ]
 }

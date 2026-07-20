@@ -1010,6 +1010,7 @@
   "tool.section.output": "输出",
   "tool.diff.old": "原文",
   "tool.diff.new": "替换",
+  "tool.diff.loading": "正在加载 diff...",
   "tool.waiting": "等待响应中...",
   "tool.subagentWaiting": "等待 Subagent 工作完毕...",
   "tool.noOutput": "(无输出)",
