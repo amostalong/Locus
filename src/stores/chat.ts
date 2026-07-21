@@ -41,6 +41,7 @@ import type {
   SessionRunSummary,
   AssistantRenderPart,
   PendingSessionInput,
+  EffortLevel,
 } from "../types";
 
 type ToolPermissionMode = "auto" | "ask";
@@ -558,6 +559,9 @@ export const useChatStore = defineStore("chat", () => {
     options: { persist?: boolean } = {},
   ) {
     activeSessionId.value = sessionId;
+    // Mirror the active session into the model store so `effectiveModelId`
+    // can resolve a per-session override without importing this store.
+    useModelStore().setActiveSessionId(sessionId);
     if (sessionId) {
       // Sticky plan mode badge follows the backend session store.
       void refreshSessionPlanState(sessionId);
@@ -646,6 +650,17 @@ export const useChatStore = defineStore("chat", () => {
     if (detail.agentId) {
       useAgentStore().selectAgent(detail.agentId);
     }
+    // Mirror per-session model override into the model store. `applySessionModel`
+    // accepts null/empty to release the override; that's exactly the legacy
+    // behavior for sessions created before per-session model was introduced.
+    useModelStore().applySessionModel(detail.id, detail.modelId ?? null);
+    // Same dance for the per-session effort override. `applySessionEffort`
+    // silently drops unknown / non-`EffortLevel` values, so a stale string
+    // from a future version does not poison the map.
+    useModelStore().applySessionEffort(
+      detail.id,
+      (detail.effort ?? null) as EffortLevel | null,
+    );
     applySessionRuntimeSnapshot(detail);
   }
 
@@ -666,6 +681,10 @@ export const useChatStore = defineStore("chat", () => {
     pendingQuestion.value = null;
     pendingToolConfirms.value = [];
     isCompacting.value = false;
+    // Drop the per-session model override reference for the session we are
+    // leaving — the model store keeps the override in its own map for when
+    // the user comes back, but the active-session pointer must move on.
+    useModelStore().setActiveSessionId(null);
   }
 
   function trackActiveRun(sessionId: string, runId: string) {
@@ -1941,6 +1960,26 @@ export const useChatStore = defineStore("chat", () => {
       const rawSessions = await sessionService.listSessions();
       const nextSessions = normalizeSessionRuntimeStatuses(rawSessions);
       sessions.value = nextSessions;
+      // Pre-populate the model store's per-session override map so the
+      // composer and the outgoing request paths resolve `effectiveModelId`
+      // synchronously as soon as the user clicks a sidebar entry. Without
+      // this, the override is only known after `loadSessionState` returns
+      // detail.modelId, which causes a brief flash of the global model.
+      const modelStore = useModelStore();
+      modelStore.hydrateSessionOverrides(
+        nextSessions.map((session) => ({
+          sessionId: session.id,
+          modelId: session.modelId ?? null,
+        })),
+      );
+      // Same dance for the per-session effort override so
+      // `effectiveEffort` resolves synchronously on session switch.
+      modelStore.hydrateSessionEfforts(
+        nextSessions.map((session) => ({
+          sessionId: session.id,
+          effort: session.effort ?? null,
+        })),
+      );
       await restoreActiveSessionSelection(nextSessions);
       await hydrateActiveRuns(nextSessions);
       reconcileStreamingSessions(nextSessions);
@@ -2018,6 +2057,9 @@ export const useChatStore = defineStore("chat", () => {
     undoableMessageIds.value = new Set();
     sessionAgentId.value = null;
     useAgentStore().resetToDefault();
+    // Detach the model store's active-session pointer so plan mode / compact
+    // callers fall back to the global selection while no session is active.
+    useModelStore().setActiveSessionId(null);
 
     // Clear chat changes for the old session
     useChatChangesStore().clear(oldSessionId);
@@ -2061,6 +2103,7 @@ export const useChatStore = defineStore("chat", () => {
     thinkingPanelContent.value = "";
     sessionAgentId.value = null;
     useAgentStore().resetToDefault();
+    useModelStore().setActiveSessionId(null);
     const chatChangesStore = useChatChangesStore();
     chatChangesStore.clear(oldSessionId);
     chatChangesStore.closeInlineDiff();
@@ -2390,8 +2433,11 @@ export const useChatStore = defineStore("chat", () => {
       managedStreamingSessionIds.add(activeSessionId.value);
     }
 
-    // For plan mode, temporarily use planModel if configured
-    let model = modelStore.selectedModelId || null;
+    // For plan mode, temporarily use planModel if configured.
+    // Read the per-session model override via `effectiveModelId` so a pinned
+    // session stays on its pinned model in the default branch. Plan mode
+    // still overrides below by checking `overrides?.mode === "plan"`.
+    let model = modelStore.effectiveModelId || null;
     if (overrides?.mode === "plan") {
       const planModel = modelStore.effectiveModelDefaults.planModel;
       if (planModel && modelStore.availableModels.some((m) => m.id === planModel)) {
@@ -2415,7 +2461,10 @@ export const useChatStore = defineStore("chat", () => {
         text,
         agentId: agentStore.selectedAgentId || null,
         model,
-        effort: modelStore.effortSupported ? modelStore.effort : null,
+        // Per-session effort override: pinned sessions carry their own
+        // reasoning level; non-pinned sessions fall back to the global
+        // `effort` ref. Mirrors the `model` resolution above.
+        effort: modelStore.effortSupported ? modelStore.effectiveEffort : null,
         fastMode: model ? modelStore.codexFastModeForModel(model) : false,
         images: images.length > 0 ? images : null,
         assetRefs: assetRefs.length > 0 ? assetRefs : null,
@@ -2506,7 +2555,11 @@ export const useChatStore = defineStore("chat", () => {
     pendingManagedUnboundSession = false;
     managedStreamingSessionIds.add(sessionId);
 
-    const model = modelStore.selectedModelId || null;
+    // Use the per-session override if the active session is pinned, else
+    // fall back to the global selection. Compact summaries must use the
+    // same model as the session that produced them so we never summarize
+    // opus history with sonnet and break the next round's tool budget.
+    const model = modelStore.effectiveModelId || null;
 
     logChatStreamDebug("compact request start", {
       sessionId,

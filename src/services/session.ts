@@ -38,6 +38,14 @@ export interface CreateSessionParams {
   parentSessionId?: string | null;
   sessionType?: string | null;
   agentId?: string | null;
+  /** Per-session model override. `null`/`undefined` = follow global
+   *  `selectedModelId`. Once set, the session will always use this model
+   *  even if the user changes the global selection elsewhere. */
+  modelId?: string | null;
+  /** Per-session effort (reasoning level) override. `null`/`undefined` =
+   *  follow global `lastEffort`. Once set, the session will always use
+   *  this effort level even if the user changes the global default. */
+  effort?: string | null;
 }
 
 export interface ChatLaunchResult {
@@ -155,6 +163,30 @@ export function loadSession(sessionId: string): Promise<SessionDetail> {
 
 export function renameSession(sessionId: string, title: string): Promise<void> {
   return ipcInvoke("rename_session", { sessionId, title });
+}
+
+/**
+ * Pin (or release) a per-session model override. Pass `null` to release
+ * and let the session follow the global `selectedModelId` again.
+ * Persisted to the session metadata; safe to call from a UI handler.
+ */
+export function setSessionModel(
+  sessionId: string,
+  modelId: string | null,
+): Promise<void> {
+  return ipcInvoke("set_session_model", { sessionId, modelId });
+}
+
+/**
+ * Pin (or release, when `effort == null`) a per-session effort override.
+ * Persisted to the session metadata; safe to call from a UI handler.
+ * Caller must have already validated the value against `EffortLevel`.
+ */
+export function setSessionEffort(
+  sessionId: string,
+  effort: string | null,
+): Promise<void> {
+  return ipcInvoke("set_session_effort", { sessionId, effort });
 }
 
 export function archiveSession(sessionId: string): Promise<void> {

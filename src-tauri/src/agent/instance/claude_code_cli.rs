@@ -1286,7 +1286,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Claude Code CLI Tool Result", None, None, "chat", None)
+            .create_session("Claude Code CLI Tool Result", None, None, "chat", None, None, None)
             .expect("create session");
         store
             .try_start_run(&session_id, "run-claude-code")

@@ -6263,6 +6263,8 @@ impl AgentInstance {
             self.workspace_id.as_deref(),
             "chat",
             Some(child_def_id),
+            None,
+            None,
         )?;
 
         let mut child = AgentInstance::new(
@@ -15711,6 +15713,8 @@ impl AgentInstance {
             self.workspace_id.as_deref(),
             "chat",
             Some(&agent_def.id),
+            None,
+            None,
         ) {
             Ok(id) => id,
             Err(e) => {

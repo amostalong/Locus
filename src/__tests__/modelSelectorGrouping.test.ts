@@ -54,28 +54,137 @@ describe("model selector grouping", () => {
 
     const groups = groupModelsForSelector(models, providerOrder, providerLabels);
 
+    // Sections are sorted alphabetically by their *display label* so the
+    // user reads providers in the order they expect to see them.
+    //   "ChatGPT Subscription" (C-h) < "Claude Subscription" (C-l)
+    //   < "DeepSeek" (D) < "qingyun-5.5" (q)
     expect(groups.map((g) => g.key)).toEqual([
-      "anthropic",
       "openai_codex",
-      "custom:qingyun",
+      "anthropic",
       "custom:deepseek",
+      "custom:qingyun",
     ]);
     expect(groups.map((g) => g.label)).toEqual([
-      "Claude Subscription",
       "ChatGPT Subscription",
-      "qingyun-5.5",
+      "Claude Subscription",
       "DeepSeek",
+      "qingyun-5.5",
     ]);
     // Every custom group keeps provider "custom" so provider-specific UI
     // (e.g. the codex fast toggle check) stays keyed on real providers.
     expect(groups.filter((g) => g.key.startsWith("custom:")).every((g) => g.provider === "custom")).toBe(true);
-    expect(groups[3].models.map((m) => m.id)).toEqual([
+    // Models inside a section are sorted alphabetically by their dropdown
+    // label (customModelName when present, otherwise `name`). Among the
+    // DeepSeek entries "DeepSeek V4 Flash" < "DeepSeek V4 Pro" (F before P
+    // in locale-aware ordering), so v4-flash lands first.
+    expect(groups[2].models.map((m) => m.id)).toEqual([
       "custom/deepseek/v4-flash",
       "custom/deepseek/v4-pro",
     ]);
   });
 
-  it("keeps custom sections in configuration order and skips empty providers", () => {
+  it("sorts models alphabetically within each built-in section", () => {
+    const models: ModelOption[] = [
+      model({ id: "openrouter/claude-opus-4.8", name: "Claude Opus 4.8", provider: "openrouter" }),
+      model({ id: "openrouter/glm-5", name: "GLM 5", provider: "openrouter" }),
+      model({ id: "openrouter/claude-fable-5", name: "Claude Fable 5", provider: "openrouter" }),
+      model({ id: "openrouter/claude-sonnet-5", name: "Claude Sonnet 5", provider: "openrouter" }),
+    ];
+
+    const groups = groupModelsForSelector(models, ["openrouter"], {});
+    expect(groups).toHaveLength(1);
+    // The source order is Opus 4.8, GLM 5, Fable 5, Sonnet 5. The output
+    // must be Fable 5, Opus 4.8, Sonnet 5, GLM 5 — alphabetical by display
+    // name. (Note: localeCompare is case-insensitive by default; Opus
+    // and Sonnet share the "Claude" prefix but differ on the second word.)
+    expect(groups[0].models.map((m) => m.name)).toEqual([
+      "Claude Fable 5",
+      "Claude Opus 4.8",
+      "Claude Sonnet 5",
+      "GLM 5",
+    ]);
+  });
+
+  it("does not mutate the input model array", () => {
+    const models: ModelOption[] = [
+      model({ id: "anthropic/z", name: "Z", provider: "anthropic" }),
+      model({ id: "anthropic/a", name: "A", provider: "anthropic" }),
+    ];
+    const original = models.map((m) => m.id);
+    groupModelsForSelector(models, ["anthropic"], {});
+    expect(models.map((m) => m.id)).toEqual(original);
+  });
+
+  it("sorts every group by display label, including user-named custom accounts", () => {
+    // No `providerLabels` override here — built-in sections fall back to
+    // their provider id for sorting, custom accounts still use the
+    // user-chosen name. The output is the merged sort:
+    //   "anthropic" (a) < "openai_codex" (o-p-e-n-a) < "openrouter" (o-p-e-n-r) < "Z Provider" (Z)
+    // Note that uppercase Z lands *before* lowercase letters under
+    // localeCompare's default case-sensitive ordering — that is the
+    // expected, deterministic result the user is asking for.
+    const providerOrder = ["openrouter", "anthropic", "openai_codex", "custom"] as const;
+    const models: ModelOption[] = [
+      model({ id: "openrouter/a", name: "OR-A", provider: "openrouter" }),
+      model({ id: "anthropic/b", name: "ANT-B", provider: "anthropic" }),
+      model({ id: "openai/gpt-5.5", name: "GPT-5.5", provider: "openai_codex" }),
+      model({
+        id: "custom/zz/last",
+        name: "Z",
+        provider: "custom",
+        customProviderId: "zz",
+        customProviderName: "Z Provider",
+        customModelName: "z",
+      }),
+    ];
+
+    const groups = groupModelsForSelector(models, providerOrder, {});
+    expect(groups.map((g) => g.key)).toEqual([
+      "anthropic",
+      "openai_codex",
+      "openrouter",
+      "custom:zz",
+    ]);
+    expect(groups.map((g) => g.label)).toEqual([
+      "anthropic",
+      "openai_codex",
+      "openrouter",
+      "Z Provider",
+    ]);
+  });
+
+  it("renaming a custom provider slides the section to the new alphabetical slot", () => {
+    // Same two custom accounts, but the second is renamed from
+    // "B Provider" to "Aaa Co". The section must jump to the top of
+    // the list — the user should never need to re-order config to
+    // change the dropdown.
+    const models: ModelOption[] = [
+      model({
+        id: "custom/zz/one",
+        name: "Z",
+        provider: "custom",
+        customProviderId: "zz",
+        customProviderName: "Z Provider",
+        customModelName: "z",
+      }),
+      model({
+        id: "custom/aa/one",
+        name: "A",
+        provider: "custom",
+        customProviderId: "aa",
+        customProviderName: "Aaa Co",
+        customModelName: "a",
+      }),
+    ];
+
+    const groups = groupModelsForSelector(models, providerOrder, providerLabels);
+    expect(groups.map((g) => g.key)).toEqual(["custom:aa", "custom:zz"]);
+  });
+
+  it("skips empty providers and orders the remaining sections by label", () => {
+    // Only the two custom accounts are populated. Built-in providers
+    // are skipped (no models in `byProvider`) and the custom sections
+    // land in alphabetical order by their user-chosen name.
     const models: ModelOption[] = [
       model({
         id: "custom/b/one",
@@ -96,7 +205,7 @@ describe("model selector grouping", () => {
     ];
 
     const groups = groupModelsForSelector(models, providerOrder, providerLabels);
-    expect(groups.map((g) => g.key)).toEqual(["custom:b", "custom:a"]);
+    expect(groups.map((g) => g.key)).toEqual(["custom:a", "custom:b"]);
   });
 
   it("falls back to the generic custom label when grouping metadata is missing", () => {

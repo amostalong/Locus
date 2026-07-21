@@ -36,6 +36,31 @@ export function saveLastModel(modelId: string): Promise<void> {
   return ipcInvoke("save_last_model", { modelId });
 }
 
+/**
+ * Pin (or release, when `modelId == null`) a per-session model override.
+ * Delegates to the `set_session_model` tauri command which writes to
+ * `sessions.model_id` via `SessionStore::set_session_model_id`.
+ */
+export function setSessionModel(
+  sessionId: string,
+  modelId: string | null,
+): Promise<void> {
+  return ipcInvoke("set_session_model", { sessionId, modelId });
+}
+
+/**
+ * Pin (or release, when `effort == null`) a per-session effort override.
+ * Mirrors `setSessionModel` but for the reasoning-level column. The
+ * caller is expected to have already validated the value against the
+ * `EffortLevel` union.
+ */
+export function setSessionEffort(
+  sessionId: string,
+  effort: string | null,
+): Promise<void> {
+  return ipcInvoke("set_session_effort", { sessionId, effort });
+}
+
 export function getLastEffort(): Promise<string> {
   return ipcInvoke<string>("get_last_effort");
 }

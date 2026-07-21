@@ -509,7 +509,7 @@ impl SessionStore {
     ///
     /// Do not rely on ad-hoc `ALTER TABLE ... .ok()` fallbacks or silent
     /// schema drift. Session data must migrate deterministically.
-    const SCHEMA_VERSION: i32 = 20;
+    const SCHEMA_VERSION: i32 = 22;
 
     pub fn new(data_dir: &Path) -> Result<Self, String> {
         Self::new_with_tool_results_root(data_dir, data_dir.join("temp").join("tool-results"))
@@ -748,7 +748,25 @@ impl SessionStore {
             })?;
         }
 
-        debug_assert_eq!(Self::SCHEMA_VERSION, 20, "add a new migration block above");
+        if current < 21 {
+            Self::migrate(conn, 21, "add per-session model_id to sessions", |conn| {
+                if !Self::table_has_column(conn, "sessions", "model_id")? {
+                    conn.execute_batch("ALTER TABLE sessions ADD COLUMN model_id TEXT;")?;
+                }
+                Ok(())
+            })?;
+        }
+
+        if current < 22 {
+            Self::migrate(conn, 22, "add per-session effort to sessions", |conn| {
+                if !Self::table_has_column(conn, "sessions", "effort")? {
+                    conn.execute_batch("ALTER TABLE sessions ADD COLUMN effort TEXT;")?;
+                }
+                Ok(())
+            })?;
+        }
+
+        debug_assert_eq!(Self::SCHEMA_VERSION, 22, "add a new migration block above");
         Ok(())
     }
 
@@ -761,6 +779,8 @@ impl SessionStore {
                 workspace_id TEXT,
                 session_type TEXT NOT NULL DEFAULT 'chat',
                 agent_id TEXT,
+                model_id TEXT,
+                effort TEXT,
                 archived_at INTEGER,
                 latest_completed_run_id TEXT,
                 latest_todo_run_id TEXT,
@@ -1187,13 +1207,15 @@ impl SessionStore {
         workspace_id: Option<&str>,
         session_type: &str,
         agent_id: Option<&str>,
+        model_id: Option<&str>,
+        effort: Option<&str>,
     ) -> Result<String, String> {
         let id = Uuid::new_v4().to_string();
         let now = Self::now_ts();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO sessions (id, title, parent_session_id, workspace_id, session_type, agent_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, title, parent_id, workspace_id, session_type, agent_id, now, now],
+            "INSERT INTO sessions (id, title, parent_session_id, workspace_id, session_type, agent_id, model_id, effort, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, title, parent_id, workspace_id, session_type, agent_id, model_id, effort, now, now],
         )
         .map_err(|e| format!("Failed to create session: {}", e))?;
         Ok(id)
@@ -1252,11 +1274,13 @@ impl SessionStore {
                 workspace_id,
                 session_type,
                 agent_id,
+                model_id,
+                effort,
                 latest_completed_run_id,
                 latest_todo_run_id,
             ) = conn
                 .query_row(
-                    "SELECT title, parent_session_id, workspace_id, session_type, agent_id, latest_completed_run_id, latest_todo_run_id
+                    "SELECT title, parent_session_id, workspace_id, session_type, agent_id, model_id, effort, latest_completed_run_id, latest_todo_run_id
                      FROM sessions WHERE id = ?1",
                     params![source_id],
                     |row| {
@@ -1268,6 +1292,8 @@ impl SessionStore {
                             row.get::<_, Option<String>>(4)?,
                             row.get::<_, Option<String>>(5)?,
                             row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
                         ))
                     },
                 )
@@ -1312,19 +1338,23 @@ impl SessionStore {
                     workspace_id,
                     session_type,
                     agent_id,
+                    model_id,
+                    effort,
                     archived_at,
                     latest_completed_run_id,
                     latest_todo_run_id,
                     created_at,
                     updated_at
                  )
-                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?8)",
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?10)",
                 params![
                     new_id,
                     resolved_title,
                     workspace_id,
                     session_type,
                     agent_id,
+                    model_id,
+                    effort,
                     if cutoff_rowid.is_some() {
                         Option::<String>::None
                     } else {
@@ -1890,9 +1920,11 @@ impl SessionStore {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 agent_id: row.get(2)?,
-                session_type: row.get(3)?,
-                parent_session_id: row.get(4)?,
-                updated_at: row.get(5)?,
+                model_id: row.get(3)?,
+                effort: row.get(4)?,
+                session_type: row.get(5)?,
+                parent_session_id: row.get(6)?,
+                updated_at: row.get(7)?,
                 runtime_status: None,
             })
         };
@@ -1903,9 +1935,9 @@ impl SessionStore {
                 let mut stmt = conn
                     .prepare(
                         if archived {
-                            "SELECT id, title, agent_id, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id = ?1 AND archived_at IS NOT NULL ORDER BY archived_at DESC, updated_at DESC"
+                            "SELECT id, title, agent_id, model_id, effort, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id = ?1 AND archived_at IS NOT NULL ORDER BY archived_at DESC, updated_at DESC"
                         } else {
-                            "SELECT id, title, agent_id, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id = ?1 AND archived_at IS NULL ORDER BY updated_at DESC"
+                            "SELECT id, title, agent_id, model_id, effort, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id = ?1 AND archived_at IS NULL ORDER BY updated_at DESC"
                         },
                     )
                     .map_err(|e| format!("Failed to prepare query: {}", e))?;
@@ -1920,9 +1952,9 @@ impl SessionStore {
                 let mut stmt = conn
                     .prepare(
                         if archived {
-                            "SELECT id, title, agent_id, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id IS NULL AND archived_at IS NOT NULL ORDER BY archived_at DESC, updated_at DESC"
+                            "SELECT id, title, agent_id, model_id, effort, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id IS NULL AND archived_at IS NOT NULL ORDER BY archived_at DESC, updated_at DESC"
                         } else {
-                            "SELECT id, title, agent_id, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC"
+                            "SELECT id, title, agent_id, model_id, effort, session_type, parent_session_id, updated_at FROM sessions WHERE workspace_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC"
                         },
                     )
                     .map_err(|e| format!("Failed to prepare query: {}", e))?;
@@ -2009,6 +2041,8 @@ impl SessionStore {
         let (
             title,
             agent_id,
+            model_id,
+            effort,
             session_type,
             parent_session_id,
             latest_completed_run_id,
@@ -2016,17 +2050,19 @@ impl SessionStore {
             updated_at,
         ) = conn
             .query_row(
-                "SELECT title, agent_id, session_type, parent_session_id, latest_completed_run_id, created_at, updated_at FROM sessions WHERE id = ?1",
+                "SELECT title, agent_id, model_id, effort, session_type, parent_session_id, latest_completed_run_id, created_at, updated_at FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
                     ))
                 },
             )
@@ -2040,6 +2076,8 @@ impl SessionStore {
             id: id.to_string(),
             title,
             agent_id,
+            model_id,
+            effort,
             session_type,
             parent_session_id,
             latest_completed_run_id,
@@ -2074,6 +2112,69 @@ impl SessionStore {
             |row| row.get::<_, Option<String>>(0),
         )
         .map_err(|e| format!("Session not found: {}", e))
+    }
+
+    /// Returns the per-session model override. `None` means the session should
+    /// fall back to the global `selectedModelId` (legacy / unlocked).
+    pub fn get_session_model_id(&self, id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT model_id FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("Session not found: {}", e))
+    }
+
+    /// Sets (or clears when `model_id` is `None`) the per-session model
+    /// override. `None` resets the session to follow the global
+    /// `selectedModelId` again.
+    pub fn set_session_model_id(
+        &self,
+        id: &str,
+        model_id: Option<&str>,
+    ) -> Result<(), String> {
+        let now = Self::now_ts();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE sessions SET model_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![model_id, now, id],
+        )
+        .map_err(|e| format!("Failed to update session model_id: {}", e))?;
+        Ok(())
+    }
+
+    /// Returns the per-session effort override. `None` means the session
+    /// should follow the global `lastEffort` / `defaultEffort` (legacy
+    /// behavior). Stored as a raw string; the frontend validates it
+    /// against the `EffortLevel` union before using it.
+    pub fn get_session_effort(&self, id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT effort FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("Session not found: {}", e))
+    }
+
+    /// Sets (or clears when `effort` is `None`) the per-session effort
+    /// override. `None` resets the session to follow the global
+    /// `lastEffort` again. The caller is expected to have already
+    /// validated the value against `EffortLevel`.
+    pub fn set_session_effort(
+        &self,
+        id: &str,
+        effort: Option<&str>,
+    ) -> Result<(), String> {
+        let now = Self::now_ts();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE sessions SET effort = ?1, updated_at = ?2 WHERE id = ?3",
+            params![effort, now, id],
+        )
+        .map_err(|e| format!("Failed to update session effort: {}", e))?;
+        Ok(())
     }
 
     pub fn get_session_title(&self, id: &str) -> Result<Option<String>, String> {
@@ -4139,7 +4240,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("plan test", None, None, "chat", Some("dev"))
+            .create_session("plan test", None, None, "chat", Some("dev"), None, None)
             .expect("create session");
 
         let initial = store
@@ -4193,7 +4294,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("vacuum test", None, None, "chat", None)
+            .create_session("vacuum test", None, None, "chat", None, None, None)
             .expect("create session");
 
         // ~24 MB of message payload, comfortably past the 16 MB floor.
@@ -4300,7 +4401,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("CLI Session", None, None, "chat", None)
+            .create_session("CLI Session", None, None, "chat", None, None, None)
             .expect("create session");
 
         assert_eq!(
@@ -4389,7 +4490,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Usage", None, None, "chat", None)
+            .create_session("Usage", None, None, "chat", None, None, None)
             .expect("create session");
 
         let usage = store
@@ -4416,7 +4517,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run gated tool result", None, None, "chat", None)
+            .create_session("Run gated tool result", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -4591,7 +4692,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let parent_id = store
-            .create_session("Parent", None, None, "chat", None)
+            .create_session("Parent", None, None, "chat", None, None, None)
             .expect("create parent");
         let child_id = store
             .create_session("Child", Some(&parent_id), None, "chat", Some("explorer"))
@@ -5191,7 +5292,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run Boundary", None, None, "chat", None)
+            .create_session("Run Boundary", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5444,7 +5545,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Tool Result Storage", None, None, "chat", None)
+            .create_session("Tool Result Storage", None, None, "chat", None, None, None)
             .expect("create session");
         let large_output = "B".repeat(31_000);
         let stored_output = store
@@ -5467,7 +5568,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Deleted Tool Result", None, None, "chat", None)
+            .create_session("Deleted Tool Result", None, None, "chat", None, None, None)
             .expect("create session");
 
         let large_output = "C".repeat(31_000);
@@ -5515,7 +5616,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Todo Boundary", None, None, "chat", None)
+            .create_session("Todo Boundary", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5541,7 +5642,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run Lock", None, None, "chat", None)
+            .create_session("Run Lock", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5574,7 +5675,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run Owner", None, None, "chat", None)
+            .create_session("Run Owner", None, None, "chat", None, None, None)
             .expect("create session");
 
         assert_eq!(
@@ -5599,7 +5700,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let parent_id = store
-            .create_session("Parent", None, None, "chat", None)
+            .create_session("Parent", None, None, "chat", None, None, None)
             .expect("create parent");
         let child_id = store
             .create_session("Child", Some(&parent_id), None, "chat", None)
@@ -5611,7 +5712,7 @@ mod tests {
             .create_session("Sibling", Some(&parent_id), None, "chat", None)
             .expect("create sibling");
         let unrelated_id = store
-            .create_session("Unrelated", None, None, "chat", None)
+            .create_session("Unrelated", None, None, "chat", None, None, None)
             .expect("create unrelated");
 
         store
@@ -5649,7 +5750,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run Status", None, None, "chat", None)
+            .create_session("Run Status", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5678,7 +5779,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Run Cancelling", None, None, "chat", None)
+            .create_session("Run Cancelling", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5707,7 +5808,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Event Log", None, None, "chat", None)
+            .create_session("Event Log", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5787,7 +5888,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Rowid Boundary", None, None, "chat", None)
+            .create_session("Rowid Boundary", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -5823,7 +5924,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Exact Boundary", None, None, "chat", None)
+            .create_session("Exact Boundary", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -5870,7 +5971,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Fork Boundary", None, None, "chat", None)
+            .create_session("Fork Boundary", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -5915,7 +6016,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Latest Turn", None, None, "chat", None)
+            .create_session("Latest Turn", None, None, "chat", None, None, None)
             .expect("create session");
 
         store
@@ -5954,7 +6055,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Empty", None, None, "chat", None)
+            .create_session("Empty", None, None, "chat", None, None, None)
             .expect("create session");
 
         let deleted = store
@@ -5968,7 +6069,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Test", None, None, "chat", None)
+            .create_session("Compact Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         let old_user_id = "old-user";
@@ -6076,7 +6177,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact User Budget Test", None, None, "chat", None)
+            .create_session("Compact User Budget Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         let old_user_id = "old-user";
@@ -6163,7 +6264,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Scaled Budget Test", None, None, "chat", None)
+            .create_session("Compact Scaled Budget Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -6229,7 +6330,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Marker Order Test", None, None, "chat", None)
+            .create_session("Compact Marker Order Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -6299,7 +6400,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Marker Insert Order Test", None, None, "chat", None)
+            .create_session("Compact Marker Insert Order Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -6416,7 +6517,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Twice Test", None, None, "chat", None)
+            .create_session("Compact Twice Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         {
@@ -6530,7 +6631,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Compact Handoff Boundary Test", None, None, "chat", None)
+            .create_session("Compact Handoff Boundary Test", None, None, "chat", None, None, None)
             .expect("create session");
 
         {

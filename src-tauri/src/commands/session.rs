@@ -744,6 +744,8 @@ pub async fn create_session(
     parent_session_id: Option<String>,
     session_type: Option<String>,
     agent_id: Option<String>,
+    model_id: Option<String>,
+    effort: Option<String>,
     workspace: State<'_, Arc<Workspace>>,
     store: State<'_, Arc<SessionStore>>,
 ) -> Result<String, AppError> {
@@ -760,6 +762,14 @@ pub async fn create_session(
         trimmed
     };
     let resolved_agent_id = agent_id.as_deref().map(canonical_agent_id);
+    let resolved_model_id = model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let resolved_effort = effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     store
         .create_session(
             resolved_title,
@@ -767,6 +777,8 @@ pub async fn create_session(
             ws_id.as_deref(),
             session_type.as_deref().unwrap_or("chat"),
             resolved_agent_id,
+            resolved_model_id,
+            resolved_effort,
         )
         .map_err(Into::into)
 }
@@ -866,12 +878,29 @@ pub async fn chat(
             let title = session_title
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| text.chars().take(20).collect());
+            // Lock the new session to the model the user selected when sending
+            // the first message. Empty/whitespace means "let the session follow
+            // the global selection" (model_id = None).
+            let initial_model_id = model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            // Lock the new session to the effort level chosen on the first
+            // send so switching back to the session later (or restarting the
+            // app) restores the same reasoning depth without re-prompting.
+            // Empty/whitespace = follow the global lastEffort default.
+            let initial_effort = effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
             store.create_session(
                 &title,
                 None,
                 ws_id.as_deref(),
                 session_type.as_deref().unwrap_or("chat"),
                 requested_agent_id.as_deref(),
+                initial_model_id,
+                initial_effort,
             )?
         }
     };
@@ -1693,6 +1722,42 @@ pub async fn rename_session(
 ) -> Result<(), AppError> {
     store
         .rename_session(&session_id, &title)
+        .map_err(Into::into)
+}
+
+/// Set or clear the per-session model override. Pass `None` to release the
+/// override and let the session follow the global `selectedModelId` again.
+#[tauri::command]
+pub async fn set_session_model(
+    session_id: String,
+    model_id: Option<String>,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<(), AppError> {
+    let resolved = model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    store
+        .set_session_model_id(&session_id, resolved)
+        .map_err(Into::into)
+}
+
+/// Set or clear the per-session effort override. Pass `None` to release the
+/// override and let the session follow the global `lastEffort` again.
+/// The caller is expected to have already validated the value against
+/// `EffortLevel` (frontend does this via `modelStore.selectSessionEffort`).
+#[tauri::command]
+pub async fn set_session_effort(
+    session_id: String,
+    effort: Option<String>,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<(), AppError> {
+    let resolved = effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    store
+        .set_session_effort(&session_id, resolved)
         .map_err(Into::into)
 }
 

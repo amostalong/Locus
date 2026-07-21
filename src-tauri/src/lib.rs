@@ -1111,6 +1111,8 @@ pub fn run() {
             commands::get_active_session_selection,
             commands::save_active_session_selection,
             commands::rename_session,
+            commands::set_session_model,
+            commands::set_session_effort,
             commands::archive_session,
             commands::unarchive_session,
             commands::delete_session,

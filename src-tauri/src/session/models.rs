@@ -6,6 +6,15 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub agent_id: Option<String>,
+    /// Sticky model id captured when the session was created or last switched
+    /// by the user. `None` means the session follows the global `selectedModelId`
+    /// (legacy behavior).
+    pub model_id: Option<String>,
+    /// Sticky effort level for the session, mirroring the `model_id` pattern.
+    /// `None` means the session follows the global `lastEffort` default.
+    /// Stored as a string (`"none" | "low" | "medium" | "high" | "xhigh" | "max"`)
+    /// so we don't have to evolve an enum if Locus ever adds new effort levels.
+    pub effort: Option<String>,
     pub session_type: String,
     pub parent_session_id: Option<String>,
     pub updated_at: i64,
@@ -39,6 +48,11 @@ pub struct SessionDetail {
     pub id: String,
     pub title: String,
     pub agent_id: Option<String>,
+    /// Per-session model override. When `Some`, the chat composer and outgoing
+    /// requests should use this id instead of the global `selectedModelId`.
+    pub model_id: Option<String>,
+    /// Per-session effort override. `None` = follow global `lastEffort`.
+    pub effort: Option<String>,
     pub session_type: String,
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

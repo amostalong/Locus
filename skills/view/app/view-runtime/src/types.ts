@@ -11,6 +11,16 @@ export interface SessionSummary {
   id: string;
   title: string;
   agentId?: string | null;
+  /** Per-session model override. `null`/`undefined` means the session follows
+   *  the global `selectedModelId`. When the user pins a model in the chat
+   *  composer, this is filled in and surfaced in the session sidebar so the
+   *  active model is visible at a glance. */
+  modelId?: string | null;
+  /** Per-session effort (reasoning level) override. `null`/`undefined`
+   *  means the session follows the global `lastEffort`. Stored as a string
+   *  to stay forward-compatible with new effort levels. Validated against
+   *  the `EffortLevel` union by the model store before use. */
+  effort?: string | null;
   sessionType: string;
   parentSessionId?: string | null;
   updatedAt: number;
@@ -406,6 +416,12 @@ export interface SessionDetail {
   id: string;
   title: string;
   agentId?: string | null;
+  /** Per-session model override. When present, the chat composer and
+   *  outgoing requests use this id instead of the global `selectedModelId`. */
+  modelId?: string | null;
+  /** Per-session effort override. When present, the chat composer and
+   *  outgoing requests use this level instead of the global `effort`. */
+  effort?: string | null;
   sessionType: string;
   parentSessionId: string | null;
   latestCompletedRunId?: string | null;
