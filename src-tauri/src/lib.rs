@@ -486,9 +486,10 @@ pub fn run() {
             ));
             web_search::bind_global_state(local_web_search_state.clone());
             println!(
-                "[Locus] local web search: enabled={} key_present={}",
+                "[Locus] local web search: enabled={} engine={:?} key_present={}",
                 initial_local_web_search.enabled,
-                initial_local_web_search.brave_api_key.is_some()
+                initial_local_web_search.engine,
+                initial_local_web_search.api_key.is_some()
             );
 
             let auth_state = Arc::new(tokio::sync::Mutex::new(AuthState::new(&data_dir)));

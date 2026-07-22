@@ -208,7 +208,7 @@ pub(super) fn web_search() -> ToolDef {
                 let count = args
                     .get("count")
                     .and_then(|v| v.as_u64())
-                    .map(|n| n.min(crate::web_search::MAX_RESULTS_CAP_PUBLIC as u64) as u32);
+                    .map(|n| n.min(crate::web_search::MAX_RESULTS_CAP as u64) as u32);
                 let safesearch = args
                     .get("safesearch")
                     .and_then(|v| v.as_str())
@@ -217,17 +217,18 @@ pub(super) fn web_search() -> ToolDef {
                 let config = crate::web_search::current_config().await;
                 if !config.is_active() {
                     return ToolResult {
-                        output: "Error: local web search is not enabled. Ask the user to enable it in Settings → Web Search and provide a Brave Search API key.".to_string(),
+                        output: "Error: local web search is not enabled. Ask the user to enable it in Settings → Web Search and provide an API key for the selected provider.".to_string(),
                         is_error: true,
                     };
                 }
                 let api_key = config
-                    .brave_api_key
+                    .api_key
                     .as_deref()
                     .unwrap_or_default()
                     .to_string();
 
-                match crate::web_search::brave_search(
+                match crate::web_search::search(
+                    config.engine,
                     &api_key,
                     &query,
                     count,

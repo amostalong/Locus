@@ -300,6 +300,7 @@ pub async fn delete_provider_key(
 #[serde(rename_all = "camelCase")]
 pub struct LocalWebSearchStatus {
     pub enabled: bool,
+    pub engine: web_search::SearchEngine,
     pub has_key: bool,
     pub key_hint: String,
     pub active: bool,
@@ -311,17 +312,18 @@ pub async fn get_local_web_search_config(
 ) -> Result<LocalWebSearchStatus, AppError> {
     let guard = state.read().await;
     let key_present = guard
-        .brave_api_key
+        .api_key
         .as_ref()
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false);
     let hint = if key_present {
-        mask_key(guard.brave_api_key.as_deref().unwrap_or(""))
+        mask_key(guard.api_key.as_deref().unwrap_or(""))
     } else {
         String::new()
     };
     Ok(LocalWebSearchStatus {
         enabled: guard.enabled,
+        engine: guard.engine,
         has_key: key_present,
         key_hint: hint,
         active: guard.is_active(),
@@ -331,6 +333,7 @@ pub async fn get_local_web_search_config(
 #[tauri::command]
 pub async fn set_local_web_search_config(
     enabled: bool,
+    engine: web_search::SearchEngine,
     api_key: Option<String>,
     state: State<'_, LocalWebSearchState>,
 ) -> Result<LocalWebSearchStatus, AppError> {
@@ -340,11 +343,13 @@ pub async fn set_local_web_search_config(
 
     let next = LocalWebSearchConfig {
         enabled,
-        brave_api_key: trimmed.clone(),
+        engine,
+        api_key: trimmed.clone(),
     };
 
-    // Persist as JSON so future fields (provider, count, etc.) come along
-    // for free without growing the keychain namespace.
+    // Persist as JSON so future fields (default count, provider-specific
+    // options, etc.) come along for free without growing the keychain
+    // namespace.
     let json = serde_json::to_string(&next)
         .map_err(|e| format!("Failed to serialize local web-search config: {}", e))?;
     keychain::set_secret(keychain::KEY_LOCAL_WEB_SEARCH, &json)?;
@@ -355,13 +360,13 @@ pub async fn set_local_web_search_config(
     }
 
     eprintln!(
-        "[Locus] local web-search config updated: enabled={} key_present={}",
-        enabled,
-        trimmed.is_some()
+        "[Locus] local web-search config updated: enabled={} engine={:?} key_present={}",
+        enabled, engine, trimmed.is_some()
     );
 
     Ok(LocalWebSearchStatus {
         enabled,
+        engine,
         has_key: trimmed.is_some(),
         key_hint: trimmed
             .as_deref()
@@ -375,17 +380,18 @@ pub async fn set_local_web_search_config(
 pub async fn test_local_web_search_connection(
     state: State<'_, LocalWebSearchState>,
 ) -> Result<bool, AppError> {
-    let (enabled, key) = {
+    let (enabled, engine, key) = {
         let guard = state.read().await;
         (
             guard.enabled,
-            guard.brave_api_key.clone().unwrap_or_default(),
+            guard.engine,
+            guard.api_key.clone().unwrap_or_default(),
         )
     };
     if !enabled || key.trim().is_empty() {
-        return Err("Web search is not configured. Enable the feature and provide a Brave API key first.".into());
+        return Err("Web search is not configured. Enable the feature and provide an API key first.".into());
     }
-    web_search::brave_search(&key, "locus connection test", Some(1), Some("moderate"))
+    web_search::search(engine, &key, "locus connection test", Some(1), Some("moderate"))
         .await
         .map(|_| true)
         .map_err(AppError::from)

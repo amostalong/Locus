@@ -201,10 +201,13 @@ export function defaultCodeAnalysisToolsConfig(): CodeAnalysisToolsConfig {
  *  the tool will refuse to run regardless of the stored toggle. */
 export interface LocalWebSearchStatus {
   enabled: boolean;
+  engine: SearchEngine;
   hasKey: boolean;
   keyHint: string;
   active: boolean;
 }
+
+export type SearchEngine = "brave" | "exa";
 
 export type UnityEditorProcessState = "running" | "not_running" | "unknown";
 

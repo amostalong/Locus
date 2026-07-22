@@ -45,6 +45,7 @@ import type {
   LocalWebSearchStatus,
   PythonRuntimeInfo,
   PythonRuntimeState,
+  SearchEngine,
   UnityBackgroundHookStatus,
 } from "../../types";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -112,6 +113,16 @@ const webSearchTestMessage = ref("");
 // expected path for a key rotation.
 const webSearchKeyDraft = ref("");
 const webSearchSavedKeyPresent = ref(false);
+// When the user picks a different engine we still keep the old key in the
+// status payload (the server does not clear it on a switch). The draft is
+// re-cleared so they must consciously re-paste a key for the new engine
+// rather than accidentally hitting "Save" and shipping a Brave key to Exa.
+const webSearchEngineDraft = ref<SearchEngine>("brave");
+
+const webSearchEngineOptions = computed(() => [
+  { value: "brave" as SearchEngine, label: t("settings.general.webSearchEngineBrave") },
+  { value: "exa" as SearchEngine, label: t("settings.general.webSearchEngineExa") },
+]);
 
 const languageOptions = computed(() => [
   { value: "zh", label: t("language.zh") },
@@ -498,6 +509,7 @@ async function refreshWebSearchStatus() {
     const status = await localWebSearchGetConfig();
     webSearchStatus.value = status;
     webSearchSavedKeyPresent.value = status.hasKey;
+    webSearchEngineDraft.value = status.engine;
     // Reset the draft only when no in-flight edit exists; keeping the
     // user's current input across refetches is less surprising than
     // clobbering it on every status sync.
@@ -525,15 +537,15 @@ async function saveWebSearchConfig() {
     // that as "keep the existing key". An explicit clear happens by typing
     // a non-empty value and then deleting it; we send `null` so the backend
     // drops the stored secret instead of leaving the previous one in place.
-    const apiKeyToSend = trimmedDraft.length === 0
-      ? (webSearchSavedKeyPresent.value ? null : null)
-      : trimmedDraft;
+    const apiKeyToSend = trimmedDraft.length === 0 ? null : trimmedDraft;
     const next = await localWebSearchSetConfig({
       enabled: webSearchStatus.value?.enabled ?? false,
+      engine: webSearchEngineDraft.value,
       apiKey: apiKeyToSend,
     });
     webSearchStatus.value = next;
     webSearchSavedKeyPresent.value = next.hasKey;
+    webSearchEngineDraft.value = next.engine;
     webSearchKeyDraft.value = "";
     webSearchTestState.value = "idle";
     webSearchTestMessage.value = "";
@@ -566,10 +578,12 @@ async function toggleWebSearchEnabled(next: boolean) {
     const apiKeyToSend = trimmedDraft.length === 0 ? null : trimmedDraft;
     const next_status = await localWebSearchSetConfig({
       enabled: next,
+      engine: webSearchEngineDraft.value,
       apiKey: apiKeyToSend,
     });
     webSearchStatus.value = next_status;
     webSearchSavedKeyPresent.value = next_status.hasKey;
+    webSearchEngineDraft.value = next_status.engine;
   } catch (e) {
     const err = normalizeAppError(e);
     notificationStore.addNotice("error", err.message, {
@@ -580,6 +594,18 @@ async function toggleWebSearchEnabled(next: boolean) {
   } finally {
     webSearchBusy.value = false;
   }
+}
+
+function selectWebSearchEngine(engine: SearchEngine) {
+  if (webSearchBusy.value) return;
+  if (webSearchEngineDraft.value === engine) return;
+  webSearchEngineDraft.value = engine;
+  // The stored key is per-engine in the user's mental model — switching
+  // engines invalidates whatever the user typed. They have to re-paste for
+  // the new provider.
+  webSearchKeyDraft.value = "";
+  webSearchTestState.value = "idle";
+  webSearchTestMessage.value = "";
 }
 
 async function testWebSearchConnection() {
@@ -616,6 +642,25 @@ const webSearchStatusLabel = computed(() => {
   if (!webSearchStatus.value.hasKey) return t("settings.general.webSearchStatusNoKey");
   if (!webSearchStatus.value.enabled) return t("settings.general.webSearchStatusOff");
   return t("settings.general.webSearchStatusUnknown");
+});
+
+const webSearchKeyLabel = computed(() => {
+  return webSearchEngineDraft.value === "exa"
+    ? t("settings.general.webSearchKeyLabelExa")
+    : t("settings.general.webSearchKeyLabel");
+});
+
+const webSearchKeyPlaceholder = computed(() => {
+  if (webSearchKeyHint.value) return webSearchKeyHint.value;
+  return webSearchEngineDraft.value === "exa"
+    ? t("settings.general.webSearchKeyPlaceholderExa")
+    : t("settings.general.webSearchKeyPlaceholder");
+});
+
+const webSearchDesc = computed(() => {
+  return webSearchEngineDraft.value === "exa"
+    ? t("settings.general.webSearchDescExa")
+    : t("settings.general.webSearchDesc");
 });
 
 async function refreshTempInfo() {
@@ -1032,16 +1077,28 @@ async function selectPythonRuntime(selectedId: string) {
   <div class="settings-section">
     <div class="section-label">{{ t("settings.general.webSearch") }}</div>
     <p class="section-desc">
-      {{ t("settings.general.webSearchDesc") }}
+      {{ webSearchDesc }}
       <a
         class="web-search-link"
-        href="https://brave.com/search/api/"
+        :href="webSearchEngineDraft === 'exa' ? 'https://dashboard.exa.ai/api-keys' : 'https://brave.com/search/api/'"
         target="_blank"
         rel="noopener noreferrer"
         >{{ t("settings.general.webSearchGetKey") }}</a
       >
     </p>
     <div class="web-search-block" :aria-busy="!webSearchReady">
+      <div class="web-search-row web-search-engine-row">
+        <span class="web-search-key-label">{{ t("settings.general.webSearchEngineLabel") }}</span>
+        <BaseSegmented
+          class="web-search-engine-segmented"
+          :model-value="webSearchEngineDraft"
+          :options="webSearchEngineOptions"
+          :aria-label="t('settings.general.webSearchEngineLabel')"
+          size="sm"
+          :disabled="webSearchBusy"
+          @update:model-value="selectWebSearchEngine"
+        />
+      </div>
       <div class="web-search-row web-search-master-row">
         <div class="web-search-info">
           <span class="web-search-name">{{ t("settings.general.webSearchMaster") }}</span>
@@ -1070,7 +1127,7 @@ async function selectPythonRuntime(selectedId: string) {
       </div>
       <div class="web-search-row web-search-key-row">
         <label class="web-search-key-label" for="web-search-key-input">
-          {{ t("settings.general.webSearchKeyLabel") }}
+          {{ webSearchKeyLabel }}
         </label>
         <div class="web-search-key-input-wrap">
           <input
@@ -1080,7 +1137,7 @@ async function selectPythonRuntime(selectedId: string) {
             type="password"
             autocomplete="off"
             spellcheck="false"
-            :placeholder="webSearchKeyHint || t('settings.general.webSearchKeyPlaceholder')"
+            :placeholder="webSearchKeyPlaceholder"
             :disabled="webSearchBusy"
           />
           <button
@@ -1529,6 +1586,14 @@ async function selectPythonRuntime(selectedId: string) {
 .web-search-master-row {
   justify-content: space-between;
   flex-wrap: wrap;
+}
+.web-search-engine-row {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.web-search-engine-segmented {
+  flex: 0 1 auto;
 }
 .web-search-info {
   display: flex;

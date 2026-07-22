@@ -1,4 +1,4 @@
-import type { LocalWebSearchStatus } from "../types";
+import type { LocalWebSearchStatus, SearchEngine } from "../types";
 import { ipcInvoke } from "./ipc";
 
 export function localWebSearchGetConfig(): Promise<LocalWebSearchStatus> {
@@ -11,11 +11,12 @@ export function localWebSearchGetConfig(): Promise<LocalWebSearchStatus> {
 
 export function localWebSearchSetConfig(args: {
   enabled: boolean;
+  engine: SearchEngine;
   apiKey: string | null;
 }): Promise<LocalWebSearchStatus> {
   return ipcInvoke<LocalWebSearchStatus>(
     "set_local_web_search_config",
-    { enabled: args.enabled, apiKey: args.apiKey },
+    { enabled: args.enabled, engine: args.engine, apiKey: args.apiKey },
     {
       operation: "localWebSearchSetConfig",
       notify: false,
