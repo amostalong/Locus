@@ -1102,7 +1102,7 @@ async function selectPythonRuntime(selectedId: string) {
       <div class="web-search-row web-search-master-row">
         <div class="web-search-info">
           <span class="web-search-name">{{ t("settings.general.webSearchMaster") }}</span>
-          <span class="web-search-status" :class="`web-search-status-${webSearchStatus.value?.active ? 'active' : 'inactive'}`">
+          <span class="web-search-status" :class="`web-search-status-${webSearchStatus?.active ? 'active' : 'inactive'}`">
             {{ webSearchStatusLabel }}
           </span>
         </div>
