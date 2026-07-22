@@ -3413,6 +3413,12 @@ impl AgentInstance {
     }
 
     async fn resolve_effective_tool_names(&self) -> Vec<String> {
+        // Snapshot the feature flags that gate tool visibility so the
+        // synchronous filter closure below can branch on them without
+        // re-entering the await machinery. The web-search toggle is the only
+        // flag whose read crosses an `await` boundary today; the rest stay
+        // atomic so we can read them directly.
+        let local_web_search_active = crate::web_search::is_active().await;
         let mut tools: Vec<String> = self
             .def
             .tools
@@ -3445,6 +3451,11 @@ impl AgentInstance {
                 "unity_hot_reload" => {
                     crate::unity_hotreload::is_enabled() && crate::csharp_compile::is_enabled()
                 }
+                // Local web search requires both the user-facing toggle and a
+                // non-empty Brave API key. Without this gate the LLM would see
+                // a tool it cannot actually use, which surfaces as opaque 401s
+                // mid-session — better to filter it out at the request layer.
+                "web_search" => local_web_search_active,
                 _ => true,
             })
             .cloned()

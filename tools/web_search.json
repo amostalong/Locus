@@ -1,0 +1,22 @@
+{
+  "description": "Search the public web via the configured search provider (Brave Search API).\n- Use this to find URLs, references, or current information that is not already in the workspace.\n- After searching, prefer following the most relevant 2-3 URLs with `web_fetch` to read the full content before quoting or summarizing.\n- The result is a list of {title, url, snippet} entries ranked by relevance. Snippets are excerpts, not full text — quote sparingly and re-fetch when precision matters.\n- Search is bounded: 20 results max, 1-50 per request. Use `count` to narrow when you only need a few hits.\n- Safe-search is enabled by default. Set `safesearch` to \"off\" only when the query is unambiguously technical (e.g. CVE IDs, malware signatures).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query. Phrase it like a search engine query, not a question. Use 2-6 specific terms for best results."
+      },
+      "count": {
+        "type": "integer",
+        "description": "Maximum number of results to return (1-50, default 10)."
+      },
+      "safesearch": {
+        "type": "string",
+        "enum": ["strict", "moderate", "off"],
+        "description": "Safe-search level. Default \"moderate\"."
+      }
+    },
+    "required": ["query"]
+  }
+}

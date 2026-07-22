@@ -26,6 +26,7 @@ pub fn register_all(registry: &mut ToolRegistry) {
     registry.register_builtin(search::grep());
     registry.register_builtin(unity::unity_asset_search());
     registry.register_builtin(misc::web_fetch());
+    registry.register_builtin(misc::web_search());
     registry.register_builtin(misc::todowrite());
     registry.register_builtin(misc::graph_view());
 

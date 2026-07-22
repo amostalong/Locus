@@ -11,7 +11,8 @@ use crate::llm::anthropic_usage::AnthropicRateLimitsResponse;
 use crate::llm::codex_usage::{CodexRateLimitResetConsumeResponse, CodexRateLimitsResponse};
 
 use crate::error::AppError;
-use crate::{ApiKeyState, ProviderKeysState};
+use crate::web_search::{self, LocalWebSearchConfig};
+use crate::{ApiKeyState, LocalWebSearchState, ProviderKeysState};
 
 pub type CodexAuthStateHandle = Arc<tokio::sync::Mutex<CodexAuthState>>;
 
@@ -293,6 +294,101 @@ pub async fn delete_provider_key(
 
     eprintln!("[Locus] provider key deleted from keychain: {}", provider);
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalWebSearchStatus {
+    pub enabled: bool,
+    pub has_key: bool,
+    pub key_hint: String,
+    pub active: bool,
+}
+
+#[tauri::command]
+pub async fn get_local_web_search_config(
+    state: State<'_, LocalWebSearchState>,
+) -> Result<LocalWebSearchStatus, AppError> {
+    let guard = state.read().await;
+    let key_present = guard
+        .brave_api_key
+        .as_ref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let hint = if key_present {
+        mask_key(guard.brave_api_key.as_deref().unwrap_or(""))
+    } else {
+        String::new()
+    };
+    Ok(LocalWebSearchStatus {
+        enabled: guard.enabled,
+        has_key: key_present,
+        key_hint: hint,
+        active: guard.is_active(),
+    })
+}
+
+#[tauri::command]
+pub async fn set_local_web_search_config(
+    enabled: bool,
+    api_key: Option<String>,
+    state: State<'_, LocalWebSearchState>,
+) -> Result<LocalWebSearchStatus, AppError> {
+    let trimmed = api_key
+        .map(|raw| raw.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let next = LocalWebSearchConfig {
+        enabled,
+        brave_api_key: trimmed.clone(),
+    };
+
+    // Persist as JSON so future fields (provider, count, etc.) come along
+    // for free without growing the keychain namespace.
+    let json = serde_json::to_string(&next)
+        .map_err(|e| format!("Failed to serialize local web-search config: {}", e))?;
+    keychain::set_secret(keychain::KEY_LOCAL_WEB_SEARCH, &json)?;
+
+    {
+        let mut guard = state.write().await;
+        *guard = next.clone();
+    }
+
+    eprintln!(
+        "[Locus] local web-search config updated: enabled={} key_present={}",
+        enabled,
+        trimmed.is_some()
+    );
+
+    Ok(LocalWebSearchStatus {
+        enabled,
+        has_key: trimmed.is_some(),
+        key_hint: trimmed
+            .as_deref()
+            .map(mask_key)
+            .unwrap_or_default(),
+        active: next.is_active(),
+    })
+}
+
+#[tauri::command]
+pub async fn test_local_web_search_connection(
+    state: State<'_, LocalWebSearchState>,
+) -> Result<bool, AppError> {
+    let (enabled, key) = {
+        let guard = state.read().await;
+        (
+            guard.enabled,
+            guard.brave_api_key.clone().unwrap_or_default(),
+        )
+    };
+    if !enabled || key.trim().is_empty() {
+        return Err("Web search is not configured. Enable the feature and provide a Brave API key first.".into());
+    }
+    web_search::brave_search(&key, "locus connection test", Some(1), Some("moderate"))
+        .await
+        .map(|_| true)
+        .map_err(AppError::from)
 }
 
 fn mask_key(key: &str) -> String {

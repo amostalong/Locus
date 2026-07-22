@@ -66,6 +66,7 @@ pub mod unity_type_index_selftest;
 pub mod unity_yaml;
 pub mod vcs;
 pub mod view;
+pub mod web_search;
 #[cfg(target_os = "windows")]
 mod windows_resize_sync;
 #[cfg(target_os = "windows")]
@@ -255,6 +256,12 @@ pub type PendingInputQueueHandle =
 pub type ApiKeyState = Arc<tokio::sync::RwLock<String>>;
 
 pub type ProviderKeysState = Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>;
+
+/// In-memory mirror of the persisted local web-search configuration
+/// (Brave Search API key + enable toggle). The keychain stays the source of
+/// truth; this state is hydrated at startup and refreshed whenever the user
+/// updates the setting.
+pub type LocalWebSearchState = web_search::SharedState;
 
 pub struct PendingQuestionResponse {
     pub session_id: String,
@@ -464,6 +471,25 @@ pub fn run() {
             let api_key_state: ApiKeyState =
                 Arc::new(tokio::sync::RwLock::new(initial_key.clone()));
             println!("[Locus] api_key present: {}", !initial_key.is_empty());
+
+            // Load local web-search configuration (Brave API key + enable
+            // toggle). The keychain entry stores the whole struct as JSON so
+            // future fields (alternate providers, default count, etc.) do not
+            // require new keychain keys.
+            let initial_local_web_search = keychain::get_secret(keychain::KEY_LOCAL_WEB_SEARCH)
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<web_search::LocalWebSearchConfig>(&raw).ok())
+                .unwrap_or_default();
+            let local_web_search_state: LocalWebSearchState = Arc::new(tokio::sync::RwLock::new(
+                initial_local_web_search.clone(),
+            ));
+            web_search::bind_global_state(local_web_search_state.clone());
+            println!(
+                "[Locus] local web search: enabled={} key_present={}",
+                initial_local_web_search.enabled,
+                initial_local_web_search.brave_api_key.is_some()
+            );
 
             let auth_state = Arc::new(tokio::sync::Mutex::new(AuthState::new(&data_dir)));
             println!("[Locus] auth state initialized");
@@ -930,6 +956,7 @@ pub fn run() {
             app.manage(auth_state);
             app.manage(codex_state);
             app.manage(api_key_state);
+            app.manage(local_web_search_state);
             app.manage(app_knowledge_dir);
             app.manage(app_agent_dir);
             app.manage(provider_keys);
@@ -1127,6 +1154,9 @@ pub fn run() {
             commands::anthropic_rate_limits,
             commands::save_api_key,
             commands::clear_api_key,
+            commands::get_local_web_search_config,
+            commands::set_local_web_search_config,
+            commands::test_local_web_search_connection,
             commands::get_providers,
             commands::test_claude_code_cli,
             commands::save_provider_key,

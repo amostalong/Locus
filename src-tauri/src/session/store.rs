@@ -4559,7 +4559,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let session_id = store
-            .create_session("Source", None, Some("workspace-1"), "chat", Some("dev"))
+            .create_session("Source", None, Some("workspace-1"), "chat", Some("dev"), None, None)
             .expect("create session");
 
         store
@@ -4695,7 +4695,15 @@ mod tests {
             .create_session("Parent", None, None, "chat", None, None, None)
             .expect("create parent");
         let child_id = store
-            .create_session("Child", Some(&parent_id), None, "chat", Some("explorer"))
+            .create_session(
+                "Child",
+                Some(&parent_id),
+                None,
+                "chat",
+                Some("explorer"),
+                None,
+                None,
+            )
             .expect("create child");
 
         let error = store
@@ -5703,13 +5711,13 @@ mod tests {
             .create_session("Parent", None, None, "chat", None, None, None)
             .expect("create parent");
         let child_id = store
-            .create_session("Child", Some(&parent_id), None, "chat", None)
+            .create_session("Child", Some(&parent_id), None, "chat", None, None, None)
             .expect("create child");
         let grandchild_id = store
-            .create_session("Grandchild", Some(&child_id), None, "chat", None)
+            .create_session("Grandchild", Some(&child_id), None, "chat", None, None, None)
             .expect("create grandchild");
         let sibling_id = store
-            .create_session("Sibling", Some(&parent_id), None, "chat", None)
+            .create_session("Sibling", Some(&parent_id), None, "chat", None, None, None)
             .expect("create sibling");
         let unrelated_id = store
             .create_session("Unrelated", None, None, "chat", None, None, None)

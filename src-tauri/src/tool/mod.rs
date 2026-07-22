@@ -144,6 +144,7 @@ pub fn default_load_mode_for_builtin_tool(name: &str) -> ToolLoadMode {
             | "unity_capture_viewport"
             | "unity_run_states"
             | "web_fetch"
+            | "web_search"
     ) {
         ToolLoadMode::Lazy
     } else {
@@ -196,6 +197,7 @@ const TOOL_PRIORITY_ORDER: &[&str] = &[
     "knowledge_edit",
     // Low-frequency utilities (mostly lazy-loaded).
     "web_fetch",
+    "web_search",
     "unity_run_states",
     "unity_capture_viewport",
     "graph_view",

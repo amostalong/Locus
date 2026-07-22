@@ -182,6 +182,73 @@ fn web_fetch_user_agent() -> &'static str {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 LocusWebFetch/1.0"
 }
 
+// ─── web_search ─────────────────────────────────────────────────────────────
+
+pub(super) fn web_search() -> ToolDef {
+    let prompt = crate::prompt::parse_tool_prompt(crate::prompt::tools::WEB_SEARCH);
+    ToolDef {
+        name: "web_search".to_string(),
+        description: prompt.description,
+        parameters: prompt.parameters,
+        mutates_workspace: false,
+        execute: make_exec(|args, _ctx| {
+            Box::pin(async move {
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if query.trim().is_empty() {
+                    return ToolResult {
+                        output: "Error: web_search requires a non-empty `query`.".to_string(),
+                        is_error: true,
+                    };
+                }
+
+                let count = args
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.min(crate::web_search::MAX_RESULTS_CAP_PUBLIC as u64) as u32);
+                let safesearch = args
+                    .get("safesearch")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                let config = crate::web_search::current_config().await;
+                if !config.is_active() {
+                    return ToolResult {
+                        output: "Error: local web search is not enabled. Ask the user to enable it in Settings → Web Search and provide a Brave Search API key.".to_string(),
+                        is_error: true,
+                    };
+                }
+                let api_key = config
+                    .brave_api_key
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string();
+
+                match crate::web_search::brave_search(
+                    &api_key,
+                    &query,
+                    count,
+                    safesearch.as_deref(),
+                )
+                .await
+                {
+                    Ok(response) => ToolResult {
+                        output: crate::web_search::format_response(&response),
+                        is_error: false,
+                    },
+                    Err(error) => ToolResult {
+                        output: error,
+                        is_error: true,
+                    },
+                }
+            })
+        }),
+    }
+}
+
 fn render_web_fetch_content(body: &str, content_type: &str, format: WebFetchFormat) -> String {
     match format {
         WebFetchFormat::Html => body.to_string(),

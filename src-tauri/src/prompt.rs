@@ -27,6 +27,7 @@ pub mod tools {
     pub const BASH: &str = include_str!("../../tools/bash.json");
     pub const GREP: &str = include_str!("../../tools/grep.json");
     pub const WEB_FETCH: &str = include_str!("../../tools/web_fetch.json");
+    pub const WEB_SEARCH: &str = include_str!("../../tools/web_search.json");
     pub const TODOWRITE: &str = include_str!("../../tools/todowrite.json");
     pub const GRAPH_VIEW: &str = include_str!("../../tools/graph_view.json");
     pub const UNITY_EXECUTE: &str = include_str!("../../tools/unity_execute.json");
