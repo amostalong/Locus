@@ -12136,6 +12136,25 @@ impl AgentInstance {
                 );
                 Self::prefix_knowledge_search_hit_paths(&mut items);
                 let items = Self::sanitize_knowledge_search_hits(items);
+                // Push the bar to 1.0 *before* the tool result is returned so
+                // the frontend receives a "complete" frame while the
+                // tool call is still in the `running` state — otherwise the
+                // progress bar would freeze at 96% (the highest fraction
+                // `query_documents_with_progress` ever emits) and only
+                // disappear once the `ToolCallDone` event flips the
+                // status. The downstream ToolCallDone stream event will
+                // then clear it, but the user at least sees a 100% frame
+                // for the brief gap between this emit and the done event.
+                emit_tool_progress(
+                    app_handle,
+                    run_id,
+                    &self.session_id,
+                    tool_call_id,
+                    "Knowledge query complete",
+                    format!("{} result(s)", items.len()),
+                    Some(1.0),
+                    "running",
+                );
                 ToolResult {
                     output: Self::format_knowledge_query_output(&items),
                     is_error: false,

@@ -44,6 +44,29 @@ describe("knowledgeQueryProgress", () => {
     expect(agentSource).toContain("AppError::emit_background");
   });
 
+  it("emits a 1.0 progress frame after formatting so the bar doesn't freeze at 96%", () => {
+    // `query_documents_with_progress` internally emits up to 0.96 (the
+    // "Formatting knowledge results" stage). Without a follow-up 1.0
+    // emit, the bar would sit at 96% for the brief gap between the
+    // last progress event and the ToolCallDone event, which is the
+    // gap the user actually sees.
+    const agentSource = read("src-tauri/src/agent/instance/mod.rs");
+    // Locate the "Formatting knowledge results" emit so we can confirm
+    // the 1.0 emit comes *after* it on the same code path.
+    const formattingIdx = agentSource.indexOf("Formatting knowledge results");
+    expect(formattingIdx).toBeGreaterThan(-1);
+    // The 1.0 emit must come *after* the formatting emit, on the same
+    // (Ok) arm of the match.
+    const completeIdx = agentSource.indexOf("Knowledge query complete");
+    expect(completeIdx).toBeGreaterThan(formattingIdx);
+    // 1.0 is the value we push to so the bar reaches 100% before the
+    // ToolCallDone event flips the status out of "running".
+    expect(agentSource).toContain("Some(1.0)");
+    // The state stays "running" on purpose — the downstream ToolCallDone
+    // event is what clears the progress bar.
+    expect(agentSource).toContain('"Knowledge query complete"');
+  });
+
   it("uses a dedicated knowledge_query tool block for visible runtime stages", () => {
     const overrideSource = read("src/components/tool-block-overrides/toolBlockOverrides.ts");
     const blockSource = read("src/components/tool-block-overrides/KnowledgeQueryToolBlock.vue");
