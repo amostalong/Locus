@@ -85,7 +85,8 @@ const streamingText = ref("");
 const { text: displayedStreamingText } = useThrottledStreamingText(() => streamingText.value);
 const thinking = ref(false);
 const nativeRunning = ref(false);
-const pendingQuestion = ref<PendingQuestion | null>(null);
+const pendingQuestions = ref<PendingQuestion[]>([]);
+const pendingQuestion = computed(() => pendingQuestions.value[0] ?? null);
 const pendingToolConfirm = ref<PendingToolConfirm | null>(null);
 const askCustomAnswer = ref("");
 const toolConfirmFeedback = ref("");
@@ -292,7 +293,7 @@ function shouldRefreshOnToolCompletion(toolName: string): boolean {
 async function runNative(text: string) {
   streamingText.value = "";
   thinking.value = false;
-  pendingQuestion.value = null;
+  pendingQuestions.value = [];
   pendingToolConfirm.value = null;
   askCustomAnswer.value = "";
   toolConfirmFeedback.value = "";
@@ -349,7 +350,7 @@ async function submit() {
   streaming.value = true;
   thinking.value = true;
   nativeRunning.value = false;
-  pendingQuestion.value = null;
+  pendingQuestions.value = [];
   pendingToolConfirm.value = null;
   askCustomAnswer.value = "";
   toolConfirmFeedback.value = "";
@@ -371,7 +372,7 @@ async function submit() {
     streaming.value = false;
     thinking.value = false;
     nativeRunning.value = false;
-    pendingQuestion.value = null;
+    pendingQuestions.value = [];
     pendingToolConfirm.value = null;
     askCustomAnswer.value = "";
     toolConfirmFeedback.value = "";
@@ -396,7 +397,7 @@ async function cancel() {
 async function answerPendingQuestion(answer: string) {
   const question = pendingQuestion.value;
   if (!question) return;
-  pendingQuestion.value = null;
+  pendingQuestions.value = pendingQuestions.value.slice(1);
   askCustomAnswer.value = "";
   try {
     await answerSessionQuestion(question.questionId, answer);
@@ -539,25 +540,29 @@ function handleStreamEvent(event: StreamEvent) {
       break;
     }
 
-    case "askUser":
+    case "askUser": {
       thinking.value = false;
       flushStreamingText();
       pendingToolConfirm.value = null;
       toolConfirmFeedback.value = "";
       askCustomAnswer.value = "";
-      pendingQuestion.value = {
+      const next: PendingQuestion = {
         questionId: event.questionId,
         toolCallId: event.toolCallId,
         question: event.question,
         options: event.options,
       };
+      if (!pendingQuestions.value.some((q) => q.questionId === next.questionId)) {
+        pendingQuestions.value = [...pendingQuestions.value, next];
+      }
       scrollToBottom(true);
       break;
+    }
 
     case "toolConfirm":
       thinking.value = false;
       flushStreamingText();
-      pendingQuestion.value = null;
+      pendingQuestions.value = [];
       askCustomAnswer.value = "";
       toolConfirmFeedback.value = "";
       pendingToolConfirm.value = {
@@ -569,8 +574,10 @@ function handleStreamEvent(event: StreamEvent) {
       break;
 
     case "inputAnswered":
-      if (pendingQuestion.value?.questionId === event.questionId) {
-        pendingQuestion.value = null;
+      if (pendingQuestions.value.some((q) => q.questionId === event.questionId)) {
+        pendingQuestions.value = pendingQuestions.value.filter(
+          (q) => q.questionId !== event.questionId,
+        );
         askCustomAnswer.value = "";
       }
       if (pendingToolConfirm.value?.questionId === event.questionId) {
@@ -606,7 +613,7 @@ function handleStreamEvent(event: StreamEvent) {
       streaming.value = false;
       thinking.value = false;
       nativeRunning.value = false;
-      pendingQuestion.value = null;
+      pendingQuestions.value = [];
       pendingToolConfirm.value = null;
       askCustomAnswer.value = "";
       toolConfirmFeedback.value = "";
@@ -621,7 +628,7 @@ function handleStreamEvent(event: StreamEvent) {
       streaming.value = false;
       thinking.value = false;
       nativeRunning.value = false;
-      pendingQuestion.value = null;
+      pendingQuestions.value = [];
       pendingToolConfirm.value = null;
       askCustomAnswer.value = "";
       toolConfirmFeedback.value = "";
@@ -636,7 +643,7 @@ function handleStreamEvent(event: StreamEvent) {
       streaming.value = false;
       thinking.value = false;
       nativeRunning.value = false;
-      pendingQuestion.value = null;
+      pendingQuestions.value = [];
       pendingToolConfirm.value = null;
       askCustomAnswer.value = "";
       toolConfirmFeedback.value = "";
@@ -810,7 +817,7 @@ watch(
     streaming.value = false;
     thinking.value = false;
     nativeRunning.value = false;
-    pendingQuestion.value = null;
+    pendingQuestions.value = [];
     pendingToolConfirm.value = null;
     askCustomAnswer.value = "";
     toolConfirmFeedback.value = "";

@@ -6,6 +6,8 @@ import BaseButton from "../ui/BaseButton.vue";
 
 const props = defineProps<{
   question: PendingQuestion;
+  queueIndex?: number;
+  queueTotal?: number;
 }>();
 
 const emit = defineEmits<{
@@ -31,6 +33,10 @@ function applySuggestion() {
 
 <template>
   <div class="ask-user-card">
+    <div
+      v-if="queueTotal && queueTotal > 1"
+      class="ask-queue-indicator"
+    >问题 {{ queueIndex ?? 1 }} / {{ queueTotal }}</div>
     <div class="ask-question">{{ question.question }}</div>
     <div class="ask-options">
       <BaseButton
@@ -120,6 +126,18 @@ function applySuggestion() {
   flex-shrink: 0;
   margin-top: 1px;
   font-size: 12px;
+}
+
+.ask-queue-indicator {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+  color: var(--accent-color);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
 }
 
 .ask-suggestion-text {

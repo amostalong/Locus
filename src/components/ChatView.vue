@@ -217,6 +217,7 @@ const props = defineProps<{
   fastModeAvailable: boolean;
   tokenUsage: TokenUsage;
   pendingQuestion: PendingQuestion | null;
+  pendingQuestionCount?: number;
   pendingToolConfirms: PendingToolConfirm[];
   sessions: SessionSummary[];
   activeSessionId: string | null;
@@ -2877,6 +2878,8 @@ onUnmounted(() => {
       <AskUserCard
         v-else-if="pendingQuestion && !isViewingSubagent"
         :question="pendingQuestion"
+        :queue-index="1"
+        :queue-total="pendingQuestionCount"
         @answer="handleQuestionAnswer"
       />
 

@@ -176,6 +176,7 @@ fn empty_snapshot(
         is_thinking: false,
         thinking_duration: 0,
         pending_question: None,
+        pending_questions: Vec::new(),
         pending_tool_confirms: Vec::new(),
         is_compacting: false,
     }
@@ -299,6 +300,7 @@ fn apply_event_to_snapshot(
         StreamEvent::RunStart { .. } => {
             reset_round_runtime(snapshot);
             snapshot.pending_question = None;
+            snapshot.pending_questions.clear();
             snapshot.pending_tool_confirms.clear();
             snapshot.is_compacting = false;
         }
@@ -500,13 +502,21 @@ fn apply_event_to_snapshot(
             sheet,
             ..
         } => {
-            snapshot.pending_question = Some(PendingQuestion {
+            let pending = PendingQuestion {
                 question_id: question_id.clone(),
                 tool_call_id: tool_call_id.clone(),
                 question: question.clone(),
                 options: options.clone(),
                 sheet: sheet.clone(),
-            });
+            };
+            snapshot
+                .pending_questions
+                .retain(|q| q.question_id != pending.question_id);
+            snapshot.pending_questions.push(pending.clone());
+            // Legacy single-value field — keep in sync as the head of the
+            // queue so older frontend builds that still read `pendingQuestion`
+            // see a sensible value.
+            snapshot.pending_question = Some(pending);
         }
         StreamEvent::ToolConfirm {
             question_id,
@@ -532,6 +542,9 @@ fn apply_event_to_snapshot(
             {
                 snapshot.pending_question = None;
             }
+            snapshot
+                .pending_questions
+                .retain(|question| question.question_id != *question_id);
             snapshot
                 .pending_tool_confirms
                 .retain(|confirm| confirm.question_id != *question_id);

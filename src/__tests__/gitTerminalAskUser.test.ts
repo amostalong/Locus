@@ -15,7 +15,7 @@ describe("GitTerminal pending input handling", () => {
     expect(terminal).not.toContain('import AskUserCard from "./chat/AskUserCard.vue";');
     expect(terminal).not.toContain('import ToolConfirmCard from "./chat/ToolConfirmCard.vue";');
     expect(terminal).toContain("answerQuestion as answerSessionQuestion");
-    expect(terminal).toContain("const pendingQuestion = ref<PendingQuestion | null>(null);");
+    expect(terminal).toContain("const pendingQuestions = ref<PendingQuestion[]>([]);");
     expect(terminal).toContain("const pendingToolConfirm = ref<PendingToolConfirm | null>(null);");
     expect(terminal).toContain("async function answerPendingQuestion(answer: string)");
     expect(terminal).toContain("await answerSessionQuestion(question.questionId, answer);");

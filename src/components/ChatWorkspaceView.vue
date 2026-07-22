@@ -409,6 +409,7 @@ onUnmounted(() => {
       :fast-mode-available="modelStore.codexFastModeAvailable"
       :token-usage="chatStore.tokenUsage"
       :pending-question="chatStore.pendingQuestion"
+      :pending-question-count="chatStore.pendingQuestionCount"
       :pending-tool-confirms="chatStore.pendingToolConfirms"
       :sessions="chatStore.sessions"
       :active-session-id="chatStore.activeSessionId"

@@ -68,6 +68,7 @@ const props = withDefaults(defineProps<{
   livePartStreams?: ReadonlyMap<string, StreamingTextSource> | null;
   activeToolCalls: ToolCallDisplay[];
   pendingQuestion?: PendingQuestion | null;
+  pendingQuestionCount?: number;
   pendingToolConfirms?: PendingToolConfirm[];
   queuedFollowUp?: { displayText: string; canInsert?: boolean; isInserting?: boolean } | null;
   toolConfirmLayoutKey?: string | null;
@@ -101,6 +102,7 @@ const props = withDefaults(defineProps<{
   isCompacting: false,
   livePartStreams: null,
   pendingQuestion: null,
+  pendingQuestionCount: undefined,
   pendingToolConfirms: () => [],
   queuedFollowUp: null,
   toolConfirmLayoutKey: null,
@@ -719,6 +721,8 @@ onUnmounted(() => {
         <AskUserCard
           v-else-if="pendingQuestion"
           :question="pendingQuestion"
+          :queue-index="1"
+          :queue-total="pendingQuestionCount"
           @answer="emit('answerQuestion', $event)"
         />
         <ToolConfirmBatchCard

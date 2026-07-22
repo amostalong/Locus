@@ -60,6 +60,7 @@ const {
   thinkingDuration,
   activeToolCalls,
   pendingQuestion,
+  pendingQuestionCount,
   pendingToolConfirms,
   queuedFollowUp,
   errorMessage,
@@ -116,6 +117,7 @@ function handleSelectAgent(agentId: string) {
     :thinking-duration="thinkingDuration"
     :active-tool-calls="activeToolCalls"
     :pending-question="pendingQuestion"
+    :pending-question-count="pendingQuestionCount"
     :pending-tool-confirms="pendingToolConfirms"
     :queued-follow-up="queuedFollowUp"
     :tool-confirm-layout-key="sessionKey"

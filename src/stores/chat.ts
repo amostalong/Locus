@@ -349,7 +349,7 @@ export const useChatStore = defineStore("chat", () => {
   const todoMode = ref<TodoPanelMode>("current");
   const sessionLatestTodoRunIds = ref(new Map<string, string | null>());
   const sessionLatestCompletedRunIds = ref(new Map<string, string | null>());
-  const pendingQuestion = ref<PendingQuestion | null>(null);
+  const pendingQuestions = ref<PendingQuestion[]>([]);
   const pendingToolConfirms = ref<PendingToolConfirm[]>([]);
   const streamingSessionIds = ref(new Set<string>());
   const undoableMessageIds = ref(new Set<string>());
@@ -626,7 +626,7 @@ export const useChatStore = defineStore("chat", () => {
     thinkingStartTime.value = 0;
     thinkingDuration.value = 0;
     activeToolCalls.value = [];
-    pendingQuestion.value = null;
+    pendingQuestions.value = [];
     pendingToolConfirms.value = [];
   }
 
@@ -678,7 +678,7 @@ export const useChatStore = defineStore("chat", () => {
     undoableMessageIds.value = new Set();
     sessionAgentId.value = null;
     activeSessionType.value = null;
-    pendingQuestion.value = null;
+    pendingQuestions.value = [];
     pendingToolConfirms.value = [];
     isCompacting.value = false;
     // Drop the per-session model override reference for the session we are
@@ -752,9 +752,13 @@ export const useChatStore = defineStore("chat", () => {
     thinkingStartTime.value = isThinking.value ? Date.now() : 0;
     thinkingDuration.value = runtime.thinkingDuration ?? 0;
     activeToolCalls.value = cloneRuntimeToolCalls(runtime.activeToolCalls);
-    pendingQuestion.value = runtime.pendingQuestion
-      ? cloneRuntimeJson(runtime.pendingQuestion)
-      : null;
+    if (runtime.pendingQuestions) {
+      pendingQuestions.value = cloneRuntimeJson(runtime.pendingQuestions);
+    } else if (runtime.pendingQuestion) {
+      pendingQuestions.value = [cloneRuntimeJson(runtime.pendingQuestion)];
+    } else {
+      pendingQuestions.value = [];
+    }
     pendingToolConfirms.value = cloneRuntimeJson(runtime.pendingToolConfirms ?? []);
     isCompacting.value = runtime.isCompacting === true;
   }
@@ -973,7 +977,7 @@ export const useChatStore = defineStore("chat", () => {
       trackActiveRun(sessionId, run.runId);
       if (previousRunId && previousRunId !== run.runId && activeSessionId.value === sessionId) {
         activeToolCalls.value = [];
-        pendingQuestion.value = null;
+        pendingQuestions.value = [];
         pendingToolConfirms.value = [];
       }
     } catch (e) {
@@ -1512,13 +1516,13 @@ export const useChatStore = defineStore("chat", () => {
         isThinking.value = false;
         break;
       case "clearPendingInputs":
-        pendingQuestion.value = null;
+        pendingQuestions.value = [];
         pendingToolConfirms.value = [];
         break;
       case "clearPendingInput":
-        if (pendingQuestion.value?.questionId === m.questionId) {
-          pendingQuestion.value = null;
-        }
+        pendingQuestions.value = pendingQuestions.value.filter(
+          (item) => item.questionId !== m.questionId,
+        );
         pendingToolConfirms.value = pendingToolConfirms.value.filter(
           (item) => item.questionId !== m.questionId,
         );
@@ -1526,8 +1530,11 @@ export const useChatStore = defineStore("chat", () => {
       case "updateUsage":
         tokenUsage.value = m.usage;
         break;
-      case "setQuestion":
-        pendingQuestion.value = m.question;
+      case "enqueueQuestion":
+        if (pendingQuestions.value.some((item) => item.questionId === m.question.questionId)) {
+          break;
+        }
+        pendingQuestions.value = [...pendingQuestions.value, m.question];
         break;
       case "enqueueToolConfirm": {
         const next = pendingToolConfirms.value.filter((item) => item.questionId !== m.confirm.questionId);
@@ -1845,7 +1852,7 @@ export const useChatStore = defineStore("chat", () => {
       tokenUsage: tokenUsage.value,
       todos: todos.value,
       showTodoPanel: showTodoPanel.value,
-      pendingQuestion: pendingQuestion.value,
+      pendingQuestions: pendingQuestions.value,
       pendingToolConfirms: pendingToolConfirms.value,
       undoableMessageIds: undoableMessageIds.value,
     };
@@ -2727,7 +2734,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       await sessionService.cancelChat(sessionId);
       if (activeSessionId.value === sessionId) {
-        pendingQuestion.value = null;
+        pendingQuestions.value = [];
         pendingToolConfirms.value = [];
       }
     } catch (e) {
@@ -2755,9 +2762,9 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function answerQuestion(answer: string) {
-    const q = pendingQuestion.value;
+    const q = pendingQuestions.value[0];
     if (!q) return;
-    pendingQuestion.value = null;
+    pendingQuestions.value = pendingQuestions.value.slice(1);
     try {
       await sessionService.answerQuestion(q.questionId, answer);
     } catch (e) {
@@ -3014,7 +3021,9 @@ export const useChatStore = defineStore("chat", () => {
     closeTodoPanel,
     toggleTodoPanel,
     setTodoMode,
-    pendingQuestion,
+    pendingQuestions,
+    pendingQuestion: computed(() => pendingQuestions.value[0] ?? null),
+    pendingQuestionCount: computed(() => pendingQuestions.value.length),
     pendingToolConfirms,
     activeQueuedFollowUps,
     activeQueuedFollowUp,

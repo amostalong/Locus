@@ -952,6 +952,7 @@ describe("chat session panel state", () => {
           },
         ],
         pendingQuestion: null,
+        pendingQuestions: [],
         pendingToolConfirms: [],
         isCompacting: false,
       },
@@ -1010,6 +1011,7 @@ describe("chat session panel state", () => {
           },
         ],
         pendingQuestion: null,
+        pendingQuestions: [],
         pendingToolConfirms: [],
         isCompacting: false,
       },
@@ -1190,12 +1192,12 @@ describe("chat session panel state", () => {
     chatStore.currentRunId = "cancel-1";
     chatStore.isStreaming = true;
     chatStore.streamingSessionIds = new Set(["s1"]);
-    chatStore.pendingQuestion = {
+    chatStore.pendingQuestions = [{
       questionId: "q1",
       toolCallId: "tc-ask",
       question: "Which shape?",
       options: [{ label: "Rect", description: "rect" }],
-    } as any;
+    }] as any;
     chatStore.pendingToolConfirms = [
       {
         questionId: "q2",
@@ -1234,12 +1236,12 @@ describe("chat session panel state", () => {
     chatStore.currentRunId = "run-1";
     chatStore.isStreaming = true;
     chatStore.streamingSessionIds = new Set(["s1"]);
-    chatStore.pendingQuestion = {
+    chatStore.pendingQuestions = [{
       questionId: "q1",
       toolCallId: "tc-recompile",
       question: "Exit play mode?",
       options: [{ label: "Confirm", description: "Exit play mode and recompile" }],
-    } as any;
+    }] as any;
     chatStore.pendingToolConfirms = [
       {
         questionId: "q2",
@@ -1288,12 +1290,12 @@ describe("chat session panel state", () => {
     chatStore.currentRunId = "run-1";
     chatStore.isStreaming = true;
     chatStore.streamingSessionIds = new Set(["s1"]);
-    chatStore.pendingQuestion = {
+    chatStore.pendingQuestions = [{
       questionId: "q1",
       toolCallId: "tc-ask",
       question: "Which shape?",
       options: [{ label: "Rect", description: "rect" }],
-    } as any;
+    }] as any;
     chatStore.pendingToolConfirms = [
       {
         questionId: "q2",
@@ -1474,12 +1476,12 @@ describe("chat session panel state", () => {
         updatedAt: 2,
       },
     ] as any;
-    chatStore.pendingQuestion = {
+    chatStore.pendingQuestions = [{
       questionId: "q-1",
       prompt: "Continue?",
       options: [],
       createdAt: 1,
-    } as any;
+    }] as any;
     chatStore.pendingToolConfirms = [
       {
         questionId: "tc-1",
