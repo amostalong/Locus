@@ -195,6 +195,20 @@ export function defaultCodeAnalysisToolsConfig(): CodeAnalysisToolsConfig {
   };
 }
 
+/** Status of the local web-search tool as reported by the backend. Mirrors
+ *  the Rust `LocalWebSearchStatus`. The `active` flag is derived server-side
+ *  (enabled AND a non-empty key) so the UI can disable the test button when
+ *  the tool will refuse to run regardless of the stored toggle. */
+export interface LocalWebSearchStatus {
+  enabled: boolean;
+  engine: SearchEngine;
+  hasKey: boolean;
+  keyHint: string;
+  active: boolean;
+}
+
+export type SearchEngine = "brave" | "exa";
+
 export type UnityEditorProcessState = "running" | "not_running" | "unknown";
 
 export type UnityBackgroundHookState =
@@ -474,6 +488,7 @@ export interface SessionRuntimeSnapshot {
   isThinking?: boolean;
   thinkingDuration?: number;
   pendingQuestion?: PendingQuestion | null;
+  pendingQuestions?: PendingQuestion[];
   pendingToolConfirms: PendingToolConfirm[];
   isCompacting: boolean;
 }

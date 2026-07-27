@@ -132,10 +132,14 @@ async function toggleWebSearchEnabled(next: boolean) {
   }
 }
 
-function selectWebSearchEngine(engine: SearchEngine) {
+function selectWebSearchEngine(engine: string) {
   if (webSearchBusy.value) return;
-  if (webSearchEngineDraft.value === engine) return;
-  webSearchEngineDraft.value = engine;
+  // BaseSegmented emits a raw string; narrow to our known SearchEngine set
+  // so we never write an arbitrary value into the typed ref.
+  if (engine !== "brave" && engine !== "exa") return;
+  const next = engine as SearchEngine;
+  if (webSearchEngineDraft.value === next) return;
+  webSearchEngineDraft.value = next;
   // The stored key is per-engine in the user's mental model — switching
   // engines invalidates whatever the user typed. They have to re-paste for
   // the new provider.
