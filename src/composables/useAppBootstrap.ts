@@ -44,9 +44,19 @@ import type {
   LexicalRebuildStatus,
   KnowledgeChangedEvent,
   SessionContentChangedEvent,
+  SessionTitleUpdatedEvent,
 } from "../types";
 import { filterVisibleProviders } from "../config/providerVisibility";
 import { t } from "../i18n";
+import {
+  SESSION_EXECUTION_STATE_CHANGED_EVENT,
+  type SessionExecutionStateChanged,
+} from "../services/sessionExecutionState";
+import {
+  takeExternalScriptOpenRequest,
+  type ExternalScriptOpenRequest,
+} from "../services/system";
+import { showCurrentTauriWindow } from "../services/tauriRuntime";
 import {
   getKnowledgeLexicalProgressRunKey,
   isKnowledgeLexicalProgressWindowLocation,
@@ -87,7 +97,15 @@ async function measureWorkspaceSwitchAsync<T>(
   }
 }
 
-export function useAppBootstrap() {
+export interface AppBootstrapOptions {
+  /** Keep this window pinned to its own session instead of following the
+   *  main window's globally persisted active-session selection. */
+  syncActiveSessionSelection?: boolean;
+  /** Route Unity external-editor open requests into this window's asset tab. */
+  handleExternalScriptOpen?: boolean;
+}
+
+export function useAppBootstrap(options: AppBootstrapOptions = {}) {
   const uiStore = useUiStore();
   const authStore = useAuthStore();
   const agentStore = useAgentStore();
@@ -104,12 +122,15 @@ export function useAppBootstrap() {
   let unlistenScan: RuntimeUnsubscribe | null = null;
   let unlistenPlugin: RuntimeUnsubscribe | null = null;
   let unlistenActiveSessionSelection: RuntimeUnsubscribe | null = null;
+  let unlistenSessionExecutionState: RuntimeUnsubscribe | null = null;
   let unlistenAppError: RuntimeUnsubscribe | null = null;
   let unlistenLexicalRebuildStatus: RuntimeUnsubscribe | null = null;
   let unlistenKnowledgeChanged: RuntimeUnsubscribe | null = null;
   let unlistenSessionContentChanged: RuntimeUnsubscribe | null = null;
+  let unlistenSessionTitleUpdated: RuntimeUnsubscribe | null = null;
   let unlistenPluginsChanged: RuntimeUnsubscribe | null = null;
   let unlistenInAppEditorOpen: RuntimeUnsubscribe | null = null;
+  let unlistenExternalScriptOpen: RuntimeUnsubscribe | null = null;
   let lastAutoOpenedLexicalProgressRun = "";
 
   // -- Cross-domain watchers --
@@ -119,6 +140,10 @@ export function useAppBootstrap() {
     if (!agentId) return;
     if (!chatStore.activeSessionId) {
       modelStore.restoreDefaultEffort();
+      return;
+    }
+    if (chatStore.sessionEffort) {
+      modelStore.applyContextEffort(chatStore.sessionEffort);
       return;
     }
     if (modelStore.hasUserDefaultEffort) {
@@ -172,6 +197,19 @@ export function useAppBootstrap() {
   function handleSessionContentChanged(change: SessionContentChangedEvent) {
     if (!sessionContentChangeBelongsToCurrentWorkspace(change)) return;
     void chatStore.refreshSessionAfterExternalChange(change.sessionId);
+  }
+
+  function handleExternalScriptOpen(request: ExternalScriptOpenRequest) {
+    if (!request.projectPath?.trim()) return;
+    if (request.assetPath?.trim()) {
+      uiStore.stageAssetOpen({
+        projectPath: request.projectPath,
+        assetPath: request.assetPath,
+        line: Math.max(1, Math.floor(request.line || 1)),
+        column: Math.max(1, Math.floor(request.column || 1)),
+      });
+    }
+    void showCurrentTauriWindow();
   }
 
   // active session/agent selection -> current effort, preserving the user's saved default.
@@ -467,10 +505,22 @@ export function useAppBootstrap() {
       };
       void maybeNotifyStreamEvent(payload, notificationContext);
     });
-    unlistenActiveSessionSelection = await runtime.subscribe<ActiveSessionSelectionChanged>(
-      "active-session-selection-changed",
+    if (options.syncActiveSessionSelection !== false) {
+      unlistenActiveSessionSelection = await runtime.subscribe<ActiveSessionSelectionChanged>(
+        "active-session-selection-changed",
+        (payload) => {
+          void chatStore.syncActiveSessionSelection(payload.sessionId);
+        },
+      );
+    }
+    unlistenSessionExecutionState = await runtime.subscribe<SessionExecutionStateChanged>(
+      SESSION_EXECUTION_STATE_CHANGED_EVENT,
       (payload) => {
-        void chatStore.syncActiveSessionSelection(payload.sessionId);
+        chatStore.applyActiveSessionExecutionState(
+          payload.sessionId,
+          payload.modelId,
+          payload.effort,
+        );
       },
     );
     unlistenUnity = await runtime.subscribe<boolean>("unity-connection-status", (payload) => {
@@ -514,6 +564,10 @@ export function useAppBootstrap() {
       "session-content-changed",
       handleSessionContentChanged,
     );
+    unlistenSessionTitleUpdated = await runtime.subscribe<SessionTitleUpdatedEvent>(
+      "session-title-updated",
+      ({ sessionId, title }) => chatStore.applySessionTitleUpdate(sessionId, title),
+    );
     unlistenPluginsChanged = await runtime.subscribe<void>("plugins-changed", () => {
       void agentStore.loadAgents();
       void loadSkills();
@@ -525,6 +579,14 @@ export function useAppBootstrap() {
     // the active tab. See `services/inAppEditorOpen.ts` for the full
     // routing logic.
     unlistenInAppEditorOpen = await listenInAppEditorOpens();
+    if (options.handleExternalScriptOpen === true) {
+      unlistenExternalScriptOpen = await runtime.subscribe<ExternalScriptOpenRequest>(
+        "locus-open-script",
+        handleExternalScriptOpen,
+      );
+      const startupRequest = await takeExternalScriptOpenRequest();
+      if (startupRequest) handleExternalScriptOpen(startupRequest);
+    }
     markStartupPhase("register_listeners_subscriptions_ready");
 
     // Initial Unity/AssetDb state
@@ -544,13 +606,16 @@ export function useAppBootstrap() {
     unlistenScan?.();
     unlistenPlugin?.();
     unlistenActiveSessionSelection?.();
+    unlistenSessionExecutionState?.();
     unlistenAppError?.();
     unlistenLexicalRebuildStatus?.();
     unlistenKnowledgeChanged?.();
     unlistenSessionContentChanged?.();
+    unlistenSessionTitleUpdated?.();
     unlistenPluginsChanged?.();
     unlistenInAppEditorOpen?.();
     unlistenInAppEditorOpen = null;
+    unlistenExternalScriptOpen?.();
     lastAutoOpenedLexicalProgressRun = "";
     resetSystemNotificationState();
     uiStore.cleanup();
@@ -582,7 +647,7 @@ export function useAppBootstrap() {
    * or unity_root depending on the call site) used only for trace logging.
    */
   async function runWorkspaceSwitchPostlude(target: string) {
-    chatStore.newChat({ persistSelection: false });
+    chatStore.newChat({ persistSelection: false, resetRestoreAttempt: true });
     console.info(`[workspace-switch] phase=new_chat_done target=${target}`);
     await Promise.all([
       measureWorkspaceSwitchAsync("refresh_sessions", () => chatStore.refreshSessions(), {
@@ -605,7 +670,11 @@ export function useAppBootstrap() {
         () => projectStore.loadAssetDbStatus(),
         { target },
       ),
-      measureWorkspaceSwitchAsync("load_skills", () => loadSkills(), { target }),
+      // force: a non-forced call would adopt a still-in-flight scan from
+      // the previous workspace and commit its stale skill list here.
+      measureWorkspaceSwitchAsync("load_skills", () => loadSkills({ force: true }), {
+        target,
+      }),
       measureWorkspaceSwitchAsync(
         "load_workspace_model_override",
         () => modelStore.loadWorkspaceDefaults(),
@@ -689,7 +758,7 @@ export function useAppBootstrap() {
     // changes the user just made in Settings are picked up here.
     await modelStore.loadWorkspaceDefaults();
     await modelStore.loadCodexAvailableModels();
-    modelStore.resolveSelectedModel(true);
+    modelStore.resolveSelectedModel(!chatStore.activeSessionId);
   }
 
   async function onOnboardingCompleted() {

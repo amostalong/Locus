@@ -2,8 +2,16 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, ref, shallowRef, onMounted, onUnmounted, watch } from "vue";
 import type { Component, ShallowRef } from "vue";
+import { AppWindow } from "lucide";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import {
+  isWorkspacePageId,
+  isWorkspacePageWindowLocation,
+  openWorkspacePageWindow,
+  WORKSPACE_PAGE_RESET_ONBOARDING_EVENT,
+  type WorkspacePageId,
+} from "./services/workspacePageWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t } from "./i18n";
@@ -24,6 +32,7 @@ import { APP_CLOSE_REQUESTED_EVENT, requestAppExit } from "./services/system";
 import TopBannerHost from "./components/TopBannerHost.vue";
 import BaseButton from "./components/ui/BaseButton.vue";
 import BaseContextMenu from "./components/ui/BaseContextMenu.vue";
+import LucideIcon from "./components/icons/LucideIcon.vue";
 import AppUpdateModal from "./components/AppUpdateModal.vue";
 
 import { provideDiffOverlay } from "./composables/useDiffOverlay";
@@ -52,7 +61,6 @@ import {
 import { prepareSubWindowPool } from "./services/subWindow";
 import type { ExtraWorkdirStatus } from "./services/extraWorkdirs";
 import { isViewContentWindowLocation, isViewHostWindowLocation } from "./services/view";
-import { isAgentGraphToolWindowLocation } from "./services/agentGraphTool";
 import {
   canStartWindowDragFromTarget,
   getCurrentTauriWindowLabel,
@@ -78,9 +86,10 @@ const isUnityValueEditorWindow = isUnityValueEditorWindowLocation();
 const isExtraWorkdirsWindow = isExtraWorkdirsWindowLocation();
 const isViewHostWindow = isViewHostWindowLocation();
 const isViewContentWindow = isViewContentWindowLocation();
-const isAgentGraphToolWindow = isAgentGraphToolWindowLocation();
+const isWorkspacePageWindow = isWorkspacePageWindowLocation();
 const isStandaloneWindow = isUnityEmbedWindow
   || isUnityEmbedTestWindow
+  || isWorkspacePageWindow
   || isKnowledgeDownloadWindow
   || isKnowledgeLexicalProgressWindow
   || isFeishuReferenceImportWindow
@@ -92,8 +101,7 @@ const isStandaloneWindow = isUnityEmbedWindow
   || isUnityValueEditorWindow
   || isExtraWorkdirsWindow
   || isViewHostWindow
-  || isViewContentWindow
-  || isAgentGraphToolWindow;
+  || isViewContentWindow;
 
 const KnowledgeDownloadProgressWindow = defineAsyncComponent(() => import("./components/KnowledgeDownloadProgressWindow.vue"));
 const KnowledgeLexicalProgressWindow = defineAsyncComponent(() => import("./components/KnowledgeLexicalProgressWindow.vue"));
@@ -106,10 +114,10 @@ const PlanViewWindow = defineAsyncComponent(() => import("./components/PlanViewW
 const UnityValueEditorWindow = defineAsyncComponent(() => import("./components/UnityValueEditorWindow.vue"));
 const ExtraWorkdirsConfigWindow = defineAsyncComponent(() => import("./components/ExtraWorkdirsConfigWindow.vue"));
 const ViewHostWindow = defineAsyncComponent(() => import("./components/ViewHostWindow.vue"));
-const AgentGraphToolWindow = defineAsyncComponent(() => import("./components/AgentGraphToolWindow.vue"));
 const UnityEmbeddedSessionView = defineAsyncComponent(() => import("./components/UnityEmbeddedSessionView.vue"));
 const UnityEmbedTestView = defineAsyncComponent(() => import("./components/UnityEmbedTestView.vue"));
 const OnboardingView = defineAsyncComponent(() => import("./components/OnboardingView.vue"));
+const WorkspacePageWindow = defineAsyncComponent(() => import("./components/WorkspacePageWindow.vue"));
 const FileDiffOverlay = defineAsyncComponent(() => import("./components/diff/FileDiffOverlay.vue"));
 const LocusAssetInspectorPanel = defineAsyncComponent(() => import("./components/LocusAssetInspectorPanel.vue"));
 const showPluginEntry = true;
@@ -186,6 +194,7 @@ let knowledgeRuntimeStatusTimer: ReturnType<typeof setTimeout> | null = null;
 let knowledgeRuntimeStartupPollsRemaining = 0;
 let appCloseRequestUnlisten: UnlistenFn | null = null;
 let extraWorkdirsUpdatedUnlisten: UnlistenFn | null = null;
+let workspacePageResetOnboardingUnlisten: UnlistenFn | null = null;
 let longFrameObserver: PerformanceObserver | null = null;
 
 // -- Diff overlay provider (must be called in App setup so all children can inject) --
@@ -343,6 +352,44 @@ const topTabs = computed<TopTabItem[]>(() => [
 ]);
 
 const visibleTopTabs = computed(() => topTabs.value.filter((tab) => tab.visible));
+const topTabContextMenu = ref<{ x: number; y: number; tab: TopTabItem } | null>(null);
+
+function canOpenTopTabInWindow(tab: AppTab): tab is WorkspacePageId {
+  return isWorkspacePageId(tab);
+}
+
+function onTopTabClick(event: MouseEvent, tab: TopTabItem) {
+  if (event.ctrlKey && canOpenTopTabInWindow(tab.id)) {
+    void openTopTabInWindow(tab);
+    return;
+  }
+  uiStore.setTab(tab.id);
+}
+
+function openTopTabContextMenu(event: MouseEvent, tab: TopTabItem) {
+  if (!canOpenTopTabInWindow(tab.id)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  topTabContextMenu.value = { x: event.clientX, y: event.clientY, tab };
+}
+
+async function openTopTabInWindow(tab: TopTabItem) {
+  topTabContextMenu.value = null;
+  if (!canOpenTopTabInWindow(tab.id)) return;
+  try {
+    await openWorkspacePageWindow({
+      page: tab.id,
+      title: t(tab.labelKey),
+    });
+  } catch (cause) {
+    const error = normalizeAppError(cause);
+    notificationStore.addNotice("error", error.message, {
+      code: error.code,
+      operation: "openWorkspacePageWindow",
+      skipConsoleLog: true,
+    });
+  }
+}
 
 function isTopTabVisible(tab: AppTab) {
   return visibleTopTabs.value.some((item) => item.id === tab);
@@ -1006,6 +1053,10 @@ onMounted(async () => {
 
   await registerAppCloseRequestListener();
   await registerExtraWorkdirsUpdatedListener();
+  workspacePageResetOnboardingUnlisten = await listen(
+    WORKSPACE_PAGE_RESET_ONBOARDING_EVENT,
+    onResetOnboarding,
+  );
   void prepareSubWindowPool().catch(() => {
     // Sub-window pool warm-up is optional; failures are non-fatal.
   });
@@ -1047,6 +1098,8 @@ onUnmounted(() => {
   appCloseRequestUnlisten = null;
   extraWorkdirsUpdatedUnlisten?.();
   extraWorkdirsUpdatedUnlisten = null;
+  workspacePageResetOnboardingUnlisten?.();
+  workspacePageResetOnboardingUnlisten = null;
   longFrameObserver?.disconnect();
   longFrameObserver = null;
   notificationStore.clearByOperation(KNOWLEDGE_RUNTIME_LOADING_OPERATION);
@@ -1084,10 +1137,10 @@ watch(() => projectStore.workingDir, () => {
   <ExtraWorkdirsConfigWindow v-else-if="isExtraWorkdirsWindow" />
   <ViewHostWindow v-else-if="isViewContentWindow" embedded />
   <ViewHostWindow v-else-if="isViewHostWindow" />
-  <AgentGraphToolWindow v-else-if="isAgentGraphToolWindow" />
   <div v-else-if="!authStore.authChecked" class="app-startup-state">
     <span>{{ t("common.loading") }}</span>
   </div>
+  <WorkspacePageWindow v-else-if="isWorkspacePageWindow" />
   <OnboardingView v-else-if="authStore.authChecked && uiStore.showOnboarding" @completed="onOnboardingCompleted" />
   <div
     class="app-layout"
@@ -1113,7 +1166,8 @@ watch(() => projectStore.workingDir, () => {
           :key="tab.id"
           class="tab-item"
           :class="{ active: uiStore.activeTab === tab.id }"
-          @click="uiStore.setTab(tab.id)"
+          @click="onTopTabClick($event, tab)"
+          @contextmenu="openTopTabContextMenu($event, tab)"
         >{{ t(tab.labelKey) }}</button>
         <button
           v-if="projectStore.pluginToast"
@@ -1418,6 +1472,24 @@ watch(() => projectStore.workingDir, () => {
     @close="closeAppUpdateModal"
     @view="openAppUpdateRelease"
   />
+  <BaseContextMenu
+    v-if="topTabContextMenu"
+    class="top-tab-ctx-menu"
+    :x="topTabContextMenu.x"
+    :y="topTabContextMenu.y"
+    :min-width="170"
+    :z-index="260"
+    @close="topTabContextMenu = null"
+  >
+    <button
+      type="button"
+      class="top-tab-ctx-item"
+      @click="openTopTabInWindow(topTabContextMenu.tab)"
+    >
+      <LucideIcon :icon="AppWindow" :size="13" />
+      {{ t("app.tab.openInWindow") }}
+    </button>
+  </BaseContextMenu>
   <BaseContextMenu
     v-if="recentDirContextMenu"
     class="recent-dir-ctx-menu"

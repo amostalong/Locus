@@ -2,9 +2,13 @@ import { ipcInvoke } from "./ipc";
 import type {
   SessionSummary,
   SessionDetail,
+  SessionMessagePage,
+  SessionTurnPreview,
+  SessionViewSnapshot,
   SessionEventRecord,
   SessionRunSummary,
   TokenUsage,
+  ModelUsageReport,
   TodoSnapshot,
   ImageAttachment,
   AssetRefAttachment,
@@ -12,11 +16,14 @@ import type {
   KnowledgeAccessMode,
   KnowledgeDocumentType,
   PendingSessionInput,
+  CompactedContextOutput,
+  ContextExportResult,
 } from "../types";
 
 export interface ChatParams {
   sessionId?: string | null;
   text: string;
+  resume?: boolean | null;
   sessionTitle?: string | null;
   agentId?: string | null;
   model?: string | null;
@@ -161,6 +168,49 @@ export function loadSession(sessionId: string): Promise<SessionDetail> {
   return ipcInvoke<SessionDetail>("load_session", { sessionId });
 }
 
+export function loadSessionView(
+  sessionId: string,
+  messageLimit?: number | null,
+): Promise<SessionViewSnapshot> {
+  return ipcInvoke<SessionViewSnapshot>("load_session_view", {
+    sessionId,
+    messageLimit: messageLimit ?? null,
+  });
+}
+
+export function loadSessionMessagePage(
+  sessionId: string,
+  beforeRowId: number,
+  messageLimit?: number | null,
+): Promise<SessionMessagePage> {
+  return ipcInvoke<SessionMessagePage>("load_session_message_page", {
+    sessionId,
+    beforeRowId,
+    messageLimit: messageLimit ?? null,
+  });
+}
+
+export function loadSessionMessageImages(messageId: string): Promise<ImageAttachment[]> {
+  return ipcInvoke<ImageAttachment[]>("load_session_message_images", { messageId });
+}
+
+export function loadSessionTurnPreview(
+  sessionId: string,
+  messageId: string,
+): Promise<SessionTurnPreview> {
+  return ipcInvoke<SessionTurnPreview>("load_session_turn_preview", { sessionId, messageId });
+}
+
+export function getCompactedContextOutput(
+  sessionId: string,
+  messageId: string,
+): Promise<CompactedContextOutput> {
+  return ipcInvoke<CompactedContextOutput>("get_compacted_context_output", {
+    sessionId,
+    messageId,
+  });
+}
+
 export function renameSession(sessionId: string, title: string): Promise<void> {
   return ipcInvoke("rename_session", { sessionId, title });
 }
@@ -216,8 +266,16 @@ export function getSessionUsage(sessionId: string): Promise<TokenUsage> {
   return ipcInvoke<TokenUsage>("get_session_usage", { sessionId });
 }
 
+export function getModelUsageStats(days?: number | null): Promise<ModelUsageReport> {
+  return ipcInvoke<ModelUsageReport>("get_model_usage_stats", { days: days ?? null });
+}
+
 export function getSessionActiveRun(sessionId: string): Promise<SessionRunSummary | null> {
   return ipcInvoke<SessionRunSummary | null>("get_session_active_run", { sessionId });
+}
+
+export function getSessionResumeAvailable(sessionId: string): Promise<boolean> {
+  return ipcInvoke<boolean>("get_session_resume_available", { sessionId });
 }
 
 export function listSessionEvents(
@@ -240,12 +298,14 @@ export function answerQuestion(questionId: string, answer: string): Promise<void
   return ipcInvoke("answer_question", { questionId, answer });
 }
 
-export function saveRawContext(
+export function exportSessionContext(
   sessionId: string,
-  filePath: string,
-  includeSystemPrompt = true,
-): Promise<string> {
-  return ipcInvoke<string>("save_raw_context", { sessionId, filePath, includeSystemPrompt });
+  filePath?: string | null,
+): Promise<ContextExportResult> {
+  return ipcInvoke<ContextExportResult>("export_session_context", {
+    sessionId,
+    filePath: filePath ?? null,
+  });
 }
 
 export interface SessionPlanState {

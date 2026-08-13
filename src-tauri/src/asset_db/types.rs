@@ -239,6 +239,18 @@ pub struct AssetObject {
     pub sort_index: i64,
 }
 
+/// Human-facing identity for one addressable Unity object inside an asset.
+/// The `(asset_guid, file_id)` pair remains the canonical lookup key; this
+/// payload carries the fields needed by readers to distinguish subassets from
+/// their container asset without exposing database rows to higher layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetObjectIdentity {
+    pub path: String,
+    pub name: String,
+    pub type_name: String,
+    pub is_sub_asset: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefEdge {
     pub src_guid: Guid,
@@ -314,6 +326,14 @@ pub struct PrefabInstanceIR {
     pub instance_name: Option<String>,
     pub property_overrides: Vec<PropertyOverride>,
     pub removed_components: Vec<RemovedComponent>,
+    /// Unity 2022.2+ `m_RemovedGameObjects`: source-prefab objects deleted on
+    /// this instance. Empty on older serialization.
+    pub removed_game_objects: Vec<RemovedComponent>,
+    /// Unity 2022.2+ `m_AddedGameObjects` entry count (the added objects
+    /// themselves are ordinary documents in the same file).
+    pub added_game_object_count: usize,
+    /// Unity 2022.2+ `m_AddedComponents` entry count.
+    pub added_component_count: usize,
     pub line_start: usize,
     pub line_end: usize,
 }
@@ -369,6 +389,9 @@ pub struct OverrideSummary {
     pub total_override_count: usize,
     pub stripped_ref_count: usize,
     pub removed_component_count: usize,
+    pub removed_game_object_count: usize,
+    pub added_game_object_count: usize,
+    pub added_component_count: usize,
     pub transform_overrides: Vec<TransformOverrideSummary>,
     pub bulk_overrides: Vec<BulkPropertyOverride>,
     pub renderer_overrides: Vec<RendererOverrideSummary>,

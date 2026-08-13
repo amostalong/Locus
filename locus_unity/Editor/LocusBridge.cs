@@ -465,10 +465,14 @@ namespace Locus
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
+            RegisterExtensionMessageHandler(
+                "yaml_preview_cache_selftest",
+                HandleYamlPreviewCacheSelfTest);
         }
 
         private static void OnQuitting()
         {
+            ClearYamlPreviewSceneCache();
             ReleaseAllEditSessions();
             NativeOnQuitting();
             Stop();
@@ -476,6 +480,8 @@ namespace Locus
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
+            ClearYamlPreviewSceneCache();
+            TickSchedulerOnPlayModeStateChanged(state);
             RefreshCachedEditorState();
             NativePublishEditorStatusNow();
         }
@@ -488,6 +494,7 @@ namespace Locus
 
         private static void OnBeforeAssemblyReload()
         {
+            ClearYamlPreviewSceneCache();
             RefreshCachedEditorState();
             // Cancel + bounded-join any in-flight in-process Roslyn compile before
             // the domain unloads, otherwise its worker thread deadlocks the reload
@@ -586,6 +593,25 @@ namespace Locus
             if (IsProjectAssetPath(normalized))
                 return normalized;
 
+            // Absolute paths are only trimmed when they actually live under
+            // THIS project's root. Blindly cutting at the first "Assets/"
+            // would alias D:/OtherProject/Assets/Scenes/Main.unity onto this
+            // project's same-named scene and silently return wrong data.
+            if (System.IO.Path.IsPathRooted(normalized))
+            {
+                string projectRoot = System.IO.Path
+                    .GetDirectoryName(Application.dataPath)
+                    ?.Replace('\\', '/');
+                if (string.IsNullOrEmpty(projectRoot))
+                    return null;
+                if (!projectRoot.EndsWith("/", StringComparison.Ordinal))
+                    projectRoot += "/";
+                if (!normalized.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                    return null;
+                string relative = normalized.Substring(projectRoot.Length);
+                return IsProjectAssetPath(relative) ? relative : null;
+            }
+
             string[] prefixes = { "Assets/", "Packages/" };
             foreach (string prefix in prefixes)
             {
@@ -612,6 +638,7 @@ namespace Locus
         public static void Stop()
         {
             CancelActiveExecuteCode("bridge stopped");
+            ClearTickSchedulerNow();
 
             lock (_mainThreadQueueLock)
             {
@@ -978,6 +1005,8 @@ namespace Locus
         private static void PumpMainThreadQueue()
         {
             NativePump();
+            PruneYamlPreviewSceneCache(false);
+            PumpTickSchedulerEditorUpdate();
 
             bool desktopConnected = HasAnyDesktopConnection();
             bool hasRuntimeWork = HasMainThreadRuntimeWork();
@@ -1364,8 +1393,46 @@ namespace Locus
                     case "ping":
                         return OkResponse(reqId, "pong");
 
+                    case "configure_locus_external_editor":
+                    {
+                        var tcs = LocusAsync.CreateTcs<PipeEnvelope>();
+                        PostToMainThread(delegate
+                        {
+                            try
+                            {
+                                tcs.SetResult(OkResponse(
+                                    reqId,
+                                    LocusExternalCodeEditor.ConfigureFromJson(msg.message)));
+                            }
+                            catch (Exception ex)
+                            {
+                                tcs.SetResult(ErrorResponse(reqId, ex.Message));
+                            }
+                        });
+                        return await tcs.Task.ConfigureAwait(false);
+                    }
+
+                    case "sync_project_files":
+                    {
+                        var tcs = LocusAsync.CreateTcs<PipeEnvelope>();
+                        PostToMainThread(delegate
+                        {
+                            try
+                            {
+                                tcs.SetResult(OkResponse(reqId, LocusProjectFiles.SyncAll()));
+                            }
+                            catch (Exception ex)
+                            {
+                                tcs.SetResult(ErrorResponse(reqId, ex.Message));
+                            }
+                        });
+                        return await tcs.Task.ConfigureAwait(false);
+                    }
+
                     case "bridge_capabilities":
-                        return OkResponse(reqId, "managed_executor_v1,status_cached,set_editor_status_async");
+                        return OkResponse(
+                            reqId,
+                            "managed_executor_v1,status_cached,set_editor_status_async,execute_idempotency_v1");
 
                     case "status":
                         return HandleStatus(reqId);
@@ -1378,6 +1445,24 @@ namespace Locus
                             try
                             {
                                 tcs.SetResult(OkResponse(reqId, BuildConsoleTextPayloadJson()));
+                            }
+                            catch (Exception ex)
+                            {
+                                tcs.SetResult(ErrorResponse(reqId, ex.ToString()));
+                            }
+                        });
+                        return await tcs.Task.ConfigureAwait(false);
+                    }
+
+                    case "unity_get_console_log":
+                    {
+                        string requestJson = msg.message ?? "";
+                        var tcs = LocusAsync.CreateTcs<PipeEnvelope>();
+                        PostToMainThread(delegate
+                        {
+                            try
+                            {
+                                tcs.SetResult(OkResponse(reqId, BuildConsoleLogPayloadJson(requestJson)));
                             }
                             catch (Exception ex)
                             {
@@ -1409,12 +1494,15 @@ namespace Locus
                     case "execute_loaded":
                         return await HandleExecuteLoaded(reqId, msg.message).ConfigureAwait(false);
 
+                    case "execute_code_wait":
+                        return await HandleWaitExecuteCode(reqId, msg.message).ConfigureAwait(false);
+
                     case "cancel_execute_code":
-                        return HandleCancelExecuteCode(reqId);
+                        return HandleCancelExecuteCode(reqId, msg.message);
 
                     case "execute_code_progress":
-                        TouchActiveExecuteCodeClientHeartbeat();
-                        return OkResponse(reqId, GetExecuteCodeProgressJson());
+                        TouchExecuteCodeClientHeartbeat(msg.message);
+                        return OkResponse(reqId, GetExecuteCodeProgressJson(msg.message));
 
                     case "export_type_index":
                     {
@@ -1864,7 +1952,10 @@ namespace Locus
                     }
 
                     default:
-                        return ErrorResponse(reqId, "unknown message type: " + (msg.type ?? ""));
+                        return await HandleExtensionMessageAsync(
+                            reqId,
+                            msg.type,
+                            msg.message).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)

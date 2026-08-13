@@ -1,6 +1,6 @@
 [package]
 name = "locus"
-version = "0.6.0"
+version = "0.7.0"
 description = "A opensource unity dev agent"
 authors = ["FarLocus"]
 edition = "2021"
@@ -41,18 +41,28 @@ tauri-plugin-opener = "=2.5.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+semver = "1"
 aisdk = { version = "0.5.2", features = ["openrouter"] }
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["backup", "bundled"] }
 uuid = { version = "1.22.0", features = ["v4", "serde"] }
 futures = "0.3.32"
+fs4 = "0.13.1"
 walkdir = "2.5.0"
 ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "blocking", "native-tls", "http2", "gzip", "deflate", "system-proxy", "socks"], default-features = false }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", features = ["native-tls", "proxy"] }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f", features = ["deflate", "proxy"] }
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "client-legacy", "tokio"] }
+# MCP server (expose unity tools to external harnesses): hyper serves the
+# localhost Streamable HTTP endpoint; toml_edit rewrites Codex's config.toml
+# format-preservingly for one-click setup. All three are already in the
+# dependency tree transitively.
+hyper = { version = "1", features = ["server", "http1"] }
+http-body-util = "0.1"
+toml_edit = "0.19"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 tower-service = "0.3"
@@ -60,6 +70,7 @@ url = "2"
 http = "1"
 glob = "0.3"
 regex = "1"
+pulldown-cmark = "0.13"
 sha2 = "0.10"
 base64 = "0.22"
 aes-gcm = "0.10"
@@ -109,7 +120,7 @@ mimalloc = "0.1"
 junction = "1"
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic"] }
 tauri-winrt-notification = "0.7.2"
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Gdi", "Win32_Networking_WinHttp", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Gdi", "Win32_Networking_WinHttp", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.61.2"
 webview2-com = "0.38.2"
 winreg = "0.55.0"

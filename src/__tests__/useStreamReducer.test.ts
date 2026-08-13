@@ -551,15 +551,23 @@ describe("reduceStreamEvent", () => {
       });
     });
 
-    it("parses todowrite output", () => {
-      const state = makeState({ isStreaming: true, activeToolCalls: [{ id: "tc1", name: "todowrite", arguments: "{}", status: "running" }] });
+    it("parses todowrite arguments when the result only contains a summary", () => {
       const todos = [{ content: "do thing", status: "pending", priority: "medium" }];
+      const state = makeState({
+        isStreaming: true,
+        activeToolCalls: [{
+          id: "tc1",
+          name: "todowrite",
+          arguments: JSON.stringify({ todos }),
+          status: "running",
+        }],
+      });
       const event: StreamEvent = { runId: "test-run",
         type: "toolCallDone",
         sessionId: "s1",
         toolCallId: "tc1",
         toolName: "todowrite",
-        output: `Todos updated: ${JSON.stringify(todos)}`,
+        output: "Todos updated (1 total, 1 remaining).",
         outcome: "done",
       };
       const mutations = reduceStreamEvent(state, event);
@@ -571,6 +579,27 @@ describe("reduceStreamEvent", () => {
         expect(todoMut.todos).toHaveLength(1);
         expect(todoMut.todos[0].content).toBe("do thing");
       }
+    });
+
+    it("keeps parsing legacy todowrite results when arguments are unavailable", () => {
+      const state = makeState({ isStreaming: true, activeToolCalls: [{ id: "tc1", name: "todowrite", arguments: "{}", status: "running" }] });
+      const todos = [{ content: "legacy task", status: "completed", priority: "low" }];
+      const event: StreamEvent = { runId: "test-run",
+        type: "toolCallDone",
+        sessionId: "s1",
+        toolCallId: "tc1",
+        toolName: "todowrite",
+        output: `Todos updated: ${JSON.stringify(todos)}`,
+        outcome: "done",
+      };
+
+      const mutations = reduceStreamEvent(state, event);
+
+      expect(mutations).toContainEqual({
+        type: "setTodos",
+        runId: "test-run",
+        todos,
+      });
     });
 
   });
@@ -829,7 +858,7 @@ describe("reduceStreamEvent", () => {
     });
 
     it("renders nested meta tool_call starts as the target tool", () => {
-      const parent: ToolCallDisplay = { id: "p1", name: "task", arguments: "{}", status: "running", nestedToolCalls: [] };
+      const parent: ToolCallDisplay = { id: "p1", name: "subagent", arguments: "{}", status: "running", nestedToolCalls: [] };
       const state = makeState({ isStreaming: true, activeToolCalls: [parent] });
       const event: StreamEvent = { runId: "test-run",
         type: "subagentToolCallStart",
@@ -1167,38 +1196,9 @@ describe("reduceStreamEvent", () => {
       if (qMut?.type === "enqueueQuestion") {
         expect(qMut.question.questionId).toBe("q1");
         expect(qMut.question.question).toBe("What file?");
-        expect(qMut.question.sheet).toBeNull();
       }
     });
 
-    it("carries the sheet payload into the pending question", () => {
-      const state = makeState({ isStreaming: true });
-      const event: StreamEvent = { runId: "test-run",
-        type: "askUser",
-        sessionId: "s1",
-        questionId: "q2",
-        toolCallId: "tc2",
-        question: "Publish plugin asset-tools 0.1.0",
-        options: [],
-        sheet: {
-          description: "Creates the zip and installs it locally.",
-          confirmLabel: "Publish",
-          fields: [
-            { key: "id", label: "Plugin id", value: "asset-tools", readonly: true },
-            { key: "version", label: "Version", value: "0.1.0", options: ["0.1.0", "0.2.0"] },
-          ],
-        },
-      };
-      const mutations = reduceStreamEvent(state, event);
-
-      const qMut = mutations.find((m) => m.type === "enqueueQuestion");
-      expect(qMut).toBeDefined();
-      if (qMut?.type === "enqueueQuestion") {
-        expect(qMut.question.sheet?.confirmLabel).toBe("Publish");
-        expect(qMut.question.sheet?.fields).toHaveLength(2);
-        expect(qMut.question.sheet?.fields[0]?.readonly).toBe(true);
-      }
-    });
 
     it("queues multiple askUser events from the same LLM response (does not overwrite)", () => {
       // Regression: the previous single-value `pendingQuestion` field

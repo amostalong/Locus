@@ -28,6 +28,9 @@ const ENDPOINT_TEST_HTML_RESPONSE_CODE: &str = "endpoint_test.html_response";
 /// Debug builds use a separate `locus-dev` directory so a release instance and
 /// a `bun tauri dev` instance do not share config, logs, or storage overrides.
 pub(crate) fn persistent_config_dir() -> Result<std::path::PathBuf, String> {
+    if let Some(dir) = crate::runtime_paths::runtime_config_dir_from_env()? {
+        return Ok(dir);
+    }
     let config_dir =
         dirs::config_dir().ok_or_else(|| "Failed to get config directory".to_string())?;
     let dir_name = if cfg!(debug_assertions) { "locus-dev" } else { "locus" };
@@ -726,6 +729,15 @@ pub async fn set_working_dir(
                 error
             );
         }
+        if let Err(error) = crate::unity_bridge::sync_unity_embed_enabled_marker(
+            &canonical,
+            config.unity_embed_enabled(),
+        ) {
+            eprintln!(
+                "[Locus] warning: failed to sync Unity embed marker for workspace: {}",
+                error
+            );
+        }
         switch_timer.mark("unity_monitor_start_begin");
         crate::unity_bridge::start_unity_monitor(
             app_handle.clone(),
@@ -1051,15 +1063,11 @@ pub async fn save_last_effort(effort: String, _app_handle: AppHandle) -> Result<
 #[tauri::command]
 pub async fn get_codex_fast_mode(_app_handle: AppHandle) -> Result<bool, AppError> {
     let path = persistent_config_dir()?.join("codex_fast_mode.txt");
-    Ok(read_nonempty_string(&path)
-        .is_some_and(|value| value.eq_ignore_ascii_case("true")))
+    Ok(read_nonempty_string(&path).is_some_and(|value| value.eq_ignore_ascii_case("true")))
 }
 
 #[tauri::command]
-pub async fn save_codex_fast_mode(
-    enabled: bool,
-    _app_handle: AppHandle,
-) -> Result<(), AppError> {
+pub async fn save_codex_fast_mode(enabled: bool, _app_handle: AppHandle) -> Result<(), AppError> {
     let dir = persistent_config_dir().map_err(|e| format!("Failed to get config dir: {e}"))?;
     std::fs::write(dir.join("codex_fast_mode.txt"), enabled.to_string())
         .map_err(|e| format!("Failed to save Codex Fast mode: {e}"))?;
@@ -1110,6 +1118,13 @@ impl Default for CodexTransportMode {
 pub struct CodexModelConfig {
     #[serde(default)]
     pub transport: CodexTransportMode,
+    /// Opt in to the larger GPT-5.6 context window advertised by Codex.
+    /// Existing config files omit this field and remain on the standard window.
+    #[serde(default)]
+    pub extended_context: bool,
+    /// Generate a concise title for new chat sessions with Codex OAuth.
+    #[serde(default)]
+    pub generate_session_titles: bool,
 }
 
 fn codex_model_config_path() -> Result<std::path::PathBuf, String> {
@@ -1345,8 +1360,6 @@ pub struct CustomEndpoint {
     pub api_key: String,
     #[serde(default = "default_context_length")]
     pub context_length: u32,
-    #[serde(default)]
-    pub beta_flags: Vec<String>,
     #[serde(default = "default_supported_reasoning_efforts")]
     pub supported_reasoning_efforts: Vec<String>,
     #[serde(default)]
@@ -1583,9 +1596,6 @@ pub async fn test_custom_endpoint(endpoint: CustomEndpoint) -> Result<String, Ap
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .header("anthropic-version", "2023-06-01");
-            if !endpoint.beta_flags.is_empty() {
-                req = req.header("anthropic-beta", endpoint.beta_flags.join(","));
-            }
             if !endpoint.api_key.is_empty() {
                 req = req
                     .header("x-api-key", &endpoint.api_key)
@@ -1646,8 +1656,10 @@ pub struct CustomProviderModel {
     pub name: String,
     #[serde(default = "default_context_length")]
     pub context_length: u32,
+    /// Protocol-native lazy tool loading (`defer_loading`/`tool_reference`)
+    /// for Anthropic-format endpoints; the endpoint must support it.
     #[serde(default)]
-    pub beta_flags: Vec<String>,
+    pub supports_tool_lazy_loading: bool,
     #[serde(default = "default_supported_reasoning_efforts")]
     pub supported_reasoning_efforts: Vec<String>,
     #[serde(default)]
@@ -1698,7 +1710,13 @@ fn sanitize_id_segment(value: &str, fallback: &str) -> String {
     let cleaned: String = value
         .trim()
         .chars()
-        .map(|c| if c == '/' || c.is_whitespace() { '-' } else { c })
+        .map(|c| {
+            if c == '/' || c.is_whitespace() {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         fallback.to_string()
@@ -1773,7 +1791,7 @@ fn migrate_endpoint_to_provider(mut endpoint: CustomEndpoint) -> CustomProvider 
             name: endpoint.api_model.clone(),
             api_model: endpoint.api_model,
             context_length: endpoint.context_length,
-            beta_flags: endpoint.beta_flags,
+            supports_tool_lazy_loading: endpoint.supports_tool_lazy_loading,
             supported_reasoning_efforts: endpoint.supported_reasoning_efforts,
             reasoning_param_format: endpoint.reasoning_param_format,
             replay_reasoning_content: endpoint.replay_reasoning_content,
@@ -2022,6 +2040,24 @@ pub async fn set_debug_mode(
 }
 
 #[tauri::command]
+pub async fn get_tool_failure_log_enabled(
+    config: State<'_, Arc<crate::config::AppConfig>>,
+) -> Result<bool, AppError> {
+    Ok(config.tool_failure_log_enabled())
+}
+
+#[tauri::command]
+pub async fn set_tool_failure_log_enabled(
+    value: bool,
+    config: State<'_, Arc<crate::config::AppConfig>>,
+) -> Result<(), AppError> {
+    config
+        .set_tool_failure_log_enabled(value)
+        .map_err(AppError::from)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_llm_retry_max_attempts(
     config: State<'_, Arc<crate::config::AppConfig>>,
 ) -> Result<u32, AppError> {
@@ -2049,7 +2085,7 @@ pub async fn get_subagent_max_depth(
     Ok(config.subagent_max_depth())
 }
 
-/// Persist the `task` subagent nesting-depth cap (clamped to 1..=8; 1 means
+/// Persist the `subagent` nesting-depth cap (clamped to 1..=8; 1 means
 /// subagents cannot spawn further subagents).
 #[tauri::command]
 pub async fn set_subagent_max_depth(
@@ -2069,7 +2105,7 @@ pub async fn get_subagent_max_concurrent(
     Ok(config.subagent_max_concurrent())
 }
 
-/// Persist the concurrent `task` subagent cap per top-level agent tree
+/// Persist the concurrent `subagent` cap per top-level agent tree
 /// (clamped to 1..=16).
 #[tauri::command]
 pub async fn set_subagent_max_concurrent(
@@ -2098,6 +2134,38 @@ pub async fn set_file_tool_workspace_boundary(
         .set_file_tool_workspace_boundary_enabled(value)
         .map_err(AppError::from)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_unity_test_tools_workspace_status(
+    workspace: State<'_, Arc<Workspace>>,
+) -> Result<crate::workspace::UnityTestToolsWorkspaceStatus, AppError> {
+    let working_dir = workspace.path.read().await.trim().to_string();
+    if working_dir.is_empty() {
+        return Err(AppError::from(
+            "Unity Test tools require an active workspace".to_string(),
+        ));
+    }
+    Ok(crate::workspace::unity_test_tools_workspace_status(
+        &working_dir,
+    ))
+}
+
+#[tauri::command]
+pub async fn set_unity_test_tools_workspace_enabled(
+    value: bool,
+    workspace: State<'_, Arc<Workspace>>,
+) -> Result<crate::workspace::UnityTestToolsWorkspaceStatus, AppError> {
+    let working_dir = workspace.path.read().await.trim().to_string();
+    if working_dir.is_empty() {
+        return Err(AppError::from(
+            "Unity Test tools require an active workspace".to_string(),
+        ));
+    }
+    crate::workspace::set_unity_test_tools_enabled(&working_dir, value).map_err(AppError::from)?;
+    Ok(crate::workspace::unity_test_tools_workspace_status(
+        &working_dir,
+    ))
 }
 
 #[tauri::command]
@@ -2148,13 +2216,19 @@ pub async fn save_tool_permissions(
     perms: State<'_, crate::ToolPermissions>,
     app_handle: AppHandle,
 ) -> Result<(), AppError> {
-    let normalized: std::collections::HashMap<String, String> = value
+    let mut normalized: std::collections::HashMap<String, String> = value
         .into_iter()
         .map(|(k, v)| {
             let mode = normalize_tool_permission_mode_request(Some(v.as_str()), None).to_string();
             (k, mode)
         })
         .collect();
+    if !normalized.contains_key("subagent") {
+        if let Some(mode) = normalized.get("task").cloned() {
+            normalized.insert("subagent".to_string(), mode);
+        }
+    }
+    normalized.remove("task");
     *perms.0.write().await = normalized.clone();
     let data_dir = super::resolve_runtime_storage_dir(&app_handle)
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
@@ -3017,11 +3091,18 @@ pub async fn install_unity_plugin(
             .to_string()
             .into());
     }
-    let hash = crate::unity_bridge::install_or_update_plugin_with_force_close(
+
+    // The Unity-hosted Locus window is a cross-process WS_CHILD. Detach it on
+    // the GUI thread before terminating Unity so WebView2 keeps a valid host
+    // HWND throughout the plugin replacement and editor restart.
+    let unity_embed_quiesce = super::quiesce_unity_embed_control_windows(&app_handle).await?;
+    let install_result = crate::unity_bridge::install_or_update_plugin_with_force_close(
         &cwd,
         force_close_unity.unwrap_or(false),
     )
-    .await?;
+    .await;
+    drop(unity_embed_quiesce);
+    let hash = install_result?;
     crate::unity_bridge::emit_plugin_status(&app_handle, &cwd);
     Ok(hash)
 }
@@ -3308,7 +3389,8 @@ mod tests {
         normalize_tool_permission_mode_request, normalize_workspace_sub_path,
         resolve_workspace_dir_target, rewrite_legacy_custom_model_ref,
         search_workspace_entries_in_dir, valid_custom_model_refs, workspace_entry_stat_for_path,
-        workspace_search_score, ApiFormat, CustomEndpoint, CustomProvider, CustomProviderModel,
+        workspace_search_score, ApiFormat, CodexModelConfig, CodexTransportMode, CustomEndpoint,
+        CustomProvider, CustomProviderModel,
     };
     use std::path::Path;
     use tempfile::tempdir;
@@ -3331,6 +3413,16 @@ mod tests {
                 false
             }
         }
+    }
+
+    #[test]
+    fn legacy_codex_model_config_keeps_opt_in_features_disabled() {
+        let config: CodexModelConfig =
+            serde_json::from_str(r#"{"transport":"websocket"}"#).expect("codex config");
+
+        assert_eq!(config.transport, CodexTransportMode::Websocket);
+        assert!(!config.extended_context);
+        assert!(!config.generate_session_titles);
     }
 
     #[test]
@@ -3675,7 +3767,6 @@ mod tests {
                 "endpoint": "https://api.deepseek.com",
                 "apiFormat": "openai_chat",
                 "contextLength": 131072,
-                "betaFlags": ["flag-a"],
                 "supportedReasoningEfforts": ["low", "high"],
                 "replayReasoningContent": true,
                 "supportsVision": false
@@ -3698,7 +3789,7 @@ mod tests {
         assert_eq!(model.id, "deepseek-chat");
         assert_eq!(model.api_model, "deepseek-chat");
         assert_eq!(model.context_length, 131_072);
-        assert_eq!(model.beta_flags, vec!["flag-a".to_string()]);
+        assert!(!model.supports_tool_lazy_loading);
         assert_eq!(
             model.supported_reasoning_efforts,
             vec!["low".to_string(), "high".to_string()]
@@ -3730,7 +3821,7 @@ mod tests {
                     api_model: mid.to_string(),
                     name: mid.to_string(),
                     context_length: 128_000,
-                    beta_flags: Vec::new(),
+                    supports_tool_lazy_loading: false,
                     supported_reasoning_efforts: vec!["high".to_string()],
                     reasoning_param_format: None,
                     replay_reasoning_content: None,
@@ -3772,7 +3863,10 @@ mod tests {
             rewrite_legacy_custom_model_ref("custom/ep-1/reasoner", &providers),
             None
         );
-        assert_eq!(rewrite_legacy_custom_model_ref("custom/ghost", &providers), None);
+        assert_eq!(
+            rewrite_legacy_custom_model_ref("custom/ghost", &providers),
+            None
+        );
         assert_eq!(
             rewrite_legacy_custom_model_ref("openrouter/claude-fable-5", &providers),
             None
@@ -3788,6 +3882,9 @@ mod tests {
         assert!(!is_stale_custom_model_ref("custom/ep-1/chat", &valid));
         assert!(is_stale_custom_model_ref("custom/ep-1/ghost", &valid));
         assert!(is_stale_custom_model_ref("custom/ghost", &valid));
-        assert!(!is_stale_custom_model_ref("openrouter/claude-fable-5", &valid));
+        assert!(!is_stale_custom_model_ref(
+            "openrouter/claude-fable-5",
+            &valid
+        ));
     }
 }

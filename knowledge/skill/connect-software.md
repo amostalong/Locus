@@ -1,12 +1,8 @@
 ---
 id: kd_skill_builtin_connect_software
-type: skill
-path: connect-software.md
-title: Connect External Software
 injectMode: excerpt
-summaryEnabled: true
-commandEnabled: true
-readOnly: false
+summary: >-
+  Use when the user wants Locus to connect to, control, or automate external software, a service, or a web API — adding, installing, fixing, or reloading an MCP server (Blender, Figma, community `uvx`/`npx` servers, ...), setting up a CLI (`gh`, `adb`, `ffmpeg`, ...), or wiring up an HTTP API. Ignore Unity connection issues and Locus skill/plugin management.
 aiMaintained: false
 skillEnabled: true
 skillSurface: both
@@ -16,18 +12,13 @@ tools:
   - bash
   - mcp_reload
   - web_fetch
-  - knowledge_create
-  - knowledge_edit
-createdAt: 1784246400000
-updatedAt: 1784419200000
+  - knowledge_query
+  - read
+  - write
+  - edit
 ---
 
 # Connect External Software
-
-## Summary
-Use when the user wants Locus to connect to, control, or automate external software, a service, or a web API — adding, installing, fixing, or reloading an MCP server (Blender, Figma, community `uvx`/`npx` servers, ...), setting up a CLI (`gh`, `adb`, `ffmpeg`, ...), or wiring up an HTTP API. Ignore Unity connection issues and Locus skill/plugin management.
-
-## Content
 
 You can research integration options, configure the connection (MCP server, CLI, or raw HTTP), verify it end to end, and persist what you learned — all without leaving the conversation. Do not tell the user a connection is unavailable before walking the channels below.
 
@@ -125,7 +116,7 @@ Prefer vendor/official over community, recently pushed over stale, and a README 
 
 ## Persist what you learned
 
-After the first successful end-to-end call, record the integration so future sessions skip the setup pain. Check the knowledge tree for an existing document first, then `knowledge_create` (or `knowledge_edit`) `memory/integrations/<software>.md` containing, briefly:
+After the first successful end-to-end call, record the integration so future sessions skip the setup pain. Use `knowledge_query` to check for an existing document, then `write` a new `Locus/knowledge/memory/integrations/<software>.md` or `edit` the returned physical path. Supply ordinary Markdown only when creating the file; Locus generates its frontmatter and reports the generated metadata.
 
 - channel and config location (the `mcp_servers.json` entry, CLI name, or API base URL)
 - auth: which env var and where it is set — never the secret itself

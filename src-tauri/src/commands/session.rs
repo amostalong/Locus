@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::auth::CodexAuthStateHandle;
 use super::{StreamEvent, TokenUsage};
-use crate::agent::definition::{canonical_agent_id, is_hidden_legacy_agent_id, AgentDefRegistry};
+use crate::agent::definition::{canonical_agent_id, is_hidden_legacy_agent_id};
 use crate::agent::instance::{
-    AgentInstance, AgentSystemPromptStats, KnowledgeAccessMode, LlmBackend, RawContextStore,
+    AgentInstance, AgentSystemPromptStats, AssistantStreamSnapshot, KnowledgeAccessMode,
+    LlmBackend, RawContextStore,
 };
 use crate::auth::AuthState;
 use crate::config::AppConfig;
@@ -21,11 +21,11 @@ use crate::knowledge_store::{self, KnowledgeDocument, KnowledgeInjectMode, Knowl
 use crate::session::models::{
     AssetRefData, ChatMessage, ImageData, KnowledgeProposalItem, KnowledgeProposalItemKind,
     KnowledgeProposalStatus, PendingSessionInput, SessionDetail, SessionEventRecord,
-    SessionRunSummary, SessionRuntimeSnapshot, SessionRuntimeStatus, SessionSummary, TodoItem,
-    TodoSnapshot, UserIntentPayload,
+    SessionMessagePage, SessionRunSummary, SessionRuntimeSnapshot, SessionRuntimeStatus,
+    SessionSummary, SessionTurnPreview, SessionViewSnapshot, TodoSnapshot, UserIntentPayload,
 };
 use crate::session::pending_inputs::QueuePendingInputRequest;
-use crate::session::store::{SessionStore, CHILD_SESSION_FORK_ERROR};
+use crate::session::store::{CompactedContextOutput, SessionStore, CHILD_SESSION_FORK_ERROR};
 use crate::tool::ToolRegistry;
 use crate::workspace::Workspace;
 use crate::{
@@ -54,6 +54,9 @@ pub struct ChatLaunch {
 
 const ACTIVE_SESSION_SELECTION_FILE: &str = "active_session_selection.json";
 const ACTIVE_SESSION_GLOBAL_WORKSPACE_KEY: &str = "__global__";
+// Keep session switching responsive even when a tool-heavy round expands the
+// raw row count while preserving its assistant/tool boundary.
+const DEFAULT_SESSION_VIEW_MESSAGE_LIMIT: u32 = 120;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -261,6 +264,93 @@ fn runtime_snapshot_for_active_task(
         .runtime_snapshot_for_session(session_id)
         .filter(|snapshot| snapshot.active_run.run_id == run_id)
         .unwrap_or_else(|| fallback_runtime_snapshot(session_id, run_id))
+}
+
+#[derive(Debug, Clone)]
+struct ActiveSessionCopyState {
+    run_id: String,
+    partial_assistant: AssistantStreamSnapshot,
+}
+
+async fn capture_active_session_copy_states(
+    session_ids: &[String],
+    active_tasks: &ActiveTasks,
+) -> HashMap<String, ActiveSessionCopyState> {
+    let session_ids = session_ids.iter().collect::<HashSet<_>>();
+    let tasks = active_tasks.lock().await;
+    tasks
+        .iter()
+        .filter(|(session_id, _)| session_ids.contains(session_id))
+        .map(|(session_id, task)| {
+            (
+                session_id.clone(),
+                ActiveSessionCopyState {
+                    run_id: task.run_id.clone(),
+                    partial_assistant: task.partial_assistant.snapshot(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn runtime_snapshot_with_partial_assistant(
+    store: &SessionStore,
+    session_id: &str,
+    active: &ActiveSessionCopyState,
+) -> SessionRuntimeSnapshot {
+    let mut runtime = runtime_snapshot_for_active_task(store, session_id, &active.run_id);
+    if !active.partial_assistant.text.is_empty() {
+        runtime.streaming_text = active.partial_assistant.text.clone();
+    }
+    if !active.partial_assistant.thinking_content.is_empty() {
+        runtime.streaming_thinking = active.partial_assistant.thinking_content.clone();
+    }
+    if let Some(duration) = active.partial_assistant.thinking_duration {
+        runtime.thinking_duration = duration;
+    }
+    runtime
+}
+
+async fn capture_context_export_live_snapshot(
+    session_ids: &[String],
+    store: &SessionStore,
+    pending_input_queue: &PendingInputQueueHandle,
+    active_tasks: &ActiveTasks,
+) -> Result<crate::session::context_export::ContextExportLiveSnapshot, AppError> {
+    let pending_inputs = {
+        let queue = pending_input_queue.lock().map_err(|error| {
+            AppError::new(
+                "session.export_runtime_lock_failed",
+                "Failed to capture pending session inputs.",
+            )
+            .detail(error.to_string())
+            .operation("exportSessionContext")
+        })?;
+        session_ids
+            .iter()
+            .map(|session_id| (session_id.clone(), queue.list_session(session_id)))
+            .collect::<HashMap<_, _>>()
+    };
+    let active = capture_active_session_copy_states(session_ids, active_tasks).await;
+    let sessions = session_ids
+        .iter()
+        .map(|session_id| {
+            let runtime = active
+                .get(session_id)
+                .map(|active| runtime_snapshot_with_partial_assistant(store, session_id, active));
+            (
+                session_id.clone(),
+                crate::session::context_export::ContextExportLiveSession {
+                    pending_inputs: pending_inputs.get(session_id).cloned().unwrap_or_default(),
+                    runtime,
+                },
+            )
+        })
+        .collect();
+    Ok(crate::session::context_export::ContextExportLiveSnapshot {
+        captured_at: current_unix_millis() / 1000,
+        sessions,
+    })
 }
 
 fn knowledge_title_from_path(path: &str) -> String {
@@ -487,6 +577,7 @@ pub async fn get_agent_rendered_env_prompt(
     agent_id: String,
     registry: State<'_, AgentDefRegistryState>,
     tool_registry: State<'_, Arc<ToolRegistry>>,
+    config: State<'_, Arc<AppConfig>>,
     workspace: State<'_, Arc<Workspace>>,
     raw_store: State<'_, RawContextStore>,
     app_knowledge_dir: State<'_, crate::commands::AppKnowledgeDir>,
@@ -504,7 +595,7 @@ pub async fn get_agent_rendered_env_prompt(
         workspace.workspace_id.read().await.clone()
     };
 
-    let instance = AgentInstance::new(
+    let mut instance = AgentInstance::new(
         Arc::new(def),
         "__agent-preview__",
         LlmBackend::ClaudeCodeCli,
@@ -523,6 +614,7 @@ pub async fn get_agent_rendered_env_prompt(
         HashMap::new(),
         tokio::sync::watch::channel(false).1,
     );
+    instance.set_async_tasks_enabled(config.async_tasks_enabled());
 
     Ok(instance.rendered_env_prompt().await)
 }
@@ -532,6 +624,7 @@ pub async fn get_agent_system_prompt_stats(
     agent_id: String,
     registry: State<'_, AgentDefRegistryState>,
     tool_registry: State<'_, Arc<ToolRegistry>>,
+    config: State<'_, Arc<AppConfig>>,
     workspace: State<'_, Arc<Workspace>>,
     raw_store: State<'_, RawContextStore>,
     app_knowledge_dir: State<'_, crate::commands::AppKnowledgeDir>,
@@ -549,7 +642,7 @@ pub async fn get_agent_system_prompt_stats(
         workspace.workspace_id.read().await.clone()
     };
 
-    let instance = AgentInstance::new(
+    let mut instance = AgentInstance::new(
         Arc::new(def),
         "__agent-preview__",
         LlmBackend::ClaudeCodeCli,
@@ -568,6 +661,7 @@ pub async fn get_agent_system_prompt_stats(
         HashMap::new(),
         tokio::sync::watch::channel(false).1,
     );
+    instance.set_async_tasks_enabled(config.async_tasks_enabled());
 
     Ok(instance.system_prompt_stats().await)
 }
@@ -588,7 +682,7 @@ fn custom_backend_for_model(selected_model: &str) -> Result<LlmBackend, AppError
         endpoint: provider.endpoint,
         api_format: provider.api_format,
         context_length: model.context_length,
-        beta_flags: model.beta_flags,
+        supports_tool_lazy_loading: model.supports_tool_lazy_loading,
         supported_reasoning_efforts: model.supported_reasoning_efforts,
         reasoning_param_format: model
             .reasoning_param_format
@@ -697,6 +791,7 @@ pub async fn list_agent_injected_items(
     knowledge_mode: Option<String>,
     registry: State<'_, AgentDefRegistryState>,
     tool_registry: State<'_, Arc<ToolRegistry>>,
+    config: State<'_, Arc<AppConfig>>,
     workspace: State<'_, Arc<Workspace>>,
     raw_store: State<'_, RawContextStore>,
     app_knowledge_dir: State<'_, crate::commands::AppKnowledgeDir>,
@@ -716,7 +811,7 @@ pub async fn list_agent_injected_items(
     let knowledge_access_mode = KnowledgeAccessMode::from_request(knowledge_mode.as_deref())
         .map_err(|error| AppError::new("agent.invalid_knowledge_mode", error))?;
 
-    let instance = AgentInstance::new(
+    let mut instance = AgentInstance::new(
         Arc::new(def),
         "__agent-preview__",
         LlmBackend::ClaudeCodeCli,
@@ -735,6 +830,7 @@ pub async fn list_agent_injected_items(
         HashMap::new(),
         tokio::sync::watch::channel(false).1,
     );
+    instance.set_async_tasks_enabled(config.async_tasks_enabled());
 
     Ok(instance.list_injected_prompt_items().await)
 }
@@ -772,7 +868,7 @@ pub async fn create_session(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     store
-        .create_session(
+        .create_session_with_model(
             resolved_title,
             parent_session_id.as_deref(),
             ws_id.as_deref(),
@@ -789,20 +885,136 @@ pub async fn fork_session(
     session_id: String,
     title: Option<String>,
     store: State<'_, Arc<SessionStore>>,
+    pending_input_queue: State<'_, PendingInputQueueHandle>,
+    active_tasks: State<'_, ActiveTasks>,
 ) -> Result<String, AppError> {
-    store
-        .fork_session(&session_id, title.as_deref())
+    let live_store = store.inner().clone();
+    let snapshot_source = live_store.clone();
+    let snapshot = tokio::task::spawn_blocking(move || snapshot_source.create_export_snapshot())
+        .await
         .map_err(|error| {
-            if error == CHILD_SESSION_FORK_ERROR {
-                AppError::new("session.fork_child", "Child sessions cannot be forked.")
-                    .detail(error)
-                    .operation("forkSession")
-            } else {
-                AppError::new("session.fork_failed", "Failed to fork session.")
-                    .detail(error)
-                    .operation("forkSession")
+            AppError::new(
+                "session.fork_snapshot_task_failed",
+                "Failed to create a session fork snapshot.",
+            )
+            .detail(error.to_string())
+            .operation("forkSession")
+        })??;
+
+    let active =
+        capture_active_session_copy_states(std::slice::from_ref(&session_id), active_tasks.inner())
+            .await
+            .remove(&session_id);
+    let runtime = active.as_ref().map(|active| {
+        runtime_snapshot_with_partial_assistant(store.inner().as_ref(), &session_id, active)
+    });
+    let pending_inputs = pending_input_queue
+        .lock()
+        .map_err(|error| {
+            AppError::new(
+                "session.fork_runtime_lock_failed",
+                "Failed to capture pending session inputs for the fork.",
+            )
+            .detail(error.to_string())
+            .operation("forkSession")
+        })?
+        .list_session(&session_id);
+    let title = title.clone();
+    let source_id = session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let snapshot_message_ids = snapshot
+            .get_messages(&source_id)?
+            .into_iter()
+            .map(|message| message.id)
+            .collect::<HashSet<_>>();
+        let forked_id = live_store.fork_session_from_export_snapshot(
+            &snapshot,
+            &source_id,
+            title.as_deref(),
+        )?;
+
+        let append_runtime_state = (|| -> Result<(), String> {
+            if let (Some(active), Some(runtime)) = (active, runtime) {
+                let partial_was_copied = active
+                    .partial_assistant
+                    .persisted_message_id
+                    .as_ref()
+                    .is_some_and(|message_id| snapshot_message_ids.contains(message_id));
+                if !partial_was_copied
+                    && (!runtime.streaming_text.is_empty()
+                        || !runtime.streaming_thinking.is_empty())
+                {
+                    live_store.add_message_with_thinking_and_render_parts(
+                        &forked_id,
+                        crate::session::models::MessageRole::Assistant,
+                        &runtime.streaming_text,
+                        (!runtime.streaming_thinking.is_empty())
+                            .then_some(runtime.streaming_thinking.as_str()),
+                        Some(runtime.thinking_duration),
+                        None,
+                        None,
+                        None,
+                        Some(runtime.streaming_text_order),
+                        Some(runtime.thinking_order),
+                        &runtime.live_render_parts,
+                    )?;
+                }
             }
-        })
+
+            for pending in pending_inputs {
+                let user_intent_signature = pending
+                    .user_intent
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| {
+                        format!("Failed to serialize pending fork user intent: {}", error)
+                    })?;
+                live_store.add_message_with_images_asset_refs_and_signature(
+                    &forked_id,
+                    crate::session::models::MessageRole::User,
+                    &pending.text,
+                    pending.images.as_deref(),
+                    pending.asset_refs.as_deref(),
+                    user_intent_signature.as_deref(),
+                    None,
+                    None,
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = append_runtime_state {
+            if let Err(cleanup_error) = live_store.delete_session(&forked_id) {
+                return Err(format!(
+                    "{}; failed to clean incomplete fork: {}",
+                    error, cleanup_error
+                ));
+            }
+            return Err(error);
+        }
+        Ok(forked_id)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "session.fork_copy_task_failed",
+            "Failed to copy the session fork snapshot.",
+        )
+        .detail(error.to_string())
+        .operation("forkSession")
+    })?
+    .map_err(|error| {
+        if error == CHILD_SESSION_FORK_ERROR {
+            AppError::new("session.fork_child", "Child sessions cannot be forked.")
+                .detail(error)
+                .operation("forkSession")
+        } else {
+            AppError::new("session.fork_failed", "Failed to fork session.")
+                .detail(error)
+                .operation("forkSession")
+        }
+    })
 }
 
 #[tauri::command]
@@ -831,8 +1043,10 @@ pub async fn fork_session_from_message(
 pub async fn chat(
     session_id: Option<String>,
     text: String,
+    resume: Option<bool>,
     session_title: Option<String>,
     agent_id: Option<String>,
+    sdk_agent: Option<crate::sdk::SdkAgentSpec>,
     model: Option<String>,
     effort: Option<String>,
     fast_mode: Option<bool>,
@@ -869,36 +1083,84 @@ pub async fn chat(
         workspace.workspace_id.read().await.clone()
     };
 
-    let requested_agent_id = agent_id
+    let is_new_session = session_id.is_none();
+    let resume_requested = resume.unwrap_or(false);
+    if resume_requested && is_new_session {
+        return Err(AppError::new(
+            "session.resume_requires_existing",
+            "An existing session is required to resume interrupted work.",
+        )
+        .operation("chat"));
+    }
+    if resume_requested
+        && (!text.trim().is_empty()
+            || images.as_ref().is_some_and(|items| !items.is_empty())
+            || asset_refs.as_ref().is_some_and(|items| !items.is_empty()))
+    {
+        return Err(AppError::new(
+            "session.resume_requires_empty_input",
+            "Resume requires an empty composer.",
+        )
+        .operation("chat"));
+    }
+    let session_kind = session_type.as_deref().unwrap_or("chat");
+    let explicit_session_title = session_title
         .as_deref()
-        .map(canonical_agent_id)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
         .map(str::to_string);
+    let codex_model_config = crate::commands::load_codex_model_config().unwrap_or_default();
+    let codex_title_generation_enabled = if codex_model_config.generate_session_titles {
+        let status = codex.lock().await.status();
+        status.authenticated && !status.validation_failed
+    } else {
+        false
+    };
+    let prepared_title_prompt = (is_new_session
+        && session_kind == "chat"
+        && explicit_session_title.is_none()
+        && codex_title_generation_enabled)
+        .then(|| crate::session::title::prepare_session_title_prompt(&text))
+        .flatten();
+    let generated_title_fallback = prepared_title_prompt
+        .as_deref()
+        .and_then(crate::session::title::fallback_session_title);
+
+    let inline_agent_def = sdk_agent.as_ref().map(crate::sdk::SdkAgentSpec::agent_def);
+    let requested_agent_id = inline_agent_def
+        .as_ref()
+        .map(|def| def.id.clone())
+        .or_else(|| {
+            agent_id
+                .as_deref()
+                .map(canonical_agent_id)
+                .map(str::to_string)
+        });
     let sid = match session_id {
         Some(id) => id,
         None => {
-            let title = session_title
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| text.chars().take(20).collect());
-            // Lock the new session to the model the user selected when sending
-            // the first message. Empty/whitespace means "let the session follow
-            // the global selection" (model_id = None).
+            let title = explicit_session_title.unwrap_or_else(|| text.chars().take(20).collect());
+            let title = generated_title_fallback.unwrap_or(title);
+            // Fork: lock the new session to the model the user selected when
+            // sending the first message. Empty/whitespace means "let the
+            // session follow the global selection" (model_id = None).
             let initial_model_id = model
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
-            // Lock the new session to the effort level chosen on the first
-            // send so switching back to the session later (or restarting the
-            // app) restores the same reasoning depth without re-prompting.
+            // Fork: lock the new session to the effort level chosen on the
+            // first send so switching back to the session later (or restarting
+            // the app) restores the same reasoning depth without re-prompting.
             // Empty/whitespace = follow the global lastEffort default.
             let initial_effort = effort
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
-            store.create_session(
+            store.create_session_with_model(
                 &title,
                 None,
                 ws_id.as_deref(),
-                session_type.as_deref().unwrap_or("chat"),
+                session_kind,
                 requested_agent_id.as_deref(),
                 initial_model_id,
                 initial_effort,
@@ -906,31 +1168,60 @@ pub async fn chat(
         }
     };
 
+    if resume_requested && !store.latest_run_is_interrupted(&sid)? {
+        return Err(AppError::new(
+            "session.resume_unavailable",
+            "The latest session run is no longer interrupted.",
+        )
+        .operation("chat"));
+    }
+
     let stale_messages = store.stale_pending_knowledge_proposals(&sid)?;
     for message in stale_messages {
         emit_knowledge_proposal_message(&app_handle, store.inner().as_ref(), &sid, message);
     }
 
-    // Enforce session-agent binding: if session already has an agent, use it
-    let effective_agent_id = match store.get_session_agent_id(&sid) {
-        Ok(Some(stored)) => Some(canonical_agent_id(&stored).to_string()),
-        _ => requested_agent_id.clone(),
-    };
-
-    let def = match &effective_agent_id {
-        Some(id) => {
-            let d = registry_snapshot
-                .get(id)
-                .cloned()
-                .ok_or_else(|| format!("Unknown agent: {}", id))?;
-            Arc::new(d)
+    // Enforce session-agent binding. Python-defined agents resend the full
+    // definition for every turn, while retaining the same session id so the
+    // provider conversation/prompt cache remains reusable.
+    let stored_agent_id = store
+        .get_session_agent_id(&sid)
+        .ok()
+        .flatten()
+        .map(|stored| canonical_agent_id(&stored).to_string());
+    if let (Some(inline), Some(stored)) = (inline_agent_def.as_ref(), stored_agent_id.as_ref()) {
+        if inline.id != *stored {
+            return Err(format!(
+                "Session {} belongs to agent '{}', not '{}'",
+                sid, stored, inline.id
+            )
+            .into());
         }
-        None => {
-            let d = registry_snapshot
-                .default_def()
-                .cloned()
-                .ok_or_else(|| "No agent definitions found".to_string())?;
-            Arc::new(d)
+    }
+    let effective_agent_id = inline_agent_def
+        .as_ref()
+        .map(|def| def.id.clone())
+        .or(stored_agent_id)
+        .or(requested_agent_id.clone());
+
+    let def = if let Some(inline) = inline_agent_def {
+        Arc::new(inline)
+    } else {
+        match &effective_agent_id {
+            Some(id) => {
+                let d = registry_snapshot
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("Unknown agent: {}", id))?;
+                Arc::new(d)
+            }
+            None => {
+                let d = registry_snapshot
+                    .default_def()
+                    .cloned()
+                    .ok_or_else(|| "No agent definitions found".to_string())?;
+                Arc::new(d)
+            }
         }
     };
 
@@ -964,16 +1255,11 @@ pub async fn chat(
     } else if is_openai_codex {
         let mut codex_guard = codex.lock().await;
         match codex_guard.access_token().await {
-            Ok(_) => {
-                let transport = crate::commands::load_codex_model_config()
-                    .map(|config| config.transport)
-                    .unwrap_or_default();
-                LlmBackend::OpenAiCodex {
-                    auth: codex.inner().clone(),
-                    transport,
-                    base_url: config.base_url.clone(),
-                }
-            }
+            Ok(_) => LlmBackend::OpenAiCodex {
+                auth: codex.inner().clone(),
+                transport: codex_model_config.transport,
+                base_url: config.base_url.clone(),
+            },
             Err(e) => {
                 return Err(format!("OpenAI Codex token failed (please re-login): {}", e).into());
             }
@@ -1009,8 +1295,29 @@ pub async fn chat(
             selected_model
         ).into());
     };
+
+    if let Some(title_prompt) = prepared_title_prompt {
+        let expected_title = store
+            .get_session_title(&sid)?
+            .unwrap_or_else(|| title_prompt.chars().take(20).collect());
+        crate::session::title::spawn_codex_session_title_generation(
+            app_handle.clone(),
+            store.inner().clone(),
+            codex.inner().clone(),
+            codex_model_config.transport,
+            config.base_url.clone(),
+            sid.clone(),
+            expected_title,
+            crate::session::title::SessionTitleGenerationRequest::codex_default(title_prompt),
+            config.debug_enabled(),
+        );
+    }
+
     let reg = registry_snapshot;
-    let tools = tool_registry.inner().clone();
+    let tools = match sdk_agent.as_ref() {
+        Some(spec) => crate::sdk::tool_registry_for_agent(tool_registry.inner().as_ref(), spec)?,
+        None => tool_registry.inner().clone(),
+    };
     let raw = raw_store.inner().clone();
 
     let akd = app_knowledge_dir.0.clone();
@@ -1019,6 +1326,7 @@ pub async fn chat(
         .map_err(|error| AppError::new("chat.invalid_knowledge_mode", error).operation("chat"))?;
     let um = Some(undo_manager.inner().clone());
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let idle_cancel_rx = cancel_rx.clone();
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut instance = AgentInstance::new(
         def,
@@ -1030,8 +1338,8 @@ pub async fn chat(
         cwd,
         raw,
         ws_id,
-        selected_model,
-        effort,
+        selected_model.clone(),
+        effort.clone(),
         akd,
         aad,
         knowledge_access_mode,
@@ -1040,6 +1348,7 @@ pub async fn chat(
         cancel_rx,
     );
     instance.set_codex_fast_mode(fast_mode.unwrap_or(false));
+    instance.set_async_tasks_enabled(config.async_tasks_enabled());
     let knowledge_focus = match (knowledge_doc_type, knowledge_doc_path) {
         (Some(doc_type), Some(path)) if !path.trim().is_empty() => {
             Some(crate::agent::instance::KnowledgeFocusDoc {
@@ -1072,6 +1381,24 @@ pub async fn chat(
                 .operation("chat")
         }
     })?;
+    if let Err(error) = store.set_session_last_model_id(&sid, &selected_model) {
+        let _ = store.update_run_status(&run_id, "error", Some(&error));
+        return Err(AppError::new(
+            "session.model_persist_failed",
+            "Failed to save the session model.",
+        )
+        .detail(error)
+        .operation("chat"));
+    }
+    if let Err(error) = store.set_session_last_effort(&sid, effort.as_deref()) {
+        let _ = store.update_run_status(&run_id, "error", Some(&error));
+        return Err(AppError::new(
+            "session.effort_persist_failed",
+            "Failed to save the session effort.",
+        )
+        .detail(error)
+        .operation("chat"));
+    }
     let store = store.inner().clone();
     let sid_clone = sid.clone();
     let tasks = active_tasks.inner().clone();
@@ -1081,6 +1408,10 @@ pub async fn chat(
     let user_intent_for_task = user_intent;
     let run_id_for_task = run_id.clone();
     let store_for_task = store.clone();
+    let initial_system_reminder = resume_requested.then(|| {
+        "<system-reminder>\nThe previous run was interrupted before the task was complete. Continue from the existing conversation context. Inspect the current state, finish the remaining work, and verify the result. Do not repeat completed work.\n</system-reminder>"
+            .to_string()
+    });
     let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
 
     let join_handle = tauri::async_runtime::spawn(async move {
@@ -1099,6 +1430,8 @@ pub async fn chat(
         let mut next_mode = effective_mode;
         let mut next_user_intent = user_intent_for_task;
         let mut accepted_pending_input_id: Option<String> = None;
+        let mut next_internal_system_reminder = initial_system_reminder;
+        let mut idle_cancel_rx = idle_cancel_rx;
 
         loop {
             let task_result = AssertUnwindSafe(instance.run_with_run_id(
@@ -1119,6 +1452,7 @@ pub async fn chat(
                 next_user_intent.take(),
                 current_run_id.clone(),
                 accepted_pending_input_id.take(),
+                next_internal_system_reminder.take(),
             ))
             .catch_unwind()
             .await;
@@ -1148,29 +1482,60 @@ pub async fn chat(
                 }
             }
 
-            let follow_up = {
-                let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> = handle.state();
-                let claimed = match queue_state.lock() {
-                    Ok(mut queue) => queue.claim_after_run(&sid_clone, &current_run_id),
-                    Err(error) => {
-                        eprintln!(
-                            "[Locus] failed to lock pending input queue for session {} run {}: {}",
-                            sid_clone, current_run_id, error
-                        );
-                        None
-                    }
+            let mut async_reminder: Option<String> = None;
+            let follow_up = loop {
+                let claimed = {
+                    let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> =
+                        handle.state();
+                    let claimed = match queue_state.lock() {
+                        Ok(mut queue) => queue.claim_after_run(&sid_clone, &current_run_id),
+                        Err(error) => {
+                            eprintln!(
+                                "[Locus] failed to lock pending input queue for session {} run {}: {}",
+                                sid_clone, current_run_id, error
+                            );
+                            None
+                        }
+                    };
+                    claimed
                 };
-                claimed
+                if claimed.is_some() {
+                    break claimed;
+                }
+
+                let async_tasks: tauri::State<'_, Arc<crate::async_tasks::AsyncTaskManager>> =
+                    handle.state();
+                let (notifications, has_pending_notifications) =
+                    async_tasks.take_notifications_and_pending(&sid_clone);
+                if !notifications.is_empty() {
+                    async_reminder = Some(notifications.join("\n\n"));
+                    break None;
+                }
+                if !has_pending_notifications || *idle_cancel_rx.borrow() {
+                    break None;
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                    _ = idle_cancel_rx.changed() => {}
+                }
             };
-            let Some(follow_up) = follow_up else {
+            if follow_up.is_none() && async_reminder.is_none() {
                 break;
-            };
+            }
 
             let next_run_id = generate_chat_run_id(&sid_clone);
             if let Err(error) = store_for_task.try_start_run(&sid_clone, &next_run_id) {
-                let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> = handle.state();
-                if let Ok(mut queue) = queue_state.lock() {
-                    queue.restore_claimed(vec![follow_up]);
+                if let Some(follow_up) = follow_up {
+                    let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> =
+                        handle.state();
+                    if let Ok(mut queue) = queue_state.lock() {
+                        queue.restore_claimed(vec![follow_up]);
+                    };
+                } else if let Some(reminder) = async_reminder {
+                    let async_tasks: tauri::State<'_, Arc<crate::async_tasks::AsyncTaskManager>> =
+                        handle.state();
+                    async_tasks.enqueue_notification(&sid_clone, reminder);
                 }
                 eprintln!(
                     "[Locus] failed to start queued follow-up for session {} after run {}: {}",
@@ -1186,10 +1551,18 @@ pub async fn chat(
                         task.run_id = next_run_id.clone();
                     }
                     _ => {
-                        let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> =
-                            handle.state();
-                        if let Ok(mut queue) = queue_state.lock() {
-                            queue.restore_claimed(vec![follow_up]);
+                        if let Some(follow_up) = follow_up {
+                            let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> =
+                                handle.state();
+                            if let Ok(mut queue) = queue_state.lock() {
+                                queue.restore_claimed(vec![follow_up]);
+                            };
+                        } else if let Some(reminder) = async_reminder {
+                            let async_tasks: tauri::State<
+                                '_,
+                                Arc<crate::async_tasks::AsyncTaskManager>,
+                            > = handle.state();
+                            async_tasks.enqueue_notification(&sid_clone, reminder);
                         }
                         if let Err(error) = store_for_task.update_run_status(
                             &next_run_id,
@@ -1206,21 +1579,30 @@ pub async fn chat(
                 }
             }
 
-            accepted_pending_input_id = Some(follow_up.id);
-            next_text = follow_up.text;
-            next_images = follow_up.images.unwrap_or_default();
-            next_asset_refs = follow_up.asset_refs.unwrap_or_default();
-            next_mode = follow_up
-                .mode
-                .clone()
-                .or_else(|| {
-                    follow_up
-                        .user_intent
-                        .as_ref()
-                        .map(|intent| intent.mode.clone())
-                })
-                .unwrap_or_else(|| "build".to_string());
-            next_user_intent = follow_up.user_intent;
+            if let Some(follow_up) = follow_up {
+                accepted_pending_input_id = Some(follow_up.id);
+                next_text = follow_up.text;
+                next_images = follow_up.images.unwrap_or_default();
+                next_asset_refs = follow_up.asset_refs.unwrap_or_default();
+                next_mode = follow_up
+                    .mode
+                    .clone()
+                    .or_else(|| {
+                        follow_up
+                            .user_intent
+                            .as_ref()
+                            .map(|intent| intent.mode.clone())
+                    })
+                    .unwrap_or_else(|| "build".to_string());
+                next_user_intent = follow_up.user_intent;
+            } else {
+                next_text.clear();
+                next_images.clear();
+                next_asset_refs.clear();
+                next_mode = "build".to_string();
+                next_user_intent = None;
+                next_internal_system_reminder = async_reminder;
+            }
             current_run_id = next_run_id;
         }
         let removed = {
@@ -1539,7 +1921,17 @@ pub async fn load_session(
     pending_input_queue: State<'_, PendingInputQueueHandle>,
     active_tasks: State<'_, ActiveTasks>,
 ) -> Result<SessionDetail, AppError> {
-    let mut detail = store.load_session(&session_id).map_err(AppError::from)?;
+    let store_handle = store.inner().clone();
+    let load_session_id = session_id.clone();
+    let mut detail =
+        tokio::task::spawn_blocking(move || store_handle.load_session(&load_session_id))
+            .await
+            .map_err(|error| {
+                AppError::new("session.load.join_failed", "Failed to load the session.")
+                    .detail(error.to_string())
+                    .operation("loadSession")
+            })?
+            .map_err(AppError::from)?;
     detail.pending_inputs = pending_input_queue
         .lock()
         .map_err(|e| {
@@ -1561,6 +1953,162 @@ pub async fn load_session(
         store.clear_runtime_session(&session_id);
     }
     Ok(detail)
+}
+
+#[tauri::command]
+pub async fn load_session_view(
+    session_id: String,
+    message_limit: Option<u32>,
+    store: State<'_, Arc<SessionStore>>,
+    pending_input_queue: State<'_, PendingInputQueueHandle>,
+    active_tasks: State<'_, ActiveTasks>,
+) -> Result<SessionViewSnapshot, AppError> {
+    let store_handle = store.inner().clone();
+    let load_session_id = session_id.clone();
+    let limit = message_limit.unwrap_or(DEFAULT_SESSION_VIEW_MESSAGE_LIMIT);
+    let mut snapshot = tokio::task::spawn_blocking(move || {
+        store_handle.load_session_view(&load_session_id, limit)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "session.view_load.join_failed",
+            "Failed to load the session view.",
+        )
+        .detail(error.to_string())
+        .operation("loadSessionView")
+    })?
+    .map_err(AppError::from)?;
+
+    snapshot.session.pending_inputs = pending_input_queue
+        .lock()
+        .map_err(|error| {
+            AppError::new(
+                "session.pending_input.lock_failed",
+                "Pending input queue is unavailable.",
+            )
+            .detail(error.to_string())
+            .operation("loadSessionView")
+        })?
+        .list_session(&session_id);
+    if let Some(run_id) = active_task_run_id(active_tasks.inner(), &session_id).await {
+        snapshot.session.runtime = Some(runtime_snapshot_for_active_task(
+            store.inner().as_ref(),
+            &session_id,
+            &run_id,
+        ));
+    } else {
+        store.clear_runtime_session(&session_id);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn load_session_message_page(
+    session_id: String,
+    before_row_id: i64,
+    message_limit: Option<u32>,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<SessionMessagePage, AppError> {
+    let store_handle = store.inner().clone();
+    let limit = message_limit.unwrap_or(DEFAULT_SESSION_VIEW_MESSAGE_LIMIT);
+    tokio::task::spawn_blocking(move || {
+        store_handle.load_session_message_page(&session_id, before_row_id, limit)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "session.history_load.join_failed",
+            "Failed to load older session history.",
+        )
+        .detail(error.to_string())
+        .operation("loadSessionHistory")
+    })?
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn load_session_message_images(
+    message_id: String,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<Vec<ImageData>, AppError> {
+    let message_id = message_id.trim().to_string();
+    if message_id.is_empty() {
+        return Err(AppError::new(
+            "session.message_images.invalid_target",
+            "A message is required to load its images.",
+        )
+        .operation("loadSessionMessageImages"));
+    }
+    let store_handle = store.inner().clone();
+    tokio::task::spawn_blocking(move || store_handle.load_session_message_images(&message_id))
+        .await
+        .map_err(|error| {
+            AppError::new(
+                "session.message_images.join_failed",
+                "Failed to load session message images.",
+            )
+            .detail(error.to_string())
+            .operation("loadSessionMessageImages")
+        })?
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn load_session_turn_preview(
+    session_id: String,
+    message_id: String,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<SessionTurnPreview, AppError> {
+    let store_handle = store.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        store_handle.load_session_turn_preview(&session_id, &message_id)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "session.turn_preview.join_failed",
+            "Failed to load the user turn preview.",
+        )
+        .detail(error.to_string())
+        .operation("loadSessionTurnPreview")
+    })?
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn get_compacted_context_output(
+    session_id: String,
+    message_id: String,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<CompactedContextOutput, AppError> {
+    let session_id = session_id.trim();
+    let message_id = message_id.trim();
+    if session_id.is_empty() || message_id.is_empty() {
+        return Err(AppError::new(
+            "session.compacted_context.invalid_target",
+            "A session and compacted message are required.",
+        )
+        .operation("getCompactedContextOutput"));
+    }
+
+    store
+        .get_compacted_context_output(session_id, message_id)
+        .map_err(|error| {
+            AppError::new(
+                "session.compacted_context.read_failed",
+                "Failed to read the compacted context.",
+            )
+            .detail(error)
+            .operation("getCompactedContextOutput")
+        })?
+        .ok_or_else(|| {
+            AppError::new(
+                "session.compacted_context.not_found",
+                "The compacted context is no longer available.",
+            )
+            .operation("getCompactedContextOutput")
+        })
 }
 
 #[tauri::command]
@@ -1802,6 +2350,17 @@ pub async fn get_session_usage(
 }
 
 #[tauri::command]
+pub async fn get_model_usage_stats(
+    days: Option<u32>,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<crate::commands::ModelUsageReport, AppError> {
+    if days.is_some_and(|value| value == 0 || value > 3650) {
+        return Err("Usage statistics range must be between 1 and 3650 days".into());
+    }
+    store.get_model_usage_report(days).map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn get_session_active_run(
     session_id: String,
     store: State<'_, Arc<SessionStore>>,
@@ -1814,6 +2373,16 @@ pub async fn get_session_active_run(
     Ok(Some(
         runtime_snapshot_for_active_task(store.inner().as_ref(), &session_id, &run_id).active_run,
     ))
+}
+
+#[tauri::command]
+pub async fn get_session_resume_available(
+    session_id: String,
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<bool, AppError> {
+    store
+        .session_resume_available(&session_id)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -2278,2076 +2847,73 @@ pub async fn apply_knowledge_proposal(
 }
 
 #[tauri::command]
-pub async fn save_raw_context(
+pub async fn export_session_context(
     session_id: String,
-    file_path: String,
-    include_system_prompt: bool,
+    file_path: Option<String>,
     raw_store: State<'_, RawContextStore>,
     store: State<'_, Arc<SessionStore>>,
     workspace: State<'_, Arc<Workspace>>,
-    registry: State<'_, AgentDefRegistryState>,
-) -> Result<String, AppError> {
+    pending_input_queue: State<'_, PendingInputQueueHandle>,
+    active_tasks: State<'_, ActiveTasks>,
+) -> Result<crate::session::context_export::ContextExportResult, AppError> {
     let working_dir = workspace.path.read().await.clone();
-    let project_config = load_export_project_config(&working_dir);
-    let usage = store.get_token_usage(&session_id).ok();
-    let raw_markdown = {
+    let output_path = match file_path {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => {
+            let session_title = store.load_session(&session_id)?.title;
+            crate::session::context_export::default_review_export_path(
+                &super::app_temp_dir()?,
+                &session_id,
+                &session_title,
+            )?
+        }
+    };
+    let legacy_rounds = {
         let raw = raw_store.lock().await;
         raw.get(&session_id)
             .filter(|rounds| !rounds.is_empty())
-            .map(|rounds| {
-                format_rounds_as_markdown(
-                    &session_id,
-                    rounds,
-                    usage.as_ref(),
-                    project_config.as_ref(),
-                    include_system_prompt,
-                )
-            })
+            .cloned()
     };
+    let live_store = store.inner().clone();
+    let snapshot_store = tokio::task::spawn_blocking(move || live_store.create_export_snapshot())
+        .await
+        .map_err(|error| {
+            AppError::new(
+                "session.export_snapshot_task_failed",
+                "Failed to create a session export snapshot.",
+            )
+            .detail(error.to_string())
+            .operation("exportSessionContext")
+        })??;
+    let session_tree_ids = snapshot_store.session_tree_ids(&session_id)?;
+    let live_snapshot = capture_context_export_live_snapshot(
+        &session_tree_ids,
+        store.inner().as_ref(),
+        pending_input_queue.inner(),
+        active_tasks.inner(),
+    )
+    .await?;
 
-    let (markdown, export_mode) = if let Some(markdown) = raw_markdown {
-        (markdown, "raw-rounds")
-    } else {
-        let detail = store.load_session(&session_id)?;
-        let todos = store
-            .get_todos(&session_id)
-            .map(|snapshot| snapshot.items)
-            .unwrap_or_default();
-        let system_prompt = if include_system_prompt {
-            let registry_snapshot = registry.snapshot().await;
-            resolve_export_system_prompt(&registry_snapshot, detail.agent_id.as_deref())
-        } else {
-            None
-        };
-        (
-            format_session_detail_as_markdown(
-                &detail,
-                &todos,
-                usage.as_ref(),
-                project_config.as_ref(),
-                include_system_prompt,
-                system_prompt.as_deref(),
-            ),
-            "session-store-fallback",
+    tokio::task::spawn_blocking(move || {
+        crate::session::context_export::export_session_context_yaml(
+            &snapshot_store,
+            &session_id,
+            &working_dir,
+            legacy_rounds.as_deref(),
+            Some(&live_snapshot),
+            &output_path,
         )
-    };
-
-    std::fs::write(&file_path, markdown.as_bytes())
-        .map_err(|e| format!("Failed to write file: {}", e))?;
-
-    eprintln!(
-        "[Locus] saved context export ({}, system_prompt={}) for session {} to {}",
-        export_mode, include_system_prompt, session_id, file_path
-    );
-    Ok(file_path)
-}
-
-#[derive(Debug, Clone)]
-struct ExportProjectConfig {
-    working_dir: String,
-    knowledge_enabled: bool,
-    full_text_search_enabled: bool,
-    semantic_search_enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-struct ExportEnabledTool {
-    name: String,
-    description: String,
-}
-
-fn load_export_project_config(working_dir: &str) -> Option<ExportProjectConfig> {
-    let trimmed = working_dir.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let knowledge_root = knowledge_store::knowledge_root(trimmed);
-    let knowledge_enabled = knowledge_root.is_dir()
-        && std::fs::read_dir(&knowledge_root)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .any(|entry| entry.path().is_dir())
-                    .then_some(())
-            })
-            .is_some();
-
-    Some(ExportProjectConfig {
-        working_dir: trimmed.to_string(),
-        knowledge_enabled,
-        full_text_search_enabled: knowledge_enabled,
-        semantic_search_enabled: knowledge_enabled,
     })
-}
-
-fn format_enabled_state(enabled: bool) -> &'static str {
-    if enabled {
-        "Enabled"
-    } else {
-        "Disabled"
-    }
-}
-
-const EMPTY_EXPORT_FIELD: &str = "empty";
-
-fn append_project_config_markdown(out: &mut String, project_config: Option<&ExportProjectConfig>) {
-    out.push_str("## Current Project Configuration\n\n");
-    if let Some(config) = project_config {
-        out.push_str(&format!("- **Workspace:** `{}`\n", config.working_dir));
-        out.push_str(&format!(
-            "- **Knowledge:** {}\n",
-            format_enabled_state(config.knowledge_enabled)
-        ));
-        out.push_str(&format!(
-            "- **Full-text Search:** {}\n",
-            format_enabled_state(config.full_text_search_enabled)
-        ));
-        out.push_str(&format!(
-            "- **Semantic Search:** {}\n",
-            format_enabled_state(config.semantic_search_enabled)
-        ));
-    } else {
-        out.push_str("- Project configuration unavailable: no workspace is currently selected.\n");
-    }
-    out.push_str("\n---\n\n");
-}
-
-fn extract_enabled_tools(rounds: &[crate::agent::instance::RawRound]) -> Vec<ExportEnabledTool> {
-    let Some(tool_values) = rounds.iter().rev().find_map(|round| {
-        round
-            .request
-            .get("tools")
-            .and_then(|value| value.as_array())
-    }) else {
-        return Vec::new();
-    };
-
-    tool_values
-        .iter()
-        .filter_map(parse_export_enabled_tool)
-        .collect()
-}
-
-fn parse_export_enabled_tool(value: &serde_json::Value) -> Option<ExportEnabledTool> {
-    let function = value.get("function").unwrap_or(value);
-    let name = function
-        .get("name")
-        .and_then(|field| field.as_str())
-        .or_else(|| value.get("name").and_then(|field| field.as_str()))?
-        .trim();
-    if name.is_empty() {
-        return None;
-    }
-
-    let description = function
-        .get("description")
-        .and_then(|field| field.as_str())
-        .or_else(|| value.get("description").and_then(|field| field.as_str()))
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    Some(ExportEnabledTool {
-        name: name.to_string(),
-        description,
-    })
-}
-
-fn append_enabled_tools_markdown(out: &mut String, tools: &[ExportEnabledTool]) {
-    out.push_str("## Enabled Tools\n\n");
-    if tools.is_empty() {
-        out.push_str("- No tools were enabled in the latest captured request.\n");
-        out.push_str("\n---\n\n");
-        return;
-    }
-
-    out.push_str(&format!("- **Count:** {}\n\n", tools.len()));
-    for tool in tools {
-        out.push_str(&format!("### `{}`\n\n", tool.name));
-        if tool.description.is_empty() {
-            out.push_str("*(No description provided)*\n\n");
-        } else {
-            out.push_str(&tool.description);
-            out.push_str("\n\n");
-        }
-    }
-    out.push_str("---\n\n");
-}
-
-fn format_export_timestamp(ts: i64) -> String {
-    use chrono::{Local, TimeZone};
-
-    Local
-        .timestamp_opt(ts, 0)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| ts.to_string())
-}
-
-fn export_optional_text(value: Option<&str>) -> serde_json::Value {
-    let trimmed = value.unwrap_or("").trim();
-    if trimmed.is_empty() {
-        json!(EMPTY_EXPORT_FIELD)
-    } else {
-        json!(trimmed)
-    }
-}
-
-fn export_optional_u32(value: Option<u32>) -> serde_json::Value {
-    match value {
-        Some(value) => json!(value),
-        None => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn export_context_usage_value(value: u32, limit: u32) -> serde_json::Value {
-    if limit > 0 {
-        json!(value)
-    } else {
-        json!(EMPTY_EXPORT_FIELD)
-    }
-}
-
-fn export_optional_tool_outcome(
-    value: Option<crate::commands::ToolCallOutcome>,
-) -> serde_json::Value {
-    match value {
-        Some(value) => json!(value),
-        None => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn export_optional_server_tool(
-    value: Option<&crate::session::models::ServerToolKind>,
-) -> serde_json::Value {
-    match value {
-        Some(value) => json!(value),
-        None => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn export_tool_call(tool_call: &crate::session::models::ToolCallInfo) -> serde_json::Value {
-    json!({
-        "id": tool_call.id,
-        "name": tool_call.name,
-        "arguments": tool_call.arguments,
-        "order": export_optional_u32(tool_call.order),
-        "serverTool": export_optional_server_tool(tool_call.server_tool.as_ref()),
-        "serverToolOutput": export_optional_text(tool_call.server_tool_output.as_deref()),
-        "outcome": export_optional_tool_outcome(tool_call.outcome),
-        "recordedOutput": export_optional_text(tool_call.recorded_output.as_deref()),
-        "nestedToolCalls": export_tool_calls(tool_call.nested_tool_calls.as_deref()),
-    })
-}
-
-fn export_tool_calls(
-    tool_calls: Option<&[crate::session::models::ToolCallInfo]>,
-) -> serde_json::Value {
-    match tool_calls {
-        Some(tool_calls) if !tool_calls.is_empty() => {
-            json!(tool_calls.iter().map(export_tool_call).collect::<Vec<_>>())
-        }
-        _ => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn export_images(images: Option<&[ImageData]>) -> serde_json::Value {
-    match images {
-        Some(images) if !images.is_empty() => json!(images
-            .iter()
-            .map(|image| json!({
-                "mimeType": image.mime_type,
-                "dataLength": image.data.len(),
-            }))
-            .collect::<Vec<_>>()),
-        _ => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn export_asset_refs(asset_refs: Option<&[AssetRefData]>) -> serde_json::Value {
-    match asset_refs {
-        Some(asset_refs) if !asset_refs.is_empty() => json!(asset_refs),
-        _ => json!(EMPTY_EXPORT_FIELD),
-    }
-}
-
-fn append_json_block(out: &mut String, title: &str, value: &serde_json::Value, level: usize) {
-    let heading = "#".repeat(level.clamp(1, 6));
-    out.push_str(&format!("{} {}\n\n```json\n", heading, title));
-    match serde_json::to_string_pretty(value) {
-        Ok(text) => out.push_str(&text),
-        Err(_) => out.push_str("{\"error\":\"failed to serialize export block\"}"),
-    }
-    out.push_str("\n```\n\n");
-}
-
-fn append_text_block(out: &mut String, title: &str, value: Option<&str>, level: usize) {
-    let heading = "#".repeat(level.clamp(1, 6));
-    out.push_str(&format!("{} {}\n\n", heading, title));
-
-    let raw = value.unwrap_or("");
-    if raw.trim().is_empty() {
-        out.push_str("`empty`\n\n");
-        return;
-    }
-
-    out.push_str("```text\n");
-    out.push_str(raw);
-    if !raw.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("```\n\n");
-}
-
-fn append_system_prompt_block(out: &mut String, system_prompt: Option<&str>, level: usize) {
-    let heading = "#".repeat(level.clamp(1, 6));
-    out.push_str(&format!("{} System Prompt\n\n", heading));
-
-    match system_prompt.map(str::trim).filter(|text| !text.is_empty()) {
-        Some(text) => {
-            out.push_str(text);
-            out.push_str("\n\n");
-        }
-        None => out.push_str("`empty`\n\n"),
-    }
-}
-
-fn resolve_export_system_prompt(
-    registry: &Arc<AgentDefRegistry>,
-    agent_id: Option<&str>,
-) -> Option<String> {
-    let canonical_id = canonical_agent_id(agent_id?);
-    let prompt = registry.get(canonical_id)?.system_prompt.trim().to_string();
-    if prompt.is_empty() {
-        None
-    } else {
-        Some(prompt)
-    }
-}
-
-fn format_session_detail_as_markdown(
-    detail: &SessionDetail,
-    todos: &[TodoItem],
-    usage: Option<&TokenUsage>,
-    project_config: Option<&ExportProjectConfig>,
-    include_system_prompt: bool,
-    system_prompt: Option<&str>,
-) -> String {
-    let mut out = String::with_capacity(16 * 1024);
-
-    out.push_str("# Locus Conversation Log\n\n");
-    out.push_str(&format!("- **Session:** `{}`\n", detail.id));
-    out.push_str("- **Export Source:** `session-store-fallback`\n");
-    out.push_str("- **Raw Rounds:** `empty`\n");
-    out.push_str(&format!("- **Messages:** {}\n", detail.messages.len()));
-    out.push_str(&format!(
-        "- **Missing Field Marker:** `{}`\n\n",
-        EMPTY_EXPORT_FIELD
-    ));
-    out.push_str(
-        "## Export Note\n\nRaw request/response rounds were unavailable in memory for this session. \
-This export was reconstructed from the persisted session store. Any field unavailable after \
-migration is written as `empty`.\n\n",
-    );
-    if include_system_prompt {
-        out.push_str(
-            "System Prompt reflects the current agent definition for this session when available.\n\n",
-        );
-    }
-    out.push_str("---\n\n");
-
-    append_project_config_markdown(&mut out, project_config);
-    if include_system_prompt {
-        append_system_prompt_block(&mut out, system_prompt, 2);
-        out.push_str("---\n\n");
-    }
-
-    let session_metadata = json!({
-        "sessionId": detail.id,
-        "title": export_optional_text(Some(&detail.title)),
-        "agentId": export_optional_text(detail.agent_id.as_deref()),
-        "sessionType": export_optional_text(Some(&detail.session_type)),
-        "parentSessionId": export_optional_text(detail.parent_session_id.as_deref()),
-        "latestCompletedRunId": export_optional_text(detail.latest_completed_run_id.as_deref()),
-        "createdAtUnix": detail.created_at,
-        "createdAtLocal": format_export_timestamp(detail.created_at),
-        "updatedAtUnix": detail.updated_at,
-        "updatedAtLocal": format_export_timestamp(detail.updated_at),
-    });
-    append_json_block(&mut out, "Session Metadata", &session_metadata, 2);
-
-    let usage_json = match usage {
-        Some(usage) => json!({
-            "totalInputTokens": usage.total_input_tokens,
-            "totalOutputTokens": usage.total_output_tokens,
-            "totalCacheReadTokens": usage.total_cache_read_tokens,
-            "totalCacheWriteTokens": usage.total_cache_write_tokens,
-            "totalCostUsd": usage.total_cost_usd,
-            "pricedRounds": usage.priced_rounds,
-            "contextTokens": export_context_usage_value(usage.context_tokens, usage.context_limit),
-            "contextLimit": export_context_usage_value(usage.context_limit, usage.context_limit),
-        }),
-        None => json!({
-            "totalInputTokens": EMPTY_EXPORT_FIELD,
-            "totalOutputTokens": EMPTY_EXPORT_FIELD,
-            "totalCacheReadTokens": EMPTY_EXPORT_FIELD,
-            "totalCacheWriteTokens": EMPTY_EXPORT_FIELD,
-            "totalCostUsd": EMPTY_EXPORT_FIELD,
-            "pricedRounds": EMPTY_EXPORT_FIELD,
-            "contextTokens": EMPTY_EXPORT_FIELD,
-            "contextLimit": EMPTY_EXPORT_FIELD,
-        }),
-    };
-    append_json_block(&mut out, "Token Usage", &usage_json, 2);
-
-    let todos_json = if todos.is_empty() {
-        json!(EMPTY_EXPORT_FIELD)
-    } else {
-        json!(todos)
-    };
-    append_json_block(&mut out, "Todos", &todos_json, 2);
-
-    let pending_inputs_json = if detail.pending_inputs.is_empty() {
-        json!(EMPTY_EXPORT_FIELD)
-    } else {
-        json!(detail.pending_inputs)
-    };
-    append_json_block(&mut out, "Pending Inputs", &pending_inputs_json, 2);
-
-    out.push_str("## Messages\n\n");
-    if detail.messages.is_empty() {
-        out.push_str("`empty`\n\n");
-        return out;
-    }
-
-    for (index, message) in detail.messages.iter().enumerate() {
-        let metadata = json!({
-            "messageIndex": index + 1,
-            "id": message.id,
-            "role": message.role,
-            "createdAtUnix": message.created_at,
-            "createdAtLocal": format_export_timestamp(message.created_at),
-            "promptPrefix": export_optional_text(message.prompt_prefix.as_deref()),
-            "promptSuffix": export_optional_text(message.prompt_suffix.as_deref()),
-            "responseId": export_optional_text(message.response_id.as_deref()),
-            "contentOrder": export_optional_u32(message.content_order),
-            "thinkingOrder": export_optional_u32(message.thinking_order),
-            "renderParts": message
-                .render_parts
-                .as_ref()
-                .map(|parts| json!(parts))
-                .unwrap_or_else(|| json!(EMPTY_EXPORT_FIELD)),
-            "toolCalls": export_tool_calls(message.tool_calls.as_deref()),
-            "toolCallId": export_optional_text(message.tool_call_id.as_deref()),
-            "images": export_images(message.images.as_deref()),
-            "assetRefs": export_asset_refs(message.asset_refs.as_deref()),
-            "thinkingContent": export_optional_text(message.thinking_content.as_deref()),
-            "thinkingDuration": export_optional_u32(message.thinking_duration),
-            "thinkingSignature": export_optional_text(message.thinking_signature.as_deref()),
-            "knowledgeProposal": message
-                .knowledge_proposal
-                .as_ref()
-                .map(|proposal| json!(proposal))
-                .unwrap_or_else(|| json!(EMPTY_EXPORT_FIELD)),
-        });
-
-        append_json_block(&mut out, &format!("Message {}", index + 1), &metadata, 3);
-        append_text_block(&mut out, "Content", Some(&message.content), 4);
-        out.push_str("---\n\n");
-    }
-
-    out
-}
-
-fn format_rounds_as_markdown(
-    session_id: &str,
-    rounds: &[crate::agent::instance::RawRound],
-    usage: Option<&TokenUsage>,
-    project_config: Option<&ExportProjectConfig>,
-    include_system_prompt: bool,
-) -> String {
-    let mut out = String::with_capacity(16 * 1024);
-
-    out.push_str("# Locus Conversation Log\n\n");
-    out.push_str(&format!("- **Session:** `{}`\n", session_id));
-    out.push_str("- **Export Source:** `raw-rounds`\n");
-    out.push_str(&format!("- **Rounds:** {}\n", rounds.len()));
-    let model = rounds
-        .first()
-        .and_then(|first| first.request.get("model"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(EMPTY_EXPORT_FIELD);
-    out.push_str(&format!("- **Model:** `{}`\n", model));
-    if let Some(u) = usage {
-        out.push_str(&format!(
-            "- **Total Tokens:** {} input / {} output / {} cache read / {} cache write\n",
-            u.total_input_tokens,
-            u.total_output_tokens,
-            u.total_cache_read_tokens,
-            u.total_cache_write_tokens
-        ));
-        if u.context_limit > 0 {
-            out.push_str(&format!(
-                "- **Context Window:** {} / {}\n",
-                u.context_tokens, u.context_limit
-            ));
-        } else {
-            out.push_str(&format!("- **Context Window:** `{}`\n", EMPTY_EXPORT_FIELD));
-        }
-        out.push_str(&format!("- **Total Cost:** ${:.4}\n", u.total_cost_usd));
-    } else {
-        out.push_str(&format!("- **Total Tokens:** `{}`\n", EMPTY_EXPORT_FIELD));
-        out.push_str(&format!("- **Context Window:** `{}`\n", EMPTY_EXPORT_FIELD));
-        out.push_str(&format!("- **Total Cost:** `{}`\n", EMPTY_EXPORT_FIELD));
-    }
-    out.push_str("\n\n");
-    append_project_config_markdown(&mut out, project_config);
-    let enabled_tools = extract_enabled_tools(rounds);
-    append_enabled_tools_markdown(&mut out, &enabled_tools);
-
-    if include_system_prompt {
-        if let Some(first) = rounds.first() {
-            out.push_str("## System Prompt\n\n");
-            if !write_system_prompt_markdown(&mut out, &first.request) {
-                out.push_str("`empty`\n\n");
-            }
-            out.push_str("---\n\n");
-        }
-    }
-
-    let mut prev_msg_count: usize = 0;
-
-    for round in rounds {
-        let time_str = format_export_timestamp(round.timestamp);
-        out.push_str(&format!("## Round {} ({})\n\n", round.round, time_str));
-        let attempt_metadata = round.request.get("_locusAttempt");
-        if let Some(metadata) = attempt_metadata {
-            format_raw_attempt_metadata(&mut out, metadata);
-        }
-
-        if let Some(messages) = extract_request_history_items(&round.request) {
-            let new_messages = if prev_msg_count < messages.len() {
-                &messages[prev_msg_count..]
-            } else {
-                &messages[..]
-            };
-            prev_msg_count = messages.len();
-
-            format_request_history_items(&mut out, new_messages);
-        }
-
-        out.push_str("### 🤖 Assistant\n\n");
-        if let Some(metadata) = attempt_metadata {
-            let completed = metadata
-                .get("completed")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            if completed {
-                parse_sse_response(&mut out, &round.response);
-            } else {
-                out.push_str("*(attempt failed before a completed assistant response)*\n\n");
-                if let Some(error) = metadata
-                    .get("responseOrError")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    write_text_code_block(&mut out, error);
-                }
-            }
-        } else {
-            parse_sse_response(&mut out, &round.response);
-        }
-        out.push_str("\n---\n\n");
-    }
-
-    out
-}
-
-fn format_raw_attempt_metadata(out: &mut String, metadata: &serde_json::Value) {
-    out.push_str("### Attempt Metadata\n\n");
-    let kind = metadata
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .unwrap_or(EMPTY_EXPORT_FIELD);
-    let attempt = metadata
-        .get("attempt")
-        .and_then(|value| value.as_u64())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| EMPTY_EXPORT_FIELD.to_string());
-    let completed = metadata
-        .get("completed")
-        .and_then(|value| value.as_bool())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| EMPTY_EXPORT_FIELD.to_string());
-    let estimated_tokens = metadata
-        .get("estimatedTokens")
-        .and_then(|value| value.as_u64())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| EMPTY_EXPORT_FIELD.to_string());
-    let used_previous_response_id = metadata
-        .get("usedPreviousResponseId")
-        .and_then(|value| {
-            if value.is_null() {
-                None
-            } else {
-                value.as_bool().map(|inner| inner.to_string())
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    out.push_str(&format!("- **Kind:** `{}`\n", kind));
-    out.push_str(&format!("- **Attempt:** `{}`\n", attempt));
-    out.push_str(&format!("- **Completed:** `{}`\n", completed));
-    out.push_str(&format!("- **Estimated Tokens:** `{}`\n", estimated_tokens));
-    out.push_str(&format!(
-        "- **Used previous_response_id:** `{}`\n",
-        used_previous_response_id
-    ));
-    out.push_str(
-        "- **Note:** failed attempts are captured from the local request view before a completed raw response exists.\n\n",
-    );
-}
-
-fn extract_request_history_items(request: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
-    request
-        .get("messages")
-        .and_then(|value| value.as_array())
-        .or_else(|| request.get("input").and_then(|value| value.as_array()))
-}
-
-#[derive(Clone, Copy)]
-struct ExportRequestToolCall<'a> {
-    name: Option<&'a str>,
-    call_id: Option<&'a str>,
-    arguments: Option<&'a serde_json::Value>,
-}
-
-impl<'a> ExportRequestToolCall<'a> {
-    fn from_item(item: &'a serde_json::Value) -> Self {
-        Self {
-            name: item.get("name").and_then(|value| value.as_str()),
-            call_id: item
-                .get("call_id")
-                .and_then(|value| value.as_str())
-                .or_else(|| item.get("id").and_then(|value| value.as_str())),
-            arguments: item.get("arguments"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ExportRequestToolOutput<'a> {
-    call_id: Option<&'a str>,
-    output: Option<&'a serde_json::Value>,
-}
-
-impl<'a> ExportRequestToolOutput<'a> {
-    fn from_item(item: &'a serde_json::Value) -> Self {
-        Self {
-            call_id: item
-                .get("call_id")
-                .and_then(|value| value.as_str())
-                .or_else(|| item.get("tool_use_id").and_then(|value| value.as_str())),
-            output: item.get("output").or_else(|| item.get("content")),
-        }
-    }
-}
-
-fn format_request_history_items(out: &mut String, items: &[serde_json::Value]) {
-    let mut index = 0usize;
-    while index < items.len() {
-        if is_request_function_call_item(&items[index]) {
-            index = format_request_tool_call_batch(out, items, index);
-            continue;
-        }
-        format_request_history_item(out, &items[index]);
-        index += 1;
-    }
-}
-
-fn is_request_function_call_item(item: &serde_json::Value) -> bool {
-    item.get("type").and_then(|value| value.as_str()) == Some("function_call")
-}
-
-fn is_request_function_call_output_item(item: &serde_json::Value) -> bool {
-    item.get("type").and_then(|value| value.as_str()) == Some("function_call_output")
-}
-
-fn format_request_tool_call_batch(
-    out: &mut String,
-    items: &[serde_json::Value],
-    start_index: usize,
-) -> usize {
-    let mut index = start_index;
-    let mut tool_calls: Vec<ExportRequestToolCall<'_>> = Vec::new();
-    while index < items.len() && is_request_function_call_item(&items[index]) {
-        tool_calls.push(ExportRequestToolCall::from_item(&items[index]));
-        index += 1;
-    }
-
-    let mut pending_outputs: Vec<ExportRequestToolOutput<'_>> = Vec::new();
-    while index < items.len() && is_request_function_call_output_item(&items[index]) {
-        pending_outputs.push(ExportRequestToolOutput::from_item(&items[index]));
-        index += 1;
-    }
-
-    for tool_call in tool_calls {
-        format_assistant_tool_call_message(out, tool_call.name, tool_call.arguments);
-
-        let Some(call_id) = tool_call.call_id.filter(|value| !value.is_empty()) else {
-            continue;
-        };
-
-        let mut remaining_outputs = Vec::with_capacity(pending_outputs.len());
-        for tool_output in pending_outputs {
-            if tool_output.call_id == Some(call_id) {
-                format_tool_output_message(out, tool_output.call_id, tool_output.output);
-            } else {
-                remaining_outputs.push(tool_output);
-            }
-        }
-        pending_outputs = remaining_outputs;
-    }
-
-    for tool_output in pending_outputs {
-        format_tool_output_message(out, tool_output.call_id, tool_output.output);
-    }
-
-    index
-}
-
-fn write_system_prompt_markdown(out: &mut String, request: &serde_json::Value) -> bool {
-    write_text_blocks_markdown(out, request.get("system"))
-        || write_text_blocks_markdown(out, request.get("instructions"))
-}
-
-fn write_text_blocks_markdown(out: &mut String, value: Option<&serde_json::Value>) -> bool {
-    match value {
-        Some(serde_json::Value::String(text)) if !text.is_empty() => {
-            out.push_str(text);
-            out.push_str("\n\n");
-            true
-        }
-        Some(serde_json::Value::Array(items)) if !items.is_empty() => {
-            let mut wrote_any = false;
-            for item in items {
-                if let Some(text) = extract_text_block(item) {
-                    if !text.is_empty() {
-                        out.push_str(text);
-                        out.push_str("\n\n");
-                        wrote_any = true;
-                    }
-                }
-            }
-            wrote_any
-        }
-        _ => false,
-    }
-}
-
-fn extract_text_block(value: &serde_json::Value) -> Option<&str> {
-    match value {
-        serde_json::Value::String(text) => Some(text.as_str()),
-        serde_json::Value::Object(_) => value.get("text").and_then(|inner| inner.as_str()),
-        _ => None,
-    }
-}
-
-fn format_request_history_item(out: &mut String, item: &serde_json::Value) {
-    if let Some(role) = item.get("role").and_then(|value| value.as_str()) {
-        match role {
-            "user" => format_user_message(out, item.get("content")),
-            "assistant" => format_assistant_from_request(out, item.get("content")),
-            _ => {}
-        }
-        return;
-    }
-
-    match item.get("type").and_then(|value| value.as_str()) {
-        Some("function_call") => format_assistant_tool_call_message(
-            out,
-            item.get("name").and_then(|value| value.as_str()),
-            item.get("arguments"),
-        ),
-        Some("function_call_output") => format_tool_output_message(
-            out,
-            item.get("call_id").and_then(|value| value.as_str()),
-            item.get("output"),
-        ),
-        _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        append_enabled_tools_markdown, append_project_config_markdown, extract_enabled_tools,
-        format_rounds_as_markdown, format_session_detail_as_markdown, parse_sse_response,
-        ExportEnabledTool, ExportProjectConfig, EMPTY_EXPORT_FIELD,
-    };
-    use crate::session::models::{ChatMessage, MessageRole, SessionDetail, ToolCallInfo};
-    use crate::session::store::SessionStore;
-    use rusqlite::{params, Connection};
-    use tempfile::tempdir;
-
-    #[test]
-    fn project_config_section_includes_workspace_flags() {
-        let mut out = String::new();
-        append_project_config_markdown(
-            &mut out,
-            Some(&ExportProjectConfig {
-                working_dir: "F:/Proj".to_string(),
-                knowledge_enabled: true,
-                full_text_search_enabled: false,
-                semantic_search_enabled: true,
-            }),
-        );
-
-        assert!(out.contains("## Current Project Configuration"));
-        assert!(out.contains("- **Workspace:** `F:/Proj`"));
-        assert!(out.contains("- **Knowledge:** Enabled"));
-        assert!(out.contains("- **Full-text Search:** Disabled"));
-        assert!(out.contains("- **Semantic Search:** Enabled"));
-    }
-
-    #[test]
-    fn project_config_section_reports_missing_workspace() {
-        let mut out = String::new();
-        append_project_config_markdown(&mut out, None);
-
-        assert!(out.contains("Project configuration unavailable"));
-    }
-
-    #[test]
-    fn extract_enabled_tools_supports_openai_and_anthropic_shapes() {
-        let rounds = vec![crate::agent::instance::RawRound {
-            round: 1,
-            timestamp: 0,
-            request: serde_json::json!({
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "read",
-                            "description": "Read a file from disk"
-                        }
-                    },
-                    {
-                        "name": "bash",
-                        "description": "Run a shell command"
-                    }
-                ]
-            }),
-            response: String::new(),
-        }];
-
-        let tools = extract_enabled_tools(&rounds);
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "read");
-        assert_eq!(tools[0].description, "Read a file from disk");
-        assert_eq!(tools[1].name, "bash");
-        assert_eq!(tools[1].description, "Run a shell command");
-    }
-
-    #[test]
-    fn enabled_tools_markdown_lists_names_and_descriptions() {
-        let mut out = String::new();
-        append_enabled_tools_markdown(
-            &mut out,
-            &[
-                ExportEnabledTool {
-                    name: "read".to_string(),
-                    description: "Read a file from disk".to_string(),
-                },
-                ExportEnabledTool {
-                    name: "bash".to_string(),
-                    description: "Run a shell command".to_string(),
-                },
-            ],
-        );
-
-        assert!(out.contains("## Enabled Tools"));
-        assert!(out.contains("- **Count:** 2"));
-        assert!(out.contains("### `read`"));
-        assert!(out.contains("Read a file from disk"));
-        assert!(out.contains("### `bash`"));
-        assert!(out.contains("Run a shell command"));
-    }
-
-    #[test]
-    fn raw_context_export_marks_missing_model_and_system_as_empty() {
-        let markdown = format_rounds_as_markdown(
-            "session-1",
-            &[crate::agent::instance::RawRound {
-                round: 1,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "messages": []
-                }),
-                response: String::new(),
-            }],
-            None,
-            None,
-            true,
-        );
-
-        assert!(markdown.contains("- **Model:** `empty`"));
-        assert!(markdown.contains("- **Total Tokens:** `empty`"));
-        assert!(markdown.contains("## System Prompt"));
-        assert!(markdown.contains("`empty`"));
-    }
-
-    #[test]
-    fn raw_context_export_omits_system_prompt_section_when_disabled() {
-        let markdown = format_rounds_as_markdown(
-            "session-1",
-            &[crate::agent::instance::RawRound {
-                round: 1,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "instructions": "You are a helpful assistant.",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": "hello"
-                        }
-                    ]
-                }),
-                response: String::new(),
-            }],
-            None,
-            None,
-            false,
-        );
-
-        assert!(!markdown.contains("## System Prompt"));
-        assert!(!markdown.contains("You are a helpful assistant."));
-        assert!(markdown.contains("### 👤 User"));
-    }
-
-    #[test]
-    fn raw_context_export_supports_codex_request_and_response_shapes() {
-        let markdown = format_rounds_as_markdown(
-            "session-codex",
-            &[crate::agent::instance::RawRound {
-                round: 1,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "model": "gpt-5.3-codex-spark",
-                    "instructions": "You are a helpful assistant.",
-                    "input": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "尘之回声是什么游戏"
-                                }
-                            ]
-                        }
-                    ]
-                }),
-                response: concat!(
-                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"《尘之回声》是\"}\n\n",
-                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"一款俯视角动作冒险游戏。\"}\n\n",
-                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}}\n\n"
-                )
-                .to_string(),
-            }],
-            None,
-            None,
-            true,
-        );
-
-        assert!(markdown.contains("## System Prompt"));
-        assert!(markdown.contains("You are a helpful assistant."));
-        assert!(markdown.contains("### 👤 User"));
-        assert!(markdown.contains("尘之回声是什么游戏"));
-        assert!(markdown.contains("### 🤖 Assistant"));
-        assert!(markdown.contains("《尘之回声》是一款俯视角动作冒险游戏。"));
-    }
-
-    #[test]
-    fn raw_context_export_keeps_full_tool_output() {
-        let long_output = "A".repeat(2500);
-        let markdown = format_rounds_as_markdown(
-            "session-tool-output",
-            &[crate::agent::instance::RawRound {
-                round: 1,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "model": "gpt-5.4",
-                    "input": [
-                        {
-                            "type": "function_call_output",
-                            "call_id": "call_1",
-                            "output": long_output.clone()
-                        }
-                    ]
-                }),
-                response: String::new(),
-            }],
-            None,
-            None,
-            false,
-        );
-
-        assert!(markdown.contains("### Tool Output"));
-        assert!(markdown.contains("*Call ID: `call_1`*"));
-        assert!(markdown.contains(&long_output));
-        assert!(!markdown.contains("... (truncated)"));
-    }
-
-    #[test]
-    fn raw_context_export_includes_failed_attempt_metadata() {
-        let markdown = format_rounds_as_markdown(
-            "session-failed-attempt",
-            &[crate::agent::instance::RawRound {
-                round: 12,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "_locusAttempt": {
-                        "kind": "reactive_compact",
-                        "attempt": 1,
-                        "completed": false,
-                        "estimatedTokens": 269383,
-                        "usedPreviousResponseId": false,
-                        "responseOrError": "input exceeds context"
-                    },
-                    "model": "gpt-5.5",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": "continue"
-                        }
-                    ],
-                    "tools": []
-                }),
-                response: "input exceeds context".to_string(),
-            }],
-            None,
-            None,
-            false,
-        );
-
-        assert!(markdown.contains("### Attempt Metadata"));
-        assert!(markdown.contains("- **Kind:** `reactive_compact`"));
-        assert!(markdown.contains("- **Estimated Tokens:** `269383`"));
-        assert!(markdown.contains("attempt failed before a completed assistant response"));
-        assert!(markdown.contains("input exceeds context"));
-    }
-
-    #[test]
-    fn raw_context_export_interleaves_parallel_tool_outputs_with_matching_calls() {
-        let markdown = format_rounds_as_markdown(
-            "session-parallel-tools",
-            &[crate::agent::instance::RawRound {
-                round: 1,
-                timestamp: 0,
-                request: serde_json::json!({
-                    "model": "gpt-5.4",
-                    "input": [
-                        {
-                            "type": "function_call",
-                            "call_id": "call_list",
-                            "name": "list",
-                            "arguments": {
-                                "path": "C:\\\\repo"
-                            }
-                        },
-                        {
-                            "type": "function_call",
-                            "call_id": "call_grep",
-                            "name": "grep",
-                            "arguments": {
-                                "pattern": "TODO"
-                            }
-                        },
-                        {
-                            "type": "function_call_output",
-                            "call_id": "call_grep",
-                            "output": "grep output"
-                        },
-                        {
-                            "type": "function_call_output",
-                            "call_id": "call_list",
-                            "output": "list output"
-                        }
-                    ]
-                }),
-                response: String::new(),
-            }],
-            None,
-            None,
-            false,
-        );
-
-        let list_call_index = markdown
-            .find("**Tool call: `list`**")
-            .expect("list tool call");
-        let list_output_index = markdown.find("list output").expect("list output");
-        let grep_call_index = markdown
-            .find("**Tool call: `grep`**")
-            .expect("grep tool call");
-        let grep_output_index = markdown.find("grep output").expect("grep output");
-
-        assert!(list_call_index < list_output_index);
-        assert!(list_output_index < grep_call_index);
-        assert!(grep_call_index < grep_output_index);
-    }
-
-    #[test]
-    fn parse_sse_response_supports_responses_event_blocks() {
-        let mut out = String::new();
-        parse_sse_response(
-            &mut out,
-            concat!(
-                "event: response.output_text.delta\n",
-                "data: {\"delta\":\"First answer.\"}\n\n",
-                "event: response.output_text.delta\n",
-                "data: {\"delta\":\" More detail.\"}\n\n",
-                "event: response.completed\n",
-                "data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
-            ),
-        );
-
-        assert!(out.contains("First answer. More detail."));
-    }
-
-    #[test]
-    fn parse_sse_response_supports_openai_reasoning_content() {
-        let mut out = String::new();
-        parse_sse_response(
-            &mut out,
-            concat!(
-                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Think.\"},\"finish_reason\":null}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n"
-            ),
-        );
-
-        assert!(out.contains("<details><summary>Thinking</summary>"));
-        assert!(out.contains("Think."));
-        assert!(out.contains("Answer."));
-    }
-
-    #[test]
-    fn session_export_marks_missing_optional_fields_as_empty() {
-        let detail = SessionDetail {
-            id: "session-1".to_string(),
-            title: "Migrated Session".to_string(),
-            agent_id: None,
-            model_id: None,
-            effort: None,
-            session_type: "chat".to_string(),
-            parent_session_id: None,
-            latest_completed_run_id: None,
-            created_at: 10,
-            updated_at: 20,
-            messages: vec![ChatMessage {
-                id: "message-1".to_string(),
-                role: MessageRole::Assistant,
-                content: "hello".to_string(),
-                created_at: 10,
-                prompt_prefix: None,
-                prompt_suffix: None,
-                response_id: None,
-                content_order: None,
-                thinking_order: None,
-                tool_calls: None,
-                tool_call_id: None,
-                images: None,
-                asset_refs: None,
-                thinking_content: None,
-                thinking_duration: None,
-                thinking_signature: None,
-                knowledge_proposal: None,
-                render_parts: None,
-            }],
-            pending_inputs: vec![],
-            runtime: None,
-        };
-
-        let markdown = format_session_detail_as_markdown(&detail, &[], None, None, true, None);
-
-        assert!(markdown.contains("session-store-fallback"));
-        assert!(markdown.contains("\"agentId\": \"empty\""));
-        assert!(markdown.contains("\"parentSessionId\": \"empty\""));
-        assert!(markdown.contains("\"latestCompletedRunId\": \"empty\""));
-        assert!(markdown.contains("## Pending Inputs"));
-        assert!(markdown.contains("\"promptPrefix\": \"empty\""));
-        assert!(markdown.contains("\"promptSuffix\": \"empty\""));
-        assert!(markdown.contains("\"responseId\": \"empty\""));
-        assert!(markdown.contains("\"contentOrder\": \"empty\""));
-        assert!(markdown.contains("\"thinkingOrder\": \"empty\""));
-        assert!(markdown.contains("\"toolCalls\": \"empty\""));
-        assert!(markdown.contains("\"toolCallId\": \"empty\""));
-        assert!(markdown.contains("\"images\": \"empty\""));
-        assert!(markdown.contains("\"assetRefs\": \"empty\""));
-        assert!(markdown.contains("\"thinkingContent\": \"empty\""));
-        assert!(markdown.contains("\"thinkingDuration\": \"empty\""));
-        assert!(markdown.contains("\"knowledgeProposal\": \"empty\""));
-        assert!(markdown.contains(&format!("`{}`", EMPTY_EXPORT_FIELD)));
-    }
-
-    #[test]
-    fn session_export_marks_missing_tool_call_fields_as_empty() {
-        let detail = SessionDetail {
-            id: "session-1".to_string(),
-            title: "Migrated Session".to_string(),
-            agent_id: None,
-            model_id: None,
-            effort: None,
-            session_type: "chat".to_string(),
-            parent_session_id: None,
-            latest_completed_run_id: None,
-            created_at: 10,
-            updated_at: 20,
-            messages: vec![ChatMessage {
-                id: "message-1".to_string(),
-                role: MessageRole::Assistant,
-                content: "hello".to_string(),
-                created_at: 10,
-                prompt_prefix: None,
-                prompt_suffix: None,
-                response_id: None,
-                content_order: None,
-                thinking_order: None,
-                tool_calls: Some(vec![ToolCallInfo {
-                    id: "tc-1".to_string(),
-                    name: "read".to_string(),
-                    arguments: "{}".to_string(),
-                    order: None,
-                    server_tool: None,
-                    server_tool_output: None,
-                    outcome: None,
-                    recorded_output: None,
-                    nested_tool_calls: None,
-                }]),
-                tool_call_id: None,
-                images: None,
-                asset_refs: None,
-                thinking_content: None,
-                thinking_duration: None,
-                thinking_signature: None,
-                knowledge_proposal: None,
-                render_parts: None,
-            }],
-            pending_inputs: vec![],
-            runtime: None,
-        };
-
-        let markdown = format_session_detail_as_markdown(&detail, &[], None, None, true, None);
-
-        assert!(markdown.contains("\"serverTool\": \"empty\""));
-        assert!(markdown.contains("\"order\": \"empty\""));
-        assert!(markdown.contains("\"serverToolOutput\": \"empty\""));
-        assert!(markdown.contains("\"outcome\": \"empty\""));
-        assert!(markdown.contains("\"recordedOutput\": \"empty\""));
-        assert!(markdown.contains("\"nestedToolCalls\": \"empty\""));
-    }
-
-    #[test]
-    fn session_export_includes_system_prompt_when_provided() {
-        let detail = SessionDetail {
-            id: "session-2".to_string(),
-            title: "Session With Agent".to_string(),
-            agent_id: Some("dev".to_string()),
-            model_id: None,
-            effort: None,
-            session_type: "chat".to_string(),
-            parent_session_id: None,
-            latest_completed_run_id: Some("run-2".to_string()),
-            created_at: 10,
-            updated_at: 20,
-            messages: vec![],
-            pending_inputs: vec![],
-            runtime: None,
-        };
-
-        let markdown = format_session_detail_as_markdown(
-            &detail,
-            &[],
-            None,
-            None,
-            true,
-            Some("You are a helpful assistant."),
-        );
-
-        assert!(markdown.contains("## System Prompt"));
-        assert!(markdown.contains("You are a helpful assistant."));
-        assert!(markdown.contains("current agent definition"));
-    }
-
-    #[test]
-    fn migrated_v9_session_can_still_export_after_store_upgrade() {
-        let dir = tempdir().expect("create temp dir");
-        let db_path = dir.path().join("locus.db");
-        let conn = Connection::open(&db_path).expect("create db");
-
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-                workspace_id TEXT,
-                session_type TEXT NOT NULL DEFAULT 'chat',
-                agent_id TEXT,
-                archived_at INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-             );
-             CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
-             CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
-
-             CREATE TABLE messages (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                prompt_prefix TEXT,
-                prompt_suffix TEXT,
-                tool_calls TEXT,
-                tool_call_id TEXT,
-                images TEXT,
-                thinking_content TEXT,
-                thinking_duration INTEGER,
-                thinking_signature TEXT,
-                metadata_json TEXT
-             );
-             CREATE INDEX idx_messages_session ON messages(session_id);
-
-             CREATE TABLE token_usage (
-                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-                total_input_tokens INTEGER NOT NULL DEFAULT 0,
-                total_output_tokens INTEGER NOT NULL DEFAULT 0,
-                total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                total_cost_usd REAL NOT NULL DEFAULT 0,
-                priced_rounds INTEGER NOT NULL DEFAULT 0
-             );
-
-             CREATE TABLE todos (
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                PRIMARY KEY (session_id, position)
-             );
-             CREATE INDEX idx_todos_session ON todos(session_id);
-             PRAGMA user_version = 9;",
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "session.export_write_task_failed",
+            "Failed to write the session context export.",
         )
-        .expect("create v9 schema");
-
-        conn.execute(
-            "INSERT INTO sessions (id, title, parent_session_id, workspace_id, session_type, agent_id, archived_at, created_at, updated_at)
-             VALUES (?1, ?2, NULL, NULL, 'chat', NULL, NULL, 100, 100)",
-            params!["session-1", "Migrated Session"],
-        )
-        .expect("insert session");
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, created_at, prompt_prefix, prompt_suffix, metadata_json)
-             VALUES (?1, ?2, 'user', '历史消息', 100, NULL, NULL, NULL)",
-            params!["message-1", "session-1"],
-        )
-        .expect("insert message");
-        drop(conn);
-
-        let store = SessionStore::new(dir.path()).expect("migrate store");
-        let detail = store.load_session("session-1").expect("load session");
-        let markdown = format_session_detail_as_markdown(&detail, &[], None, None, true, None);
-
-        assert!(markdown.contains("session-store-fallback"));
-        assert!(markdown.contains("历史消息"));
-        assert!(markdown.contains("\"latestCompletedRunId\": \"empty\""));
-        assert!(markdown.contains("\"promptPrefix\": \"empty\""));
-        assert!(markdown.contains("\"promptSuffix\": \"empty\""));
-        assert!(markdown.contains("\"contextTokens\": \"empty\""));
-        assert!(markdown.contains("\"contextLimit\": \"empty\""));
-    }
-}
-
-fn format_user_message(out: &mut String, content: Option<&serde_json::Value>) {
-    out.push_str("### 👤 User\n\n");
-    let mut wrote_any = false;
-    match content {
-        Some(serde_json::Value::String(s)) if !s.is_empty() => {
-            out.push_str(s);
-            out.push_str("\n\n");
-            wrote_any = true;
-        }
-        Some(serde_json::Value::Array(arr)) => {
-            for block in arr {
-                match block.get("type").and_then(|v| v.as_str()) {
-                    Some("text") | Some("input_text") => {
-                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                out.push_str(text);
-                                out.push_str("\n\n");
-                                wrote_any = true;
-                            }
-                        }
-                    }
-                    Some("tool_result") => {
-                        let tool_id = block
-                            .get("tool_use_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        out.push_str(&format!(
-                            "<details><summary>Tool Result ({})</summary>\n\n",
-                            tool_id
-                        ));
-                        if let Some(serde_json::Value::Array(parts)) = block.get("content") {
-                            for part in parts {
-                                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                                    write_text_code_block(out, text);
-                                }
-                            }
-                        } else if let Some(serde_json::Value::String(s)) = block.get("content") {
-                            write_text_code_block(out, s);
-                        }
-                        out.push_str("</details>\n\n");
-                        wrote_any = true;
-                    }
-                    Some("image") | Some("input_image") => {
-                        out.push_str("*(image)*\n\n");
-                        wrote_any = true;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-
-    if !wrote_any {
-        out.push_str("*(empty message)*\n\n");
-    }
-}
-
-fn format_assistant_from_request(out: &mut String, content: Option<&serde_json::Value>) {
-    let mut text_blocks: Vec<String> = Vec::new();
-    let mut tool_names: Vec<String> = Vec::new();
-
-    match content {
-        Some(serde_json::Value::String(text)) if !text.is_empty() => {
-            text_blocks.push(text.clone());
-        }
-        Some(serde_json::Value::Array(arr)) => {
-            for block in arr {
-                match block.get("type").and_then(|v| v.as_str()) {
-                    Some("text") | Some("output_text") => {
-                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                text_blocks.push(text.to_string());
-                            }
-                        }
-                    }
-                    Some("tool_use") => {
-                        if let Some(name) = block.get("name").and_then(|v| v.as_str()) {
-                            tool_names.push(name.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-
-    if !text_blocks.is_empty() || !tool_names.is_empty() {
-        out.push_str("### Assistant (prior context)\n\n");
-        for text in text_blocks {
-            out.push_str(&text);
-            out.push_str("\n\n");
-        }
-        if !tool_names.is_empty() {
-            out.push_str(&format!("*Tool calls: {}*\n\n", tool_names.join(", ")));
-        }
-    }
-}
-
-fn format_assistant_tool_call_message(
-    out: &mut String,
-    name: Option<&str>,
-    arguments: Option<&serde_json::Value>,
-) {
-    out.push_str("### Assistant (prior context)\n\n");
-    out.push_str(&format!(
-        "**Tool call: `{}`**\n\n",
-        name.filter(|value| !value.is_empty()).unwrap_or("unknown")
-    ));
-    if let Some(arguments) = arguments {
-        write_jsonish_code_block(out, arguments);
-    } else {
-        out.push_str("`empty`\n\n");
-    }
-}
-
-fn format_tool_output_message(
-    out: &mut String,
-    call_id: Option<&str>,
-    output: Option<&serde_json::Value>,
-) {
-    out.push_str("### Tool Output\n\n");
-    if let Some(call_id) = call_id.filter(|value| !value.is_empty()) {
-        out.push_str(&format!("*Call ID: `{}`*\n\n", call_id));
-    }
-    match output {
-        Some(serde_json::Value::String(text)) => write_text_code_block(out, text),
-        Some(value) => write_jsonish_code_block(out, value),
-        None => out.push_str("`empty`\n\n"),
-    }
-}
-
-fn write_jsonish_code_block(out: &mut String, value: &serde_json::Value) {
-    let pretty = match value {
-        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .and_then(|parsed| serde_json::to_string_pretty(&parsed).ok())
-            .unwrap_or_else(|| text.clone()),
-        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-    };
-
-    if serde_json::from_str::<serde_json::Value>(&pretty).is_ok() {
-        out.push_str("```json\n");
-        out.push_str(&pretty);
-        out.push_str("\n```\n\n");
-    } else {
-        write_text_code_block(out, &pretty);
-    }
-}
-
-fn write_text_code_block(out: &mut String, text: &str) {
-    out.push_str("```\n");
-    out.push_str(text);
-    out.push_str("\n```\n\n");
-}
-
-fn parse_sse_response(out: &mut String, raw_sse: &str) {
-    let mut current_blocks: HashMap<usize, ContentBlock> = HashMap::new();
-    let mut finished_blocks: Vec<(usize, ContentBlock)> = Vec::new();
-
-    #[derive(Debug)]
-    enum ContentBlock {
-        Thinking(String),
-        Text(String),
-        ToolUse { name: String, input_json: String },
-    }
-
-    #[derive(Debug)]
-    struct ResponseToolCall {
-        order: usize,
-        name: String,
-        arguments: String,
-    }
-
-    let mut openai_thinking = String::new();
-    let mut openai_text = String::new();
-    let mut openai_tool_calls: HashMap<i64, (String, String)> = HashMap::new(); // index -> (name, arguments)
-    let mut saw_openai_chat_format = false;
-    let mut responses_text = String::new();
-    let mut responses_thinking = String::new();
-    let mut response_tool_calls: HashMap<String, ResponseToolCall> = HashMap::new();
-    let mut next_response_tool_order = 0usize;
-
-    let mut remaining = raw_sse;
-    loop {
-        let (event_block, tail) = match next_export_sse_separator(remaining) {
-            Some((pos, sep_len)) => (&remaining[..pos], &remaining[pos + sep_len..]),
-            None => (remaining, ""),
-        };
-        remaining = tail;
-
-        if let Some((event_name, event)) = parse_export_sse_block(event_block) {
-            let event_type = event_name
-                .or_else(|| {
-                    event
-                        .get("type")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default();
-
-            if event.get("choices").is_some() {
-                saw_openai_chat_format = true;
-                if let Some(choices) = event.get("choices").and_then(|value| value.as_array()) {
-                    for choice in choices {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(reasoning) = delta
-                                .get("reasoning_content")
-                                .and_then(|value| value.as_str())
-                            {
-                                openai_thinking.push_str(reasoning);
-                            }
-                            if let Some(content) =
-                                delta.get("content").and_then(|value| value.as_str())
-                            {
-                                openai_text.push_str(content);
-                            }
-                            if let Some(tool_calls) =
-                                delta.get("tool_calls").and_then(|value| value.as_array())
-                            {
-                                for tool_call in tool_calls {
-                                    let idx = tool_call
-                                        .get("index")
-                                        .and_then(|value| value.as_i64())
-                                        .unwrap_or(0);
-                                    let entry = openai_tool_calls
-                                        .entry(idx)
-                                        .or_insert_with(|| (String::new(), String::new()));
-                                    if let Some(function) = tool_call.get("function") {
-                                        if let Some(name) =
-                                            function.get("name").and_then(|value| value.as_str())
-                                        {
-                                            entry.0 = name.to_string();
-                                        }
-                                        if let Some(arguments) = function
-                                            .get("arguments")
-                                            .and_then(|value| value.as_str())
-                                        {
-                                            entry.1.push_str(arguments);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                match event_type.as_str() {
-                    "content_block_start" => {
-                        let index = event
-                            .get("index")
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0) as usize;
-                        if let Some(block) = event.get("content_block") {
-                            match block.get("type").and_then(|value| value.as_str()) {
-                                Some("thinking") => {
-                                    current_blocks
-                                        .insert(index, ContentBlock::Thinking(String::new()));
-                                }
-                                Some("text") => {
-                                    current_blocks.insert(index, ContentBlock::Text(String::new()));
-                                }
-                                Some("tool_use") => {
-                                    let name = block
-                                        .get("name")
-                                        .and_then(|value| value.as_str())
-                                        .unwrap_or("unknown")
-                                        .to_string();
-                                    current_blocks.insert(
-                                        index,
-                                        ContentBlock::ToolUse {
-                                            name,
-                                            input_json: String::new(),
-                                        },
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    "content_block_delta" => {
-                        let index = event
-                            .get("index")
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0) as usize;
-                        if let Some(delta) = event.get("delta") {
-                            match delta.get("type").and_then(|value| value.as_str()) {
-                                Some("thinking_delta") => {
-                                    if let Some(ContentBlock::Thinking(ref mut text)) =
-                                        current_blocks.get_mut(&index)
-                                    {
-                                        if let Some(delta_text) =
-                                            delta.get("thinking").and_then(|value| value.as_str())
-                                        {
-                                            text.push_str(delta_text);
-                                        }
-                                    }
-                                }
-                                Some("text_delta") => {
-                                    if let Some(ContentBlock::Text(ref mut text)) =
-                                        current_blocks.get_mut(&index)
-                                    {
-                                        if let Some(delta_text) =
-                                            delta.get("text").and_then(|value| value.as_str())
-                                        {
-                                            text.push_str(delta_text);
-                                        }
-                                    }
-                                }
-                                Some("input_json_delta") => {
-                                    if let Some(ContentBlock::ToolUse {
-                                        ref mut input_json, ..
-                                    }) = current_blocks.get_mut(&index)
-                                    {
-                                        if let Some(delta_text) = delta
-                                            .get("partial_json")
-                                            .and_then(|value| value.as_str())
-                                        {
-                                            input_json.push_str(delta_text);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    "content_block_stop" => {
-                        let index = event
-                            .get("index")
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0) as usize;
-                        if let Some(block) = current_blocks.remove(&index) {
-                            finished_blocks.push((index, block));
-                        }
-                    }
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                            responses_text.push_str(delta);
-                        }
-                    }
-                    "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                        if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                            responses_thinking.push_str(delta);
-                        }
-                    }
-                    "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
-                        if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
-                            sync_export_event_text(&mut responses_thinking, text);
-                        }
-                    }
-                    "response.reasoning_summary_part.done" => {
-                        if let Some(text) =
-                            extract_export_response_part_text(&event, "reasoning_summary_text")
-                        {
-                            sync_export_event_text(&mut responses_thinking, text);
-                        }
-                    }
-                    "response.content_part.done" => {
-                        if let Some(text) =
-                            extract_export_response_part_text(&event, "reasoning_text")
-                        {
-                            sync_export_event_text(&mut responses_thinking, text);
-                        }
-                    }
-                    "response.output_item.added" => {
-                        if event
-                            .get("item")
-                            .and_then(|item| item.get("type"))
-                            .and_then(|value| value.as_str())
-                            == Some("function_call")
-                        {
-                            if let Some(key) = response_tool_call_key(&event) {
-                                let order = event
-                                    .get("output_index")
-                                    .and_then(|value| value.as_u64())
-                                    .map(|value| value as usize)
-                                    .unwrap_or_else(|| {
-                                        let order = next_response_tool_order;
-                                        next_response_tool_order += 1;
-                                        order
-                                    });
-                                next_response_tool_order = next_response_tool_order.max(order + 1);
-                                let entry = response_tool_calls.entry(key).or_insert_with(|| {
-                                    ResponseToolCall {
-                                        order,
-                                        name: String::new(),
-                                        arguments: String::new(),
-                                    }
-                                });
-                                entry.order = order;
-                                entry.name = event
-                                    .get("item")
-                                    .and_then(|item| item.get("name"))
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                if let Some(arguments) = event
-                                    .get("item")
-                                    .and_then(|item| item.get("arguments"))
-                                    .and_then(|value| value.as_str())
-                                {
-                                    entry.arguments = arguments.to_string();
-                                }
-                            }
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(key) = response_tool_call_key(&event) {
-                            if let Some(entry) = response_tool_calls.get_mut(&key) {
-                                if let Some(delta) =
-                                    event.get("delta").and_then(|value| value.as_str())
-                                {
-                                    entry.arguments.push_str(delta);
-                                }
-                            }
-                        }
-                    }
-                    "response.function_call_arguments.done" => {
-                        if let Some(key) = response_tool_call_key(&event) {
-                            if let Some(entry) = response_tool_calls.get_mut(&key) {
-                                if let Some(arguments) =
-                                    event.get("arguments").and_then(|value| value.as_str())
-                                {
-                                    entry.arguments = arguments.to_string();
-                                }
-                            }
-                        }
-                    }
-                    "response.output_item.done" => {
-                        match event
-                            .get("item")
-                            .and_then(|item| item.get("type"))
-                            .and_then(|value| value.as_str())
-                        {
-                            Some("function_call") => {
-                                if let Some(key) = response_tool_call_key(&event) {
-                                    if let Some(entry) = response_tool_calls.get_mut(&key) {
-                                        if let Some(arguments) = event
-                                            .get("item")
-                                            .and_then(|item| item.get("arguments"))
-                                            .and_then(|value| value.as_str())
-                                        {
-                                            entry.arguments = arguments.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                            Some("message") => {
-                                if let Some(parts) = event
-                                    .get("item")
-                                    .and_then(|item| item.get("content"))
-                                    .and_then(|value| value.as_array())
-                                {
-                                    for part in parts {
-                                        match part.get("type").and_then(|value| value.as_str()) {
-                                            Some("output_text") | Some("text") => {
-                                                if let Some(text) = part
-                                                    .get("text")
-                                                    .and_then(|value| value.as_str())
-                                                {
-                                                    sync_export_event_text(
-                                                        &mut responses_text,
-                                                        text,
-                                                    );
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if remaining.is_empty() {
-            break;
-        }
-    }
-
-    if !current_blocks.is_empty() {
-        let mut open_blocks: Vec<_> = current_blocks.into_iter().collect();
-        open_blocks.sort_by_key(|(index, _)| *index);
-        finished_blocks.extend(open_blocks);
-    }
-
-    let mut append_index = finished_blocks
-        .iter()
-        .map(|(index, _)| *index)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-
-    if saw_openai_chat_format {
-        if !openai_thinking.is_empty() {
-            finished_blocks.push((append_index, ContentBlock::Thinking(openai_thinking)));
-            append_index += 1;
-        }
-        if !openai_text.is_empty() {
-            finished_blocks.push((append_index, ContentBlock::Text(openai_text)));
-            append_index += 1;
-        }
-        let mut tool_indices: Vec<i64> = openai_tool_calls.keys().copied().collect();
-        tool_indices.sort();
-        for idx in tool_indices {
-            if let Some((name, args)) = openai_tool_calls.remove(&idx) {
-                finished_blocks.push((
-                    append_index,
-                    ContentBlock::ToolUse {
-                        name,
-                        input_json: args,
-                    },
-                ));
-                append_index += 1;
-            }
-        }
-    }
-
-    if !responses_thinking.is_empty() {
-        finished_blocks.push((append_index, ContentBlock::Thinking(responses_thinking)));
-        append_index += 1;
-    }
-
-    if !responses_text.is_empty() {
-        finished_blocks.push((append_index, ContentBlock::Text(responses_text)));
-        append_index += 1;
-    }
-
-    if !response_tool_calls.is_empty() {
-        let mut tool_calls: Vec<_> = response_tool_calls.into_values().collect();
-        tool_calls.sort_by_key(|tool_call| tool_call.order);
-        for tool_call in tool_calls {
-            finished_blocks.push((
-                append_index,
-                ContentBlock::ToolUse {
-                    name: tool_call.name,
-                    input_json: tool_call.arguments,
-                },
-            ));
-            append_index += 1;
-        }
-    }
-
-    finished_blocks.sort_by_key(|(idx, _)| *idx);
-
-    for (_, block) in &finished_blocks {
-        match block {
-            ContentBlock::Thinking(text) => {
-                if !text.is_empty() {
-                    out.push_str("<details><summary>Thinking</summary>\n\n");
-                    out.push_str(text);
-                    out.push_str("\n\n</details>\n\n");
-                }
-            }
-            ContentBlock::Text(text) => {
-                if !text.is_empty() {
-                    out.push_str(text);
-                    out.push_str("\n\n");
-                }
-            }
-            ContentBlock::ToolUse { name, input_json } => {
-                let pretty = serde_json::from_str::<serde_json::Value>(input_json)
-                    .ok()
-                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                    .unwrap_or_else(|| input_json.clone());
-                out.push_str(&format!("**Tool call: `{}`**\n\n", name));
-                out.push_str("```json\n");
-                out.push_str(&pretty);
-                out.push_str("\n```\n\n");
-            }
-        }
-    }
-
-    if finished_blocks.is_empty() {
-        out.push_str("*(no response content)*\n\n");
-    }
-}
-
-fn next_export_sse_separator(buffer: &str) -> Option<(usize, usize)> {
-    let lf = buffer.find("\n\n").map(|position| (position, 2usize));
-    let crlf = buffer.find("\r\n\r\n").map(|position| (position, 4usize));
-
-    match (lf, crlf) {
-        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-        (Some(found), None) | (None, Some(found)) => Some(found),
-        (None, None) => None,
-    }
-}
-
-fn parse_export_sse_block(event_block: &str) -> Option<(Option<String>, serde_json::Value)> {
-    let mut event_name = None;
-    let mut data_lines = Vec::new();
-
-    for line in event_block.lines() {
-        let line = line.trim();
-        if let Some(name) = line.strip_prefix("event: ") {
-            event_name = Some(name.trim().to_string());
-        } else if let Some(data) = line.strip_prefix("data: ") {
-            let trimmed = data.trim();
-            if trimmed == "[DONE]" {
-                return None;
-            }
-            data_lines.push(trimmed.to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
-        return None;
-    }
-
-    let data = data_lines.join("\n");
-    serde_json::from_str::<serde_json::Value>(&data)
-        .ok()
-        .map(|event| (event_name, event))
-}
-
-fn sync_export_event_text(target: &mut String, text: &str) {
-    if text.is_empty() || target == text {
-        return;
-    }
-
-    if target.is_empty() {
-        target.push_str(text);
-        return;
-    }
-
-    if let Some(suffix) = text.strip_prefix(target.as_str()) {
-        target.push_str(suffix);
-        return;
-    }
-
-    target.clear();
-    target.push_str(text);
-}
-
-fn extract_export_response_part_text<'a>(
-    event: &'a serde_json::Value,
-    expected_type: &str,
-) -> Option<&'a str> {
-    event
-        .get("part")
-        .filter(|part| part.get("type").and_then(|value| value.as_str()) == Some(expected_type))
-        .and_then(|part| part.get("text").and_then(|value| value.as_str()))
-}
-
-fn response_tool_call_key(event: &serde_json::Value) -> Option<String> {
-    event
-        .get("item_id")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned)
-        .or_else(|| {
-            event
-                .get("output_index")
-                .and_then(|value| value.as_u64())
-                .map(|value| value.to_string())
-        })
-        .or_else(|| {
-            event
-                .get("item")
-                .and_then(|item| item.get("id"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            event
-                .get("item")
-                .and_then(|item| item.get("call_id"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
+        .detail(error.to_string())
+        .operation("exportSessionContext")
+    })?
+    .map_err(Into::into)
 }
 
 #[tauri::command]

@@ -18,12 +18,16 @@ const sessionServiceMocks = vi.hoisted(() => ({
   getSessionUsage: vi.fn(),
   getSessionActiveRun: vi.fn(),
   getSessionPlanState: vi.fn().mockResolvedValue({ active: false }),
+  getSessionResumeAvailable: vi.fn(),
   getTodos: vi.fn(),
   ignoreKnowledgeProposal: vi.fn(),
   listSessionEvents: vi.fn(),
   listArchivedSessions: vi.fn(),
   listSessions: vi.fn(),
   loadSession: vi.fn(),
+  loadSessionView: vi.fn(),
+  loadSessionMessagePage: vi.fn(),
+  loadSessionTurnPreview: vi.fn(),
   insertPendingChatInput: vi.fn(),
   queueChatInput: vi.fn(),
   renameSession: vi.fn(),
@@ -56,6 +60,7 @@ const displaySettingsState = vi.hoisted(() => ({
   chatDiffReviewTarget: "inline",
   gitDiffReviewTarget: "inline",
   rightAlignUserMessages: false,
+  sessionMessagePageSize: 120,
   compactToolCalls: true,
   hideThinkingBlocks: true,
   mergeGitTreeStatusIcon: true,
@@ -69,7 +74,10 @@ const agentStoreMocks = vi.hoisted(() => ({
 }));
 
 const modelStoreMocks = vi.hoisted(() => ({
-  availableModels: [{ id: "model-a", name: "Model A", provider: "custom" as const }],
+  availableModels: [
+    { id: "model-a", name: "Model A", provider: "custom" as const },
+    { id: "model-b", name: "Model B", provider: "custom" as const },
+  ],
   modelDefaults: {
     mainModel: "model-a",
     planModel: "",
@@ -83,8 +91,19 @@ const modelStoreMocks = vi.hoisted(() => ({
   workspaceOverride: null,
   selectedModelId: "model-a",
   effort: "none" as const,
+  defaultEffort: "none" as const,
   effortSupported: false,
   codexFastModeForModel: vi.fn(() => false),
+  applySessionModel: vi.fn(),
+  applySessionEffort: vi.fn(),
+  setActiveSessionId: vi.fn(),
+  hydrateSessionOverrides: vi.fn(),
+  hydrateSessionEfforts: vi.fn(),
+  selectSessionModel: vi.fn(),
+  selectSessionEffort: vi.fn(),
+  applyContextEffort: vi.fn(),
+  loadLastEffort: vi.fn().mockResolvedValue(undefined),
+  resolveSelectedModel: vi.fn(),
 }));
 
 const notificationStoreMocks = vi.hoisted(() => ({
@@ -173,6 +192,19 @@ describe("chat session panel state", () => {
     setActivePinia(createPinia());
     vi.resetAllMocks();
 
+    modelStoreMocks.selectedModelId = "model-a";
+    modelStoreMocks.applySessionModel.mockImplementation((modelId: string | null | undefined) => {
+      if (modelId && modelStoreMocks.availableModels.some((model) => model.id === modelId)) {
+        modelStoreMocks.selectedModelId = modelId;
+      }
+    });
+    modelStoreMocks.applyContextEffort.mockImplementation((effort: typeof modelStoreMocks.effort) => {
+      modelStoreMocks.effort = effort;
+    });
+    modelStoreMocks.resolveSelectedModel.mockImplementation(() => {
+      modelStoreMocks.selectedModelId = modelStoreMocks.modelDefaults.mainModel;
+    });
+
     displaySettingsState.todoAutoOpen = true;
     displaySettingsState.showWelcomeSubtitle = true;
     displaySettingsState.showKnowledgeTab = true;
@@ -185,6 +217,7 @@ describe("chat session panel state", () => {
     displaySettingsState.changesAutoClose = true;
     displaySettingsState.fileChangePopoverEnabled = true;
     displaySettingsState.rightAlignUserMessages = false;
+    displaySettingsState.sessionMessagePageSize = 120;
     displaySettingsState.compactToolCalls = true;
     displaySettingsState.hideThinkingBlocks = true;
     displaySettingsState.mergeGitTreeStatusIcon = true;
@@ -214,6 +247,26 @@ describe("chat session panel state", () => {
       createdAt: 0,
       updatedAt: 0,
     }));
+    sessionServiceMocks.loadSessionView.mockImplementation(async (sessionId: string) => ({
+      session: await sessionServiceMocks.loadSession(sessionId),
+      userMessageIds: [],
+      oldestMessageRowId: 1,
+      hasMoreHistory: false,
+    }));
+    sessionServiceMocks.loadSessionMessagePage.mockResolvedValue({
+      messages: [],
+      oldestMessageRowId: null,
+      hasMoreHistory: false,
+    });
+    sessionServiceMocks.loadSessionTurnPreview.mockImplementation(async (
+      _sessionId: string,
+      messageId: string,
+    ) => ({ messageId, prompt: `prompt-${messageId}`, response: `response-${messageId}` }));
+    sessionServiceMocks.getSessionPlanState.mockResolvedValue({
+      active: false,
+      planFilePath: "",
+      planFileExists: false,
+    });
     sessionServiceMocks.applyKnowledgeProposal.mockResolvedValue(undefined);
     sessionServiceMocks.archiveSession.mockResolvedValue(undefined);
     sessionServiceMocks.chat.mockResolvedValue({ sessionId: "s1", runId: "run-default" });
@@ -225,6 +278,7 @@ describe("chat session panel state", () => {
     sessionServiceMocks.getActiveSessionSelection.mockResolvedValue(null);
     sessionServiceMocks.getSessionUsage.mockImplementation(async () => emptyUsage());
     sessionServiceMocks.getSessionActiveRun.mockResolvedValue(null);
+    sessionServiceMocks.getSessionResumeAvailable.mockResolvedValue(false);
     sessionServiceMocks.getTodos.mockImplementation(async (sessionId: string) => (
       todoData[sessionId] ?? { items: [], latestRunId: null }
     ));
@@ -282,6 +336,190 @@ describe("chat session panel state", () => {
     undoServiceMocks.undoCheckDirty.mockResolvedValue([]);
   });
 
+  it("keeps the current session visible until the target page is ready and ignores stale switches", async () => {
+    const chatStore = useChatStore();
+    await chatStore.selectSession("s1");
+
+    let resolveS2!: (value: any) => void;
+    const pendingS2 = new Promise((resolve) => {
+      resolveS2 = resolve;
+    });
+    sessionServiceMocks.loadSessionView.mockImplementation(async (sessionId: string) => {
+      if (sessionId === "s2") return pendingS2;
+      return {
+        session: {
+          id: sessionId,
+          title: `Session ${sessionId}`,
+          messages: [{ id: `message-${sessionId}`, role: "assistant", content: sessionId, createdAt: 1 }],
+          agentId: null,
+          sessionType: "chat",
+          parentSessionId: null,
+          latestCompletedRunId: null,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        oldestMessageRowId: 1,
+        hasMoreHistory: false,
+      };
+    });
+
+    const switchToS2 = chatStore.selectSession("s2");
+    await Promise.resolve();
+    expect(chatStore.activeSessionId).toBe("s1");
+    expect(chatStore.pendingSelectionSessionId).toBe("s2");
+
+    const switchToS3 = chatStore.selectSession("s3");
+    await switchToS3;
+    expect(chatStore.activeSessionId).toBe("s3");
+    expect(chatStore.messages.map((message) => message.id)).toEqual(["message-s3"]);
+
+    resolveS2({
+      session: {
+        id: "s2",
+        title: "Session s2",
+        messages: [{ id: "message-s2", role: "assistant", content: "s2", createdAt: 1 }],
+        agentId: null,
+        sessionType: "chat",
+        parentSessionId: null,
+        latestCompletedRunId: null,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      oldestMessageRowId: 1,
+      hasMoreHistory: false,
+    });
+    await switchToS2;
+
+    expect(chatStore.activeSessionId).toBe("s3");
+    expect(chatStore.pendingSelectionSessionId).toBeNull();
+    expect(chatStore.messages.map((message) => message.id)).toEqual(["message-s3"]);
+  });
+
+  it("starts an empty hidden turn when the selected session can resume", async () => {
+    const chatStore = useChatStore();
+    sessionServiceMocks.getSessionResumeAvailable.mockResolvedValueOnce(true);
+    sessionServiceMocks.chat.mockResolvedValueOnce({ sessionId: "s1", runId: "run-resume" });
+    sessionServiceMocks.listSessions.mockResolvedValueOnce([{
+      id: "s1",
+      title: "Session s1",
+      agentId: null,
+      sessionType: "chat",
+      updatedAt: 1,
+      runtimeStatus: "running",
+      activeRunId: "run-resume",
+    }]);
+
+    await chatStore.selectSession("s1");
+    expect(chatStore.canResumeInterrupted).toBe(true);
+
+    await chatStore.resumeInterrupted();
+
+    expect(sessionServiceMocks.chat).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "s1",
+      text: "",
+      resume: true,
+      mode: "build",
+    }));
+    expect(chatStore.messages).toEqual([]);
+    expect(chatStore.canResumeInterrupted).toBe(false);
+    expect(chatStore.currentRunId).toBe("run-resume");
+  });
+
+  it("cancels a pending switch when the user reselects the visible session", async () => {
+    const chatStore = useChatStore();
+    await chatStore.selectSession("s1");
+
+    let resolveS2!: (value: any) => void;
+    sessionServiceMocks.loadSessionView.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveS2 = resolve;
+    }));
+    const pendingSwitch = chatStore.selectSession("s2");
+    await Promise.resolve();
+    expect(chatStore.pendingSelectionSessionId).toBe("s2");
+
+    await chatStore.selectSession("s1");
+    expect(chatStore.pendingSelectionSessionId).toBeNull();
+
+    resolveS2({
+      session: await sessionServiceMocks.loadSession("s2"),
+      oldestMessageRowId: 1,
+      hasMoreHistory: false,
+    });
+    await pendingSwitch;
+    expect(chatStore.activeSessionId).toBe("s1");
+  });
+
+  it("prepends older message pages without replacing the visible transcript", async () => {
+    const chatStore = useChatStore();
+    sessionServiceMocks.loadSessionView.mockResolvedValueOnce({
+      session: {
+        id: "s1",
+        title: "Session s1",
+        messages: [{ id: "new", role: "assistant", content: "new", createdAt: 2 }],
+        agentId: null,
+        sessionType: "chat",
+        parentSessionId: null,
+        latestCompletedRunId: null,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      userMessageIds: ["old"],
+      oldestMessageRowId: 20,
+      hasMoreHistory: true,
+    });
+    sessionServiceMocks.loadSessionMessagePage.mockResolvedValueOnce({
+      messages: [{ id: "old", role: "user", content: "old", createdAt: 1 }],
+      oldestMessageRowId: 10,
+      hasMoreHistory: false,
+    });
+
+    await chatStore.selectSession("s1");
+    expect(sessionServiceMocks.loadSessionView).toHaveBeenCalledWith("s1", 120);
+    expect(chatStore.messages.map((message) => message.id)).toEqual(["new"]);
+    expect(chatStore.sessionUserMessageIds).toEqual(["old"]);
+
+    await chatStore.loadOlderSessionHistory();
+
+    expect(sessionServiceMocks.loadSessionMessagePage).toHaveBeenCalledWith("s1", 20, 120);
+    expect(chatStore.messages.map((message) => message.id)).toEqual(["old", "new"]);
+    expect(chatStore.sessionHistoryHasMore).toBe(false);
+  });
+
+  it("loads indexed turn previews and pages through an unloaded user turn", async () => {
+    const chatStore = useChatStore();
+    sessionServiceMocks.loadSessionView.mockResolvedValueOnce({
+      session: {
+        id: "s1",
+        title: "Session s1",
+        messages: [{ id: "new", role: "assistant", content: "new", createdAt: 2 }],
+        agentId: null,
+        sessionType: "chat",
+        parentSessionId: null,
+        latestCompletedRunId: null,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      userMessageIds: ["old"],
+      oldestMessageRowId: 20,
+      hasMoreHistory: true,
+    });
+    sessionServiceMocks.loadSessionMessagePage.mockResolvedValueOnce({
+      messages: [{ id: "old", role: "user", content: "old", createdAt: 1 }],
+      oldestMessageRowId: 10,
+      hasMoreHistory: false,
+    });
+
+    await chatStore.selectSession("s1");
+    await expect(chatStore.loadSessionTurnPreview("old")).resolves.toEqual({
+      messageId: "old",
+      prompt: "prompt-old",
+      response: "response-old",
+    });
+    expect(sessionServiceMocks.loadSessionTurnPreview).toHaveBeenCalledWith("s1", "old");
+    await expect(chatStore.loadSessionHistoryThroughMessage("old")).resolves.toBe(true);
+    expect(chatStore.messages.map((message) => message.id)).toEqual(["old", "new"]);
+  });
+
   it("keeps historical todos closed on first session switch and allows manual reopen", async () => {
     const chatStore = useChatStore();
 
@@ -308,6 +546,58 @@ describe("chat session panel state", () => {
 
     expect(chatStore.tokenUsage.contextTokens).toBe(42000);
     expect(chatStore.tokenUsage.contextLimit).toBe(258400);
+  });
+
+  it("restores the last sent model for an existing session and resets new chats to the default", async () => {
+    const chatStore = useChatStore();
+    sessionServiceMocks.loadSession.mockResolvedValueOnce({
+      id: "s1",
+      title: "Session s1",
+      messages: [],
+      agentId: null,
+      lastModelId: "model-b",
+      sessionType: "chat",
+      parentSessionId: null,
+      latestCompletedRunId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+
+    await chatStore.selectSession("s1");
+
+    // Fork (per-session override design): switching sessions hydrates the
+    // session-scoped override map instead of mutating the global selection.
+    // The backend maps the persisted last_model_id into `modelId`, so a
+    // null `modelId` releases the override (session follows the global).
+    expect(modelStoreMocks.applySessionModel).toHaveBeenCalledWith("s1", null);
+    expect(modelStoreMocks.setActiveSessionId).toHaveBeenCalledWith("s1");
+
+    chatStore.newChat();
+
+    expect(modelStoreMocks.resolveSelectedModel).toHaveBeenCalledWith(true);
+    expect(modelStoreMocks.selectedModelId).toBe("model-a");
+  });
+
+  it("restores the last sent effort for an existing session", async () => {
+    const chatStore = useChatStore();
+    sessionServiceMocks.loadSession.mockResolvedValueOnce({
+      id: "s1",
+      title: "Session s1",
+      messages: [],
+      agentId: null,
+      lastModelId: "model-b",
+      lastEffort: "xhigh",
+      sessionType: "chat",
+      parentSessionId: null,
+      latestCompletedRunId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+
+    await chatStore.selectSession("s1");
+
+    expect(modelStoreMocks.applyContextEffort).toHaveBeenCalledWith("xhigh");
+    expect(chatStore.sessionEffort).toBe("xhigh");
   });
 
   it("restores the persisted active session after refreshing sessions", async () => {
@@ -344,6 +634,44 @@ describe("chat session panel state", () => {
     await chatStore.syncActiveSessionSelection(null);
 
     expect(chatStore.activeSessionId).toBeNull();
+    expect(sessionServiceMocks.saveActiveSessionSelection).not.toHaveBeenCalled();
+  });
+
+  it("keeps an isolated window on new chat across session refreshes", async () => {
+    const chatStore = useChatStore();
+    chatStore.setActiveSessionSelectionPersistence(false);
+    sessionServiceMocks.getActiveSessionSelection.mockResolvedValue("s1");
+    sessionServiceMocks.listSessions.mockResolvedValue([
+      {
+        id: "s1",
+        title: "Persisted elsewhere",
+        agentId: null,
+        sessionType: "chat",
+        updatedAt: 1,
+      },
+    ]);
+
+    await chatStore.refreshSessions();
+    expect(chatStore.activeSessionId).toBe("s1");
+
+    chatStore.newChat();
+    await chatStore.refreshSessions();
+
+    expect(chatStore.activeSessionId).toBeNull();
+    expect(sessionServiceMocks.saveActiveSessionSelection).not.toHaveBeenCalled();
+  });
+
+  it("does not publish implicit session selection from an isolated window", async () => {
+    const chatStore = useChatStore();
+    chatStore.setActiveSessionSelectionPersistence(false);
+    sessionServiceMocks.chat.mockResolvedValueOnce({
+      sessionId: "isolated-new",
+      runId: "run-isolated",
+    });
+
+    await chatStore.sendMessage("Create locally");
+
+    expect(chatStore.activeSessionId).toBe("isolated-new");
     expect(sessionServiceMocks.saveActiveSessionSelection).not.toHaveBeenCalled();
   });
 
@@ -1773,6 +2101,7 @@ describe("chat session panel state", () => {
     expect(uiStore.pendingChatPrefill?.requireEmptyComposer).toBe(true);
     expect(chatStore.messages).toEqual([]);
     expect(chatStore.isStreaming).toBe(false);
+    expect(chatStore.canResumeInterrupted).toBe(false);
   });
 
   it("keeps the persisted user message when a run is cancelled after the user message event", async () => {
@@ -1816,6 +2145,7 @@ describe("chat session panel state", () => {
     expect(sessionServiceMocks.loadSession).not.toHaveBeenCalled();
     expect(uiStore.pendingChatPrefill).toBeNull();
     expect(chatStore.messages.map((message) => message.id)).toContain("msg-user-1");
+    expect(chatStore.canResumeInterrupted).toBe(true);
   });
 
   it("returns the revoked user message to the composer when cancel produced no assistant output", async () => {
@@ -1865,6 +2195,7 @@ describe("chat session panel state", () => {
     expect(uiStore.pendingChatPrefill?.requireEmptyComposer).toBe(true);
     expect(sessionServiceMocks.loadSession).not.toHaveBeenCalled();
     expect(chatStore.isStreaming).toBe(false);
+    expect(chatStore.canResumeInterrupted).toBe(false);
   });
 
   it("defers a cancel clicked while the chat launch is in flight and fires it once the run starts", async () => {
@@ -2402,7 +2733,7 @@ describe("chat session panel state", () => {
     expect(chatStore.activeToolCalls[0].id).toBe("tc-resume");
   });
 
-  it("forks the active root session and switches to the copy", async () => {
+  it("forks a running active root session and switches to the frozen copy", async () => {
     const chatStore = useChatStore();
 
     chatStore.sessions = [
@@ -2416,6 +2747,7 @@ describe("chat session panel state", () => {
       },
     ] as any;
     chatStore.activeSessionId = "s1";
+    chatStore.isStreaming = true;
     sessionServiceMocks.forkSession.mockResolvedValueOnce("s-copy");
     sessionServiceMocks.listSessions.mockResolvedValueOnce([
       {

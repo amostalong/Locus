@@ -175,6 +175,9 @@ pub fn summarize_prefab_instance(
         total_override_count: ir.property_overrides.len(),
         stripped_ref_count: stripped_count,
         removed_component_count: ir.removed_components.len(),
+        removed_game_object_count: ir.removed_game_objects.len(),
+        added_game_object_count: ir.added_game_object_count,
+        added_component_count: ir.added_component_count,
         transform_overrides,
         bulk_overrides,
         renderer_overrides,
@@ -204,6 +207,17 @@ pub fn format_override_summary(summary: &OverrideSummary) -> String {
         "Overrides: {} properties | {} stripped refs | {} removed components\n",
         summary.total_override_count, summary.stripped_ref_count, summary.removed_component_count,
     ));
+    if summary.removed_game_object_count > 0
+        || summary.added_game_object_count > 0
+        || summary.added_component_count > 0
+    {
+        out.push_str(&format!(
+            "Structural overrides: {} removed GameObjects | {} added GameObjects | {} added components\n",
+            summary.removed_game_object_count,
+            summary.added_game_object_count,
+            summary.added_component_count,
+        ));
+    }
 
     if !summary.child_prefab_names.is_empty() {
         out.push_str(&format!(
@@ -326,6 +340,7 @@ pub fn format_prefab_file_summary(
 pub fn format_prefab_instance_detail(
     ir: &PrefabInstanceIR,
     guid_resolver: &dyn Fn(&Guid) -> Option<String>,
+    object_resolver: &dyn Fn(&Guid, i64) -> Option<String>,
     source_ctx: Option<&SourcePrefabContext>,
     stripped_mappings: &[crate::asset_db::types::StrippedMapping],
 ) -> String {
@@ -401,7 +416,7 @@ pub fn format_prefab_instance_detail(
             .unwrap_or_else(|| format!("target #{}", idx + 1));
         out.push_str(&format!("\n--- {} ---\n", label));
 
-        let formatted = merge_override_vector_components(ovs, guid_resolver);
+        let formatted = merge_override_vector_components(ovs, guid_resolver, object_resolver);
         out.push_str(&formatted);
     }
 
@@ -418,6 +433,27 @@ pub fn format_prefab_instance_detail(
                 .unwrap_or_else(|| format!("target #{}", idx + 1));
             out.push_str(&format!("  {}\n", label));
         }
+    }
+
+    // Removed GameObjects (Unity 2022.2+)
+    if !ir.removed_game_objects.is_empty() {
+        out.push_str(&format!(
+            "\n--- Removed GameObjects ({}) ---\n",
+            ir.removed_game_objects.len()
+        ));
+        for (idx, rgo) in ir.removed_game_objects.iter().enumerate() {
+            let label = target_labels
+                .get(&rgo.target.source_file_id)
+                .cloned()
+                .unwrap_or_else(|| format!("source object #{}", idx + 1));
+            out.push_str(&format!("  {}\n", label));
+        }
+    }
+    if ir.added_game_object_count > 0 || ir.added_component_count > 0 {
+        out.push_str(&format!(
+            "\n--- Added on this instance --- \n  {} added GameObjects, {} added components (they appear as regular objects in the hierarchy)\n",
+            ir.added_game_object_count, ir.added_component_count
+        ));
     }
 
     let mappings: Vec<_> = stripped_mappings
@@ -481,6 +517,7 @@ fn format_annotated_hierarchy(
 fn merge_override_vector_components(
     ovs: &[&PropertyOverride],
     guid_resolver: &dyn Fn(&Guid) -> Option<String>,
+    object_resolver: &dyn Fn(&Guid, i64) -> Option<String>,
 ) -> String {
     let mut out = String::new();
     let mut i = 0;
@@ -543,7 +580,9 @@ fn merge_override_vector_components(
         let formatted_val = round_decimal_str(val);
         if let Some(ref obj) = ov.object_ref {
             if obj.guid != [0u8; 16] {
-                let obj_path = guid_resolver(&obj.guid).unwrap_or_else(|| guid_to_hex(&obj.guid));
+                let obj_path = object_resolver(&obj.guid, obj.source_file_id)
+                    .or_else(|| guid_resolver(&obj.guid))
+                    .unwrap_or_else(|| guid_to_hex(&obj.guid));
                 out.push_str(&format!(
                     "  {} = {} → {{{}}}\n",
                     ov.property_path, formatted_val, obj_path
@@ -903,29 +942,33 @@ fn format_component_suffix(node: &HierarchyNode) -> String {
     }
 }
 
-fn node_structure_signature(node: &HierarchyNode, cache: &mut HashMap<i64, String>) -> String {
-    if let Some(existing) = cache.get(&node.file_id) {
-        return existing.clone();
+/// Structural signature as a hash instead of a concatenated string: the old
+/// string form embedded every child's full signature recursively, which grew
+/// O(depth²) memory on deep chains. Hash collisions would merely fold two
+/// different-looking siblings together in the summary view — vanishingly
+/// unlikely at 64 bits and cosmetic-only, so a hash is the right trade.
+fn node_structure_signature(node: &HierarchyNode, cache: &mut HashMap<i64, u64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    if let Some(&existing) = cache.get(&node.file_id) {
+        return existing;
     }
 
-    let child_signatures: Vec<String> = node
-        .children
-        .iter()
-        .map(|child| node_structure_signature(child, cache))
-        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalize_instance_name(&node.name).hash(&mut hasher);
+    component_signature(&node.components).hash(&mut hasher);
+    format_go_annotations(node).hash(&mut hasher);
+    node.children.len().hash(&mut hasher);
+    for child in &node.children {
+        node_structure_signature(child, cache).hash(&mut hasher);
+    }
 
-    let signature = format!(
-        "name:{name}|components:{components}|annotations:{annotations}|children:[{children}]",
-        name = normalize_instance_name(&node.name),
-        components = component_signature(&node.components),
-        annotations = format_go_annotations(node),
-        children = child_signatures.join("||"),
-    );
-    cache.insert(node.file_id, signature.clone());
+    let signature = hasher.finish();
+    cache.insert(node.file_id, signature);
     signature
 }
 
-fn build_structure_signature_map(roots: &[HierarchyNode]) -> HashMap<i64, String> {
+fn build_structure_signature_map(roots: &[HierarchyNode]) -> HashMap<i64, u64> {
     let mut cache = HashMap::new();
     for root in roots {
         let _ = node_structure_signature(root, &mut cache);
@@ -935,17 +978,14 @@ fn build_structure_signature_map(roots: &[HierarchyNode]) -> HashMap<i64, String
 
 fn group_children_by_structure<'a>(
     children: &'a [HierarchyNode],
-    signature_map: &HashMap<i64, String>,
+    signature_map: &HashMap<i64, u64>,
 ) -> Vec<GroupedHierarchyNodes<'a>> {
     let mut groups: Vec<GroupedHierarchyNodes<'a>> = Vec::new();
-    let mut group_map: HashMap<&str, usize> = HashMap::new();
+    let mut group_map: HashMap<u64, usize> = HashMap::new();
 
     for child in children {
-        let signature = signature_map
-            .get(&child.file_id)
-            .map(String::as_str)
-            .unwrap_or("");
-        if let Some(&idx) = group_map.get(signature) {
+        let signature = signature_map.get(&child.file_id).copied().unwrap_or(0);
+        if let Some(&idx) = group_map.get(&signature) {
             groups[idx].members.push(child);
         } else {
             let idx = groups.len();
@@ -1270,13 +1310,14 @@ fn format_instance_sample(members: &[&HierarchyNode], path_map: &HashMap<i64, St
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_grouped_nodes(
     out: &mut String,
     nodes: &[HierarchyNode],
     prefix: &str,
     top_level: bool,
     logical_depth: usize,
-    signature_map: &HashMap<i64, String>,
+    signature_map: &HashMap<i64, u64>,
     options: &HierarchySummaryOptions,
     path_map: &HashMap<i64, String>,
     state: &mut HierarchyWriteState,

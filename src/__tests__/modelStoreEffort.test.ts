@@ -53,7 +53,7 @@ describe("useModelStore OpenAI effort mapping", () => {
     ]);
     expect(modelStore.codexModels[0]).toEqual(expect.objectContaining({
       name: "GPT-5.6 Sol",
-      contextWindow: 353_400,
+      contextWindow: 258_400,
       defaultEffort: "low",
       supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
       isDefault: true,
@@ -61,6 +61,28 @@ describe("useModelStore OpenAI effort mapping", () => {
     expect(modelStore.availableModels.some((model) => model.id === "openai/gpt-5.6-sol")).toBe(true);
     expect(modelStore.availableModels.some((model) => model.id === "openai/gpt-5.5")).toBe(true);
     expect(modelStore.availableModels.some((model) => model.id === "openai/gpt-5.4")).toBe(true);
+  });
+
+  it("only exposes the extended GPT-5.6 window after opt-in", () => {
+    const authStore = useAuthStore();
+    authStore.codexAuthenticated = true;
+    const modelStore = useModelStore();
+    modelStore.codexRemoteModels = [
+      {
+        id: "openai/gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        provider: "openai_codex",
+        contextWindow: 258_400,
+      },
+    ];
+
+    expect(modelStore.codexExtendedContext).toBe(false);
+    expect(modelStore.codexModels[0].contextWindow).toBe(258_400);
+
+    modelStore.applyCodexModelConfig({ transport: "websocket", extendedContext: true });
+
+    expect(modelStore.codexExtendedContext).toBe(true);
+    expect(modelStore.codexModels[0].contextWindow).toBe(353_400);
   });
 
   it("uses the remote Codex catalog when it is available", async () => {
@@ -234,7 +256,7 @@ describe("useModelStore OpenAI effort mapping", () => {
         apiModel: "gpt-5.1-codex-mini",
         name: "gpt-5.1-codex-mini",
         contextLength: 256000,
-        betaFlags: [],
+        supportsToolLazyLoading: false,
         supportedReasoningEfforts: ["medium", "high"],
         reasoningParamFormat: "openai_responses_reasoning_effort",
         replayReasoningContent: false,
@@ -263,7 +285,7 @@ describe("useModelStore OpenAI effort mapping", () => {
         apiModel: "deepseek-v4-pro",
         name: "deepseek-v4-pro",
         contextLength: 256000,
-        betaFlags: [],
+        supportsToolLazyLoading: false,
         reasoningParamFormat: "openai_chat_reasoning_effort",
         replayReasoningContent: true,
         reasoningReplayField: null,
@@ -293,7 +315,7 @@ describe("useModelStore OpenAI effort mapping", () => {
         apiModel: "deepseek-v4-pro",
         name: "deepseek-v4-pro",
         contextLength: 256000,
-        betaFlags: [],
+        supportsToolLazyLoading: false,
         supportedReasoningEfforts: ["low", "medium", "high", "max"],
         reasoningParamFormat: "openai_chat_reasoning_effort",
         replayReasoningContent: true,

@@ -329,13 +329,12 @@ impl AgentDefRegistry {
         }
     }
 
-    /// config.json is not the sole source of truth for `dev` and `knowledge`:
-    /// legacy tool names are rewritten, and the required knowledge-mutation
-    /// tools (plus `graph_view` for `dev`) are re-added even when a config
-    /// overlay removes them.
+    /// Normalize retired aliases and keep the unified knowledge/file tool
+    /// surface available for the agents that maintain project knowledge.
     fn normalize_agent_tools(agent_id: &str, tools: &mut Vec<String>) {
         for tool in tools.iter_mut() {
             let normalized = match tool.as_str() {
+                "task" => "subagent",
                 "view_binding_read" => "view_property_read",
                 "view_binding_discover" => "view_property_discover",
                 "view_binding_write" => "view_property_write",
@@ -348,26 +347,35 @@ impl AgentDefRegistry {
         let mut seen = HashSet::new();
         tools.retain(|tool| seen.insert(tool.clone()));
 
+        tools.retain(|tool| {
+            !matches!(
+                tool.as_str(),
+                "knowledge_directory"
+                    | "knowledge_update"
+                    | "knowledge_list"
+                    | "knowledge_read"
+                    | "knowledge_create"
+                    | "knowledge_edit"
+                    | "knowledge_move"
+                    | "knowledge_delete"
+            )
+        });
+
         if !matches!(canonical_agent_id(agent_id), "dev" | KNOWLEDGE_AGENT_ID) {
             return;
         }
 
-        tools.retain(|tool| !matches!(tool.as_str(), "knowledge_directory" | "knowledge_update"));
-
         let required_tools: &[&str] = if canonical_agent_id(agent_id) == "dev" {
-            &[
-                "knowledge_create",
-                "knowledge_edit",
-                "knowledge_move",
-                "knowledge_delete",
-                "graph_view",
-            ]
+            &["knowledge_query"]
         } else {
             &[
-                "knowledge_create",
-                "knowledge_edit",
-                "knowledge_move",
-                "knowledge_delete",
+                "knowledge_query",
+                "read",
+                "write",
+                "edit",
+                "bash",
+                "list",
+                "grep",
             ]
         };
 
@@ -391,7 +399,7 @@ impl AgentDefRegistry {
         self.defs.keys().map(|s| s.as_str()).collect()
     }
 
-    pub fn list_task_agent_descriptions(&self) -> Vec<(String, String)> {
+    pub fn list_subagent_descriptions(&self) -> Vec<(String, String)> {
         let mut defs: Vec<&AgentDef> = self
             .defs
             .values()
@@ -426,18 +434,13 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent")
     }
 
-    fn assert_knowledge_mutation_tools(agent_id: &str) {
+    fn assert_unified_knowledge_tools(agent_id: &str) {
         let registry = AgentDefRegistry::load(Some(repo_agent_dir().as_path()), None);
         let agent = registry
             .get(agent_id)
             .unwrap_or_else(|| panic!("agent '{}' should be loadable", agent_id));
 
-        for tool in [
-            "knowledge_create",
-            "knowledge_edit",
-            "knowledge_move",
-            "knowledge_delete",
-        ] {
+        for tool in ["knowledge_query", "read", "write", "edit", "bash"] {
             assert!(
                 agent.tools.iter().any(|name| name == tool),
                 "agent '{}' should expose '{}'",
@@ -446,7 +449,16 @@ mod tests {
             );
         }
 
-        for legacy_tool in ["knowledge_directory", "knowledge_update"] {
+        for legacy_tool in [
+            "knowledge_directory",
+            "knowledge_update",
+            "knowledge_list",
+            "knowledge_read",
+            "knowledge_create",
+            "knowledge_edit",
+            "knowledge_move",
+            "knowledge_delete",
+        ] {
             assert!(
                 agent.tools.iter().all(|name| name != legacy_tool),
                 "agent '{}' should not expose legacy tool '{}'",
@@ -469,14 +481,7 @@ mod tests {
 
         AgentDefRegistry::normalize_agent_tools("dev", &mut tools);
 
-        for tool in [
-            "knowledge_create",
-            "knowledge_edit",
-            "knowledge_move",
-            "knowledge_delete",
-        ] {
-            assert!(tools.iter().any(|name| name == tool));
-        }
+        assert!(tools.iter().any(|name| name == "knowledge_query"));
 
         for legacy_tool in ["knowledge_directory", "knowledge_update"] {
             assert!(tools.iter().all(|name| name != legacy_tool));
@@ -524,19 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn dev_agent_exposes_knowledge_mutation_tools() {
-        assert_knowledge_mutation_tools("dev");
-    }
-
-    #[test]
-    fn dev_agent_exposes_graph_view_tool() {
-        let registry = AgentDefRegistry::load(Some(repo_agent_dir().as_path()), None);
-        let agent = registry.get("dev").expect("dev agent should be loadable");
-
-        assert!(
-            agent.tools.iter().any(|name| name == "graph_view"),
-            "dev agent should expose graph_view"
-        );
+    fn dev_agent_exposes_unified_knowledge_tools() {
+        assert_unified_knowledge_tools("dev");
     }
 
     #[test]
@@ -572,8 +566,8 @@ mod tests {
     }
 
     #[test]
-    fn knowledge_agent_exposes_knowledge_mutation_tools() {
-        assert_knowledge_mutation_tools("knowledge");
+    fn knowledge_agent_exposes_unified_knowledge_tools() {
+        assert_unified_knowledge_tools("knowledge");
     }
 
     #[test]
@@ -581,19 +575,14 @@ mod tests {
         let registry = AgentDefRegistry::load(Some(repo_agent_dir().as_path()), None);
         let agent = registry.get("git").expect("git agent should be loadable");
 
-        for tool in ["knowledge_list", "knowledge_query", "knowledge_read"] {
-            assert!(
-                agent.tools.iter().any(|name| name == tool),
-                "git agent should expose '{}'",
-                tool
-            );
-        }
+        assert!(agent.tools.iter().any(|name| name == "knowledge_query"));
+        assert!(agent.tools.iter().all(|name| name != "knowledge_read"));
     }
 
     #[test]
-    fn task_agent_descriptions_hide_legacy_aliases() {
+    fn subagent_descriptions_hide_legacy_aliases() {
         let registry = AgentDefRegistry::load(Some(repo_agent_dir().as_path()), None);
-        let descriptions = registry.list_task_agent_descriptions();
+        let descriptions = registry.list_subagent_descriptions();
 
         assert!(descriptions
             .iter()

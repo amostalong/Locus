@@ -80,6 +80,20 @@ describe("RichChatInput command popup layout", () => {
     expect(tabAutocompleteStart).toBeGreaterThan(tabStart);
   });
 
+  it("keeps intent commands and runtime-safe copy actions available while a session is running", () => {
+    const richInput = read("src/components/chat/RichChatInput.vue");
+
+    expect(richInput).toContain("const RUNTIME_SAFE_ACTION_COMMANDS: readonly IntentCommandType[] = [");
+    expect(richInput).toContain('"fork",');
+    expect(richInput).toContain('"export-context",');
+    expect(richInput).toContain('"review-context",');
+    expect(richInput).toContain("allowedActionTypes: allowActionCommands.value && props.isStreaming");
+    expect(richInput).toContain("if (tryHandleExactActionCommand()) {");
+    expect(richInput).not.toMatch(
+      /function syncOperatorState\(\) \{[\s\S]*?if \(props\.isStreaming\) \{[\s\S]*?showCommandPopup\.value = false;/,
+    );
+  });
+
   it("registers fork as an executable action command", () => {
     const richInput = read("src/components/chat/RichChatInput.vue");
     const commandRegistry = read("src/composables/useCommandRegistry.ts");

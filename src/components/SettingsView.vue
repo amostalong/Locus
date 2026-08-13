@@ -20,13 +20,16 @@ import ProxySettings from "./settings/ProxySettings.vue";
 import ApiProviders from "./settings/ApiProviders.vue";
 import CustomProviderModal from "./settings/CustomProviderModal.vue";
 import ModelDefaultsPanel from "./settings/ModelDefaults.vue";
+import ModelUsageStats from "./settings/ModelUsageStats.vue";
 import ToolPermissions from "./settings/ToolPermissions.vue";
 import CodeAnalysisSettings from "./settings/CodeAnalysisSettings.vue";
 import McpSettings from "./settings/McpSettings.vue";
+import McpServerSettings from "./settings/McpServerSettings.vue";
 import HotReloadSettings from "./settings/HotReloadSettings.vue";
 import UnityConnectionSettings from "./settings/UnityConnectionSettings.vue";
 import WebSearchSettings from "./settings/WebSearchSettings.vue";
 import TestingSettings from "./settings/TestingSettings.vue";
+import ExperimentalSettings from "./settings/ExperimentalSettings.vue";
 import ArchivedSessionsSettings from "./settings/ArchivedSessionsSettings.vue";
 import { useUiStore } from "../stores/ui";
 import { useChatStore } from "../stores/chat";
@@ -55,7 +58,7 @@ const {
   dynamicToolLoadingMode, dynamicToolLoadingBusy, setDynamicToolLoadingMode,
   anthropicNativeLazyEnabled, anthropicNativeLazyBusy, setAnthropicNativeLazyEnabled,
   oauthStep, oauthCode, startOAuthLogin, submitOAuthCode, cancelOAuth, oauthLogout, importClaudeCodeOAuth, handleOAuthKeydown, anthropicQuota, loadAnthropicRateLimits,
-  codexStep, codexStatus, codexQuota, codexResetCreditBusyId, codexRetrying, codexModelConfig, codexUserCode, codexUrl, codexCodeCopied, cancelCodexLogin, codexLogout, importCodexCli, retryCodexValidation, copyCode, setCodexTransportMode, loadCodexRateLimits, consumeCodexResetCredit,
+  codexStep, codexStatus, codexQuota, codexResetCreditBusyId, codexRetrying, codexModelConfig, codexUserCode, codexUrl, codexCodeCopied, cancelCodexLogin, codexLogout, importCodexCli, retryCodexValidation, copyCode, setCodexTransportMode, setCodexExtendedContext, setCodexSessionTitleGeneration, loadCodexRateLimits, consumeCodexResetCredit,
   requestCodexLogin,
   modelDefaults, modelSaveMsg, saveModelDefaults,
   workspaceOverride, workspaceOverrideSaveMsg, saveWorkspaceOverride, disableWorkspaceOverride,
@@ -107,6 +110,16 @@ watch(
             <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5v-3zm8 0A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5v-3zm-8 8A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5v-3zm8 0A1.5 1.5 0 0 1 10.5 9h3a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-3A1.5 1.5 0 0 1 9 13.5v-3z"/>
           </svg>
           <span>{{ t("settings.tab.models") }}</span>
+        </button>
+        <button
+          class="sidebar-item"
+          :class="{ active: activeCategory === 'modelUsage' }"
+          @click="activeCategory = 'modelUsage'"
+        >
+          <svg viewBox="0 0 16 16" fill="none" width="14" height="14" aria-hidden="true">
+            <path d="M2.5 13.5V8.75h2.25v4.75H2.5zm4.375 0V5.25h2.25v8.25h-2.25zm4.375 0V2.5h2.25v11h-2.25z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
+          </svg>
+          <span>{{ t("settings.tab.modelUsage") }}</span>
         </button>
         <div class="sidebar-group-label">{{ t("settings.group.codeUnity") }}</div>
         <button
@@ -179,6 +192,13 @@ watch(
             <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/>
           </svg>
           <span>{{ t("settings.tab.webSearch") }}</span>
+          :class="{ active: activeCategory === 'mcpServer' }"
+          @click="activeCategory = 'mcpServer'"
+        >
+          <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+            <path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v2A1.5 1.5 0 0 0 1.5 7h13A1.5 1.5 0 0 0 16 5.5v-2A1.5 1.5 0 0 0 14.5 2h-13zM1 3.5a.5.5 0 0 1 .5-.5h13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-2zM3.75 4a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zM1.5 9A1.5 1.5 0 0 0 0 10.5v2A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-2A1.5 1.5 0 0 0 14.5 9h-13zM1 10.5a.5.5 0 0 1 .5-.5h13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-2zm2.75.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5z"/>
+          </svg>
+          <span>{{ t("settings.tab.mcpServer") }}</span>
         </button>
         <div class="sidebar-group-label">{{ t("settings.group.general") }}</div>
         <button
@@ -261,6 +281,16 @@ watch(
           </svg>
           <span>{{ t("settings.tab.about") }}</span>
         </button>
+        <button
+          class="sidebar-item"
+          :class="{ active: activeCategory === 'experimental' }"
+          @click="activeCategory = 'experimental'"
+        >
+          <svg viewBox="0 0 16 16" fill="none" width="14" height="14" aria-hidden="true">
+            <path d="M5.5 1.5h5M7 1.5v3.25L3.4 11a2.25 2.25 0 0 0 1.95 3.5h5.3A2.25 2.25 0 0 0 12.6 11L9 4.75V1.5M5.1 10h5.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>{{ t("settings.tab.experimental") }}</span>
+        </button>
       </div>
     </div>
 
@@ -286,6 +316,8 @@ watch(
           :codex-reset-credit-busy-id="codexResetCreditBusyId"
           :codex-retrying="codexRetrying"
           :codex-transport="codexModelConfig.transport"
+          :codex-extended-context="codexModelConfig.extendedContext"
+          :codex-session-title-generation="codexModelConfig.generateSessionTitles"
           :dynamic-tool-loading-mode="dynamicToolLoadingMode"
           :dynamic-tool-loading-busy="dynamicToolLoadingBusy"
           :anthropic-native-lazy-enabled="anthropicNativeLazyEnabled"
@@ -320,6 +352,8 @@ watch(
           @consume-codex-reset-credit="consumeCodexResetCredit"
           @copy-code="copyCode"
           @update:codex-transport="setCodexTransportMode"
+          @update:codex-extended-context="setCodexExtendedContext"
+          @update:codex-session-title-generation="setCodexSessionTitleGeneration"
           @update:dynamic-tool-loading-mode="setDynamicToolLoadingMode"
           @update:anthropic-native-lazy-enabled="setAnthropicNativeLazyEnabled"
           @start-add-provider="startAddCustomProvider"
@@ -346,6 +380,14 @@ watch(
           @save-workspace-override="saveWorkspaceOverride"
           @disable-workspace-override="disableWorkspaceOverride"
         />
+      </template>
+
+      <template v-if="activeCategory === 'modelUsage'">
+        <ModelUsageStats />
+      </template>
+
+      <template v-if="activeCategory === 'mcpServer'">
+        <McpServerSettings />
       </template>
 
       <template v-if="activeCategory === 'mcp'">
@@ -414,6 +456,10 @@ watch(
 
       <template v-if="activeCategory === 'about'">
         <AboutSettings />
+      </template>
+
+      <template v-if="activeCategory === 'experimental'">
+        <ExperimentalSettings />
       </template>
 
       <template v-if="activeCategory === 'general'">
@@ -1000,42 +1046,12 @@ watch(
   color: var(--text-secondary);
 }
 
-:deep(.model-select) {
+:deep(.model-default-dropdown) {
   width: 100%;
-  padding: 7px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-  background: var(--input-bg);
-  color: var(--text-color);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-  appearance: none;
-  -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23999' viewBox='0 0 16 16'%3E%3Cpath d='M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  padding-right: 28px;
 }
 
-:deep(.model-select:focus) {
-  border-color: var(--accent-border);
-  background-color: color-mix(in srgb, var(--input-bg) 88%, var(--accent-soft) 12%);
-}
-
-:deep(.model-select optgroup) {
-  font-weight: 600;
-  font-style: normal;
-}
-
-:deep(.model-select option) {
-  font-weight: 400;
-}
-
-:deep(.model-select.inline) {
-  width: 180px;
+:deep(.model-default-dropdown.inline) {
+  width: 220px;
   flex-shrink: 0;
 }
 

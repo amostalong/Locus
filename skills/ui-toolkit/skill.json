@@ -1,0 +1,23 @@
+{
+  "schema": "locus.skill.v1",
+  "id": "ui-toolkit",
+  "name": "UI Toolkit DevTools",
+  "version": "1.0.0",
+  "injectMode": "excerpt",
+  "description": "Use the loaded Locus.Skills.UIToolkitApi C# API through unity_execute for Unity 6.3+ Editor and Play Mode UI Toolkit debugging, layout editing, semantic interaction, waits, and viewport highlights.",
+  "argumentHint": "<inspect, style, layout, or interact with UI Toolkit>",
+  "command": {
+    "enabled": true,
+    "trigger": "/ui-toolkit",
+    "argumentHint": "<inspect, style, layout, or interact with UI Toolkit>"
+  },
+  "capabilities": {
+    "unity": [
+      {
+        "name": "ui-toolkit-csharp-api",
+        "path": "unity/Editor/UIToolkitApi.cs",
+        "api": "unity_execute"
+      }
+    ]
+  }
+}

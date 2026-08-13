@@ -10,7 +10,6 @@ import type {
   AssistantRenderPart,
 } from "../../types";
 import AskUserCard from "./AskUserCard.vue";
-import SheetCard from "./SheetCard.vue";
 import ToolConfirmCard from "./ToolConfirmCard.vue";
 import ToolConfirmBatchCard from "./ToolConfirmBatchCard.vue";
 import ChatTranscript from "./ChatTranscript.vue";
@@ -713,13 +712,8 @@ onUnmounted(() => {
             {{ t('common.delete') }}
           </BaseButton>
         </div>
-        <SheetCard
-          v-if="pendingQuestion && pendingQuestion.sheet"
-          :question="pendingQuestion"
-          @answer="emit('answerQuestion', $event)"
-        />
         <AskUserCard
-          v-else-if="pendingQuestion"
+          v-if="pendingQuestion"
           :question="pendingQuestion"
           :queue-index="1"
           :queue-total="pendingQuestionCount"

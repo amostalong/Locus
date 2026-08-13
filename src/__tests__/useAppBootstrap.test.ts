@@ -207,6 +207,8 @@ describe("useAppBootstrap onboarding completion", () => {
       loadToolPermissionMode: vi.fn().mockResolvedValue(undefined),
       handleStreamEvent: vi.fn().mockReturnValue(true),
       refreshSessionAfterExternalChange: vi.fn().mockResolvedValue(undefined),
+      syncActiveSessionSelection: vi.fn().mockResolvedValue(undefined),
+      applyActiveSessionExecutionState: vi.fn(),
       cleanupAnim: vi.fn(),
     });
 
@@ -661,4 +663,57 @@ describe("useAppBootstrap onboarding completion", () => {
 
     expect(maybeNotifyStreamEventMock).not.toHaveBeenCalled();
   });
+  it("can keep a standalone chat window pinned to its own session", async () => {
+    const eventModule = await import("@tauri-apps/api/event");
+    const listenMock = eventModule.listen as unknown as ReturnType<typeof vi.fn>;
+    const subscribedEvents: string[] = [];
+
+    listenMock.mockImplementation(async (name: string) => {
+      subscribedEvents.push(name);
+      return vi.fn();
+    });
+
+    const useAppBootstrap = await loadUseAppBootstrap();
+    const { registerListeners } = useAppBootstrap({
+      syncActiveSessionSelection: false,
+    });
+    await registerListeners();
+
+    expect(subscribedEvents).not.toContain("active-session-selection-changed");
+    expect(subscribedEvents).toContain("stream-event");
+    expect(subscribedEvents).toContain("session-content-changed");
+    expect(subscribedEvents).toContain("session-execution-state-changed");
+  });
+
+  it("applies execution-state changes only through the active-session store", async () => {
+    const eventModule = await import("@tauri-apps/api/event");
+    const listenMock = eventModule.listen as unknown as ReturnType<typeof vi.fn>;
+    const handlers = new Map<string, (event: { payload: any }) => void>();
+
+    listenMock.mockImplementation(
+      async (name: string, handler: (event: { payload: any }) => void) => {
+        handlers.set(name, handler);
+        return vi.fn();
+      },
+    );
+
+    const useAppBootstrap = await loadUseAppBootstrap();
+    const { registerListeners } = useAppBootstrap();
+    await registerListeners();
+
+    handlers.get("session-execution-state-changed")?.({
+      payload: {
+        sessionId: "session-1",
+        modelId: "openai/gpt-5.6-sol",
+        effort: "xhigh",
+      },
+    });
+
+    expect(chatStoreMock.applyActiveSessionExecutionState).toHaveBeenCalledWith(
+      "session-1",
+      "openai/gpt-5.6-sol",
+      "xhigh",
+    );
+  });
+
 });

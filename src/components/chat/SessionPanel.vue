@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SessionSummary, SaveRawContextRequest } from "../../types";
+import type { SessionSummary, SessionContextExportRequest } from "../../types";
 import type { SessionTreeNode, SessionTreeSessionNode } from "./sessionTree";
 import {
   computed,
@@ -10,7 +10,7 @@ import {
   watch,
   type ComponentPublicInstance,
 } from "vue";
-import { Archive, Box, Check, ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, HelpCircle, ListTree, LoaderCircle, MessageSquarePlus, PencilLine, Save, Settings2, Sparkles, Trash2, X } from "lucide";
+import { AppWindow, Archive, Box, Check, ChevronRight, FileSearch, Folder, FolderInput, FolderOpen, FolderPlus, HelpCircle, ListTree, LoaderCircle, MessageSquarePlus, PencilLine, Save, Settings2, Sparkles, Trash2, X } from "lucide";
 import { t } from "../../i18n";
 import { buildSessionTree } from "./sessionTree";
 import BaseButton from "../ui/BaseButton.vue";
@@ -35,6 +35,10 @@ import {
   type ViewPackageSummary,
 } from "../../services/view";
 import { openUnityEmbeddedSessionWindow } from "../../services/unity";
+import {
+  openChatSessionWindow,
+  openNewChatSessionWindow,
+} from "../../services/chatSessionWindow";
 import { getLocusRuntime, type RuntimeUnsubscribe } from "../../services/locusRuntime";
 import { useNotificationStore } from "../../stores/notification";
 import { useProjectStore } from "../../stores/project";
@@ -125,6 +129,7 @@ const VIEW_TREE_INDENT_STEP_PX = 20;
 const props = defineProps<{
   sessions: SessionSummary[];
   activeSessionId: string | null;
+  pendingSessionId?: string | null;
   streamingSessionIds?: Set<string>;
   sessionPanelWidth: number;
   workingDir?: string;
@@ -137,7 +142,8 @@ const emit = defineEmits<{
   archiveSession: [id: string];
   deleteSession: [id: string];
   renameSession: [id: string, title: string];
-  saveRawContext: [request: SaveRawContextRequest];
+  exportSessionContext: [request: SessionContextExportRequest];
+  reviewSessionContext: [request: SessionContextExportRequest];
   togglePanelCollapsed: [];
 }>();
 
@@ -1377,6 +1383,12 @@ function sessionStatusLabel(status: SessionTreeNode["status"]): string {
   return t(`chat.session.status.${status}`);
 }
 
+function isSessionTitleRunning(node: SessionTreeNode): boolean {
+  if (node.kind !== "session" || !node.sessionId) return false;
+  if (props.streamingSessionIds?.has(node.sessionId)) return true;
+  return node.session?.runtimeStatus === "running" || node.session?.runtimeStatus === "finishing";
+}
+
 /* Multi-selection state (Ctrl/Cmd toggle, Shift range) */
 const selectedIds = ref<Set<string>>(new Set());
 const lastAnchorId = ref<string | null>(null);
@@ -1404,7 +1416,16 @@ function onRowClick(row: VisibleTreeRow, e: MouseEvent) {
   if (!row.node.selectable || !row.node.sessionId) return;
   const id = row.node.sessionId;
 
-  if (e.ctrlKey || e.metaKey) {
+  if (e.ctrlKey) {
+    const session = row.node.session
+      ?? props.sessions.find((candidate) => candidate.id === id);
+    if (session) {
+      void openSessionInWindow(session);
+    }
+    return;
+  }
+
+  if (e.metaKey) {
     const next = new Set(selectedIds.value);
     if (next.has(id)) {
       next.delete(id);
@@ -1451,6 +1472,8 @@ const ctxMenu = ref<{
   ids: string[]; // targets — may include the single right-clicked session or the whole selection
 } | null>(null);
 
+const newSessionCtxMenu = ref<{ x: number; y: number } | null>(null);
+
 const DELETE_CONFIRM_WIDTH = 244;
 const DELETE_CONFIRM_HEIGHT = 136;
 const DELETE_CONFIRM_GAP = 8;
@@ -1464,6 +1487,7 @@ const deleteConfirm = ref<{
 function onContextMenu(e: MouseEvent, session: SessionSummary) {
   e.preventDefault();
   e.stopPropagation();
+  newSessionCtxMenu.value = null;
   deleteConfirm.value = null;
   let ids: string[];
   if (selectedIds.value.size > 1 && selectedIds.value.has(session.id)) {
@@ -1479,7 +1503,24 @@ function onContextMenu(e: MouseEvent, session: SessionSummary) {
 
 function closeCtxMenu() {
   ctxMenu.value = null;
+  newSessionCtxMenu.value = null;
   deleteConfirm.value = null;
+}
+
+function onNewSessionContextMenu(e: MouseEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  ctxMenu.value = null;
+  deleteConfirm.value = null;
+  newSessionCtxMenu.value = { x: e.clientX, y: e.clientY };
+}
+
+function onNewSessionClick(e: MouseEvent) {
+  if (e.ctrlKey) {
+    void openNewSessionInWindow();
+    return;
+  }
+  emit("newChat");
 }
 
 /* Inline rename */
@@ -1571,12 +1612,14 @@ function confirmDelete() {
   performDelete(deleteConfirm.value.ids);
 }
 
-function ctxSaveContext(includeSystemPrompt: boolean) {
+function ctxExportContext(review = false) {
   if (ctxMenu.value) {
-    emit("saveRawContext", {
-      sessionId: ctxMenu.value.session.id,
-      includeSystemPrompt,
-    });
+    const request = { sessionId: ctxMenu.value.session.id };
+    if (review) {
+      emit("reviewSessionContext", request);
+    } else {
+      emit("exportSessionContext", request);
+    }
   }
   closeCtxMenu();
 }
@@ -1596,6 +1639,44 @@ async function ctxOpenSessionInUnity() {
     notificationStore.addNotice("error", err.message, {
       code: err.code,
       operation: "openSessionInUnity",
+      skipConsoleLog: true,
+    });
+  }
+}
+
+async function openSessionInWindow(session: SessionSummary) {
+  try {
+    await openChatSessionWindow({
+      sessionId: session.id,
+      title: session.title || session.id,
+    });
+  } catch (error) {
+    const err = normalizeAppError(error);
+    notificationStore.addNotice("error", err.message, {
+      code: err.code,
+      operation: "openChatSessionWindow",
+      skipConsoleLog: true,
+    });
+  }
+}
+
+async function ctxOpenSessionInWindow() {
+  const menu = ctxMenu.value;
+  if (!menu || menu.ids.length !== 1) return;
+  const session = menu.session;
+  closeCtxMenu();
+  await openSessionInWindow(session);
+}
+
+async function openNewSessionInWindow() {
+  closeCtxMenu();
+  try {
+    await openNewChatSessionWindow(t("chat.session.newSession"));
+  } catch (error) {
+    const err = normalizeAppError(error);
+    notificationStore.addNotice("error", err.message, {
+      code: err.code,
+      operation: "openNewChatSessionWindow",
       skipConsoleLog: true,
     });
   }
@@ -1635,7 +1716,8 @@ function ctxArchive() {
         class="sp-session-item sp-new-session-item"
         :class="{ active: activeSessionId === null }"
         :title="newChatTitle"
-        @click="emit('newChat')"
+        @click="onNewSessionClick"
+        @contextmenu="onNewSessionContextMenu"
       >
         <span class="sp-expand-spacer">
           <span class="sp-new-session-plus" aria-hidden="true">+</span>
@@ -1654,6 +1736,7 @@ function ctxArchive() {
           rowRoleClass(row.node),
           {
             active: row.node.kind === 'session' && !!row.node.sessionId && (row.node.sessionId === activeSessionId || selectedIds.has(row.node.sessionId) || (ctxMenu && ctxMenu.ids.includes(row.node.sessionId))),
+            pending: row.node.kind === 'session' && row.node.sessionId === pendingSessionId,
             streaming: row.node.status === 'running' || row.node.status === 'finishing',
             folder: row.node.kind === 'folder',
             child: row.depth > 0,
@@ -1662,6 +1745,7 @@ function ctxArchive() {
             expandable: row.hasChildren,
           },
         ]"
+        :aria-busy="row.node.kind === 'session' && row.node.sessionId === pendingSessionId"
         :style="{ paddingLeft: `${6 + row.depth * 12}px` }"
         @click="onRowClick(row, $event)"
         @contextmenu="row.node.kind === 'session' && row.node.session ? onContextMenu($event, row.node.session) : undefined"
@@ -1706,7 +1790,11 @@ function ctxArchive() {
           </template>
           <template v-else>
             <div class="sp-session-main">
-              <span class="sp-session-title">{{ rowLabel(row.node) }}</span>
+              <span
+                class="sp-session-title"
+                :class="{ 'is-running': isSessionTitleRunning(row.node) }"
+                :data-title="isSessionTitleRunning(row.node) ? rowLabel(row.node) : undefined"
+              >{{ rowLabel(row.node) }}</span>
               <div class="sp-session-meta">
                 <span
                   v-if="row.node.status && row.node.status !== 'running'"
@@ -2165,6 +2253,20 @@ function ctxArchive() {
     </Teleport>
 
     <BaseContextMenu
+      v-if="newSessionCtxMenu"
+      class="sp-ctx-menu"
+      :x="newSessionCtxMenu.x"
+      :y="newSessionCtxMenu.y"
+      :min-width="120"
+      @close="closeCtxMenu"
+    >
+      <button type="button" class="sp-ctx-item" @click="openNewSessionInWindow">
+        <LucideIcon :icon="AppWindow" :size="13" />
+        {{ t('chat.session.openInWindow') }}
+      </button>
+    </BaseContextMenu>
+
+    <BaseContextMenu
       v-if="ctxMenu"
       class="sp-ctx-menu"
       :x="ctxMenu.x"
@@ -2174,9 +2276,10 @@ function ctxArchive() {
     >
       <template v-if="ctxMenu.ids.length <= 1">
         <button type="button" class="sp-ctx-item" @click="startRename(ctxMenu!.session)"><LucideIcon :icon="PencilLine" :size="13" />{{ t('chat.session.rename') }}</button>
+        <button type="button" class="sp-ctx-item" @click="ctxOpenSessionInWindow"><LucideIcon :icon="AppWindow" :size="13" />{{ t('chat.session.openInWindow') }}</button>
         <button type="button" class="sp-ctx-item" @click="ctxOpenSessionInUnity"><LucideIcon :icon="Box" :size="13" />{{ t('chat.session.openInUnity') }}</button>
-        <button type="button" class="sp-ctx-item" @click="ctxSaveContext(true)"><LucideIcon :icon="Save" :size="13" />{{ t('chat.saveContextWithSystemPrompt') }}</button>
-        <button type="button" class="sp-ctx-item" @click="ctxSaveContext(false)"><LucideIcon :icon="Save" :size="13" />{{ t('chat.saveContextWithoutSystemPrompt') }}</button>
+        <button type="button" class="sp-ctx-item" @click="ctxExportContext()"><LucideIcon :icon="Save" :size="13" />{{ t('chat.exportContext') }}</button>
+        <button type="button" class="sp-ctx-item" @click="ctxExportContext(true)"><LucideIcon :icon="FileSearch" :size="13" />{{ t('chat.reviewContext') }}</button>
         <div class="sp-ctx-sep"></div>
         <button type="button" class="sp-ctx-item" @click="ctxArchive"><LucideIcon :icon="Archive" :size="13" />{{ t('chat.session.archive') }}</button>
         <button type="button" class="sp-ctx-item danger" @click.stop="requestDelete"><LucideIcon :icon="Trash2" :size="13" />{{ t('chat.session.delete') }}</button>
@@ -2954,6 +3057,30 @@ function ctxArchive() {
   white-space: nowrap;
 }
 
+.sp-session-title.is-running {
+  position: relative;
+  color: color-mix(in srgb, var(--text-color) 62%, var(--text-secondary) 38%);
+  user-select: none;
+}
+
+.sp-session-title.is-running::after {
+  content: attr(data-title);
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--text-color);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent 40%, currentColor 50%, transparent 60%);
+  mask-image: linear-gradient(90deg, transparent 40%, currentColor 50%, transparent 60%);
+  -webkit-mask-size: 220% 100%;
+  mask-size: 220% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: sp-session-title-scan 2s ease-in-out infinite;
+}
+
 .sp-session-meta {
   margin-left: auto;
   min-width: 0;
@@ -3057,6 +3184,17 @@ function ctxArchive() {
 @keyframes sp-session-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+@keyframes sp-session-title-scan {
+  0% {
+    -webkit-mask-position: 100% 0;
+    mask-position: 100% 0;
+  }
+  100% {
+    -webkit-mask-position: 0 0;
+    mask-position: 0 0;
+  }
 }
 
 .sp-session-dot {

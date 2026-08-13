@@ -376,6 +376,22 @@ describe("injectAssetRefs", () => {
     expect(result).not.toContain('data-asset-kind="folder"');
   });
 
+  it("renders inline-code Unity folders as folder refs without asset previews", () => {
+    const html = "<code>Assets/DevTools/AnimationPipeline</code>";
+    const result = injectAssetRefs(html, {
+      requireInlinePathStatus: true,
+      inlinePathStatus: (path) => ({ path, exists: true, entryKind: "folder" }),
+    });
+
+    expect(result).toContain("md-file-ref");
+    expect(result).toContain("md-folder-ref");
+    expect(result).toContain('data-file-path="Assets/DevTools/AnimationPipeline"');
+    expect(result).toContain('data-entry-kind="folder"');
+    expect(result).not.toContain("md-unity-asset-ref");
+    expect(result).not.toContain('data-asset-path=');
+    expect(result).not.toContain('data-md-unity-object-preview="true"');
+  });
+
   it("collects inline-code path candidates for workspace stat", () => {
     const html = [
       "<code>Assets</code>",
@@ -393,21 +409,21 @@ describe("injectAssetRefs", () => {
   });
 
   it("converts absolute local file paths inside inline code", () => {
-    const html = "<code>C:\\Users\\admin\\AppData\\Roaming\\Locus\\temp\\locus-temp-test.txt</code>";
+    const html = "<code>C:\\Users\\ExampleUser\\AppData\\Roaming\\Locus\\temp\\locus-temp-test.txt</code>";
     const result = injectAssetRefs(html);
     expect(result).toContain("md-file-ref");
-    expect(result).toContain('data-file-path="C:/Users/admin/AppData/Roaming/Locus/temp/locus-temp-test.txt"');
+    expect(result).toContain('data-file-path="C:/Users/ExampleUser/AppData/Roaming/Locus/temp/locus-temp-test.txt"');
     expect(result).toContain('data-entry-kind="file"');
     expect(result).toContain("locus-temp-test.txt");
     expect(result).not.toContain("<code>");
   });
 
   it("converts absolute local folder paths inside inline code", () => {
-    const html = "<code>C:\\Users\\admin\\AppData\\Roaming\\Locus\\temp\\</code>";
+    const html = "<code>C:\\Users\\ExampleUser\\AppData\\Roaming\\Locus\\temp\\</code>";
     const result = injectAssetRefs(html);
     expect(result).toContain("md-file-ref");
     expect(result).toContain("md-folder-ref");
-    expect(result).toContain('data-file-path="C:/Users/admin/AppData/Roaming/Locus/temp"');
+    expect(result).toContain('data-file-path="C:/Users/ExampleUser/AppData/Roaming/Locus/temp"');
     expect(result).toContain('data-entry-kind="folder"');
     expect(result).toContain("temp");
   });
@@ -859,29 +875,29 @@ describe("injectFileRefs", () => {
   });
 
   it("converts bare absolute local file paths", () => {
-    const html = "Wrote C:/Users/admin/AppData/Roaming/Locus/temp/locus-temp-test.txt.";
+    const html = "Wrote C:/Users/ExampleUser/AppData/Roaming/Locus/temp/locus-temp-test.txt.";
     const result = injectFileRefs(html);
     expect(result).toContain("md-file-ref");
-    expect(result).toContain('data-file-path="C:/Users/admin/AppData/Roaming/Locus/temp/locus-temp-test.txt"');
+    expect(result).toContain('data-file-path="C:/Users/ExampleUser/AppData/Roaming/Locus/temp/locus-temp-test.txt"');
     expect(result).toContain('data-entry-kind="file"');
     expect(result).toContain("locus-temp-test.txt");
     expect(result).toContain("</span>.");
   });
 
   it("converts quoted absolute local paths with spaces", () => {
-    const html = "Saved 'C:/Users/admin/AppData/Roaming/Locus/temp/My File.txt'";
+    const html = "Saved 'C:/Users/ExampleUser/AppData/Roaming/Locus/temp/My File.txt'";
     const result = injectFileRefs(html);
     expect(result).toContain("md-file-ref");
-    expect(result).toContain('data-file-path="C:/Users/admin/AppData/Roaming/Locus/temp/My File.txt"');
+    expect(result).toContain('data-file-path="C:/Users/ExampleUser/AppData/Roaming/Locus/temp/My File.txt"');
     expect(result).toContain("My File.txt");
     expect(result).not.toContain("'C:/Users");
   });
 
   it("converts bare absolute local folder paths", () => {
-    const html = "Open C:/Users/admin/AppData/Roaming/Locus/temp/ when needed";
+    const html = "Open C:/Users/ExampleUser/AppData/Roaming/Locus/temp/ when needed";
     const result = injectFileRefs(html);
     expect(result).toContain("md-folder-ref");
-    expect(result).toContain('data-file-path="C:/Users/admin/AppData/Roaming/Locus/temp"');
+    expect(result).toContain('data-file-path="C:/Users/ExampleUser/AppData/Roaming/Locus/temp"');
     expect(result).toContain('data-entry-kind="folder"');
     expect(result).toContain("temp");
   });
@@ -989,10 +1005,10 @@ describe("injectFileRefs", () => {
 
 describe("prepareMarkdownImages", () => {
   it("converts a standalone local image path to a resolvable image preview", () => {
-    const result = prepareMarkdownImages("<p>C:/Users/admin/AppData/Roaming/Locus/temp/result.png</p>");
+    const result = prepareMarkdownImages("<p>C:/Users/ExampleUser/AppData/Roaming/Locus/temp/result.png</p>");
     expect(result).toContain("md-image-frame");
     expect(result).toContain("md-image-preview");
-    expect(result).toContain('data-md-image-source="C:/Users/admin/AppData/Roaming/Locus/temp/result.png"');
+    expect(result).toContain('data-md-image-source="C:/Users/ExampleUser/AppData/Roaming/Locus/temp/result.png"');
     expect(result).toContain('data-md-image-state="pending"');
     expect(result).not.toContain("md-file-ref");
   });

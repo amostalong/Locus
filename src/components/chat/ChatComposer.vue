@@ -13,8 +13,10 @@ const props = withDefaults(defineProps<{
   isStreaming?: boolean;
   cancelling?: boolean;
   canSend?: boolean;
+  canResume?: boolean;
   sendLabel?: string;
   cancelLabel?: string;
+  resumeLabel?: string;
   maxHeight?: number;
   submitMode?: ChatSubmitMode;
   compact?: boolean;
@@ -29,8 +31,10 @@ const props = withDefaults(defineProps<{
   isStreaming: false,
   cancelling: false,
   canSend: false,
+  canResume: false,
   sendLabel: "",
   cancelLabel: "",
+  resumeLabel: "",
   maxHeight: 200,
   submitMode: "enter-send",
   compact: false,
@@ -45,6 +49,7 @@ const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
   (e: "send"): void;
   (e: "cancel"): void;
+  (e: "resume"): void;
   (e: "keydown", event: KeyboardEvent): void;
   (e: "keyup", event: KeyboardEvent): void;
   (e: "input", event: Event): void;
@@ -74,18 +79,21 @@ const showInlineAction = computed(() => props.compact && props.showAction);
 const textareaDisabled = computed(() => props.disabled);
 const isCancelAction = computed(() => props.isStreaming && !props.canSend);
 const isCancellingAction = computed(() => isCancelAction.value && props.cancelling);
+const isResumeAction = computed(() =>
+  !props.isStreaming && props.canResume && !props.canSend,
+);
 const actionDisabled = computed(() =>
   props.disabled
   || isCancellingAction.value
-  || (!isCancelAction.value && !props.canSend));
+  || (!isCancelAction.value && !isResumeAction.value && !props.canSend));
 const textareaStyle = computed(() => ({
   maxHeight: `${props.maxHeight}px`,
 }));
 const actionLabel = computed(() => {
   if (isCancellingAction.value) return t("common.cancelling");
-  return isCancelAction.value
-    ? (props.cancelLabel || t("common.cancel"))
-    : (props.sendLabel || t("common.send"));
+  if (isCancelAction.value) return props.cancelLabel || t("common.cancel");
+  if (isResumeAction.value) return props.resumeLabel || t("chat.input.resume");
+  return props.sendLabel || t("common.send");
 });
 
 let resizeTextareaFrame: number | null = null;
@@ -130,6 +138,10 @@ function handleKeydown(event: KeyboardEvent) {
 function handleActionClick() {
   if (isCancelAction.value) {
     emit("cancel");
+    return;
+  }
+  if (isResumeAction.value) {
+    emit("resume");
     return;
   }
   if (actionDisabled.value) return;
@@ -224,7 +236,7 @@ watch(() => props.compact, () => {
       <button
         v-if="showInlineAction"
         class="chat-composer-action chat-composer-inline-action ui-select-none"
-        :class="{ 'is-cancel': isCancelAction, 'is-cancelling': isCancellingAction }"
+        :class="{ 'is-cancel': isCancelAction, 'is-cancelling': isCancellingAction, 'is-resume': isResumeAction }"
         :disabled="actionDisabled"
         :title="actionLabel"
         :aria-label="actionLabel"
@@ -232,6 +244,7 @@ watch(() => props.compact, () => {
         @click="handleActionClick"
       >
         <span v-if="isCancelAction" class="chat-composer-stop-icon" aria-hidden="true">&#9632;</span>
+        <span v-else-if="isResumeAction" class="chat-composer-resume-icon" aria-hidden="true"></span>
         <span v-else class="chat-composer-send-icon" aria-hidden="true">&#8593;</span>
       </button>
     </div>
@@ -245,7 +258,7 @@ watch(() => props.compact, () => {
         <button
           v-if="showAction"
           class="chat-composer-action ui-select-none"
-          :class="{ 'is-cancel': isCancelAction, 'is-cancelling': isCancellingAction }"
+          :class="{ 'is-cancel': isCancelAction, 'is-cancelling': isCancellingAction, 'is-resume': isResumeAction }"
           :disabled="actionDisabled"
           :title="actionLabel"
           :aria-label="actionLabel"
@@ -253,6 +266,7 @@ watch(() => props.compact, () => {
           @click="handleActionClick"
         >
           <span v-if="isCancelAction" class="chat-composer-stop-icon" aria-hidden="true">&#9632;</span>
+          <span v-else-if="isResumeAction" class="chat-composer-resume-icon" aria-hidden="true"></span>
           <span v-else class="chat-composer-send-icon" aria-hidden="true">&#8593;</span>
         </button>
       </div>
@@ -502,6 +516,15 @@ watch(() => props.compact, () => {
   font-size: 16px;
   font-weight: 600;
   line-height: 1;
+}
+
+.chat-composer-resume-icon {
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid currentColor;
+  transform: translateX(1px);
 }
 
 .chat-composer-stop-icon {

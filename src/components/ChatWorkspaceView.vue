@@ -3,8 +3,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import { t } from "../i18n";
 import { normalizeAppError } from "../services/errors";
-import { saveRawContext as saveCtx } from "../services/session";
-import type { EffortLevel, SaveRawContextRequest } from "../types";
+import { createSession, exportSessionContext as exportContext } from "../services/session";
+import { broadcastSessionExecutionState } from "../services/sessionExecutionState";
+import type {
+  EffortLevel,
+  SessionContextExportRequest,
+  SkillIntentItem,
+  UserIntentMeta,
+} from "../types";
 import { useAgentStore } from "../stores/agent";
 import { useChatStore } from "../stores/chat";
 import { useChatChangesStore } from "../stores/chatChanges";
@@ -20,6 +26,8 @@ import {
 import ChatView from "./ChatView.vue";
 import ThinkingPanel from "./ThinkingPanel.vue";
 import ChatSidebarPanel from "./ChatSidebarPanel.vue";
+import { resolveChatContentBalanceInset } from "./chat/chatSidebarBalance";
+import { sessionContextExportFileName } from "../composables/sessionContextExport";
 
 type ChatLayoutMode = "auto" | "horizontal" | "vertical";
 type ResolvedChatLayoutMode = "horizontal" | "vertical";
@@ -29,11 +37,15 @@ const props = withDefaults(defineProps<{
   layoutMode?: ChatLayoutMode;
   defaultSessionPanelCollapsed?: boolean;
   sessionPanelStorageScope?: string;
+  showSessionNavigation?: boolean;
+  persistSessionSelection?: boolean;
 }>(), {
   active: true,
   layoutMode: "auto",
   defaultSessionPanelCollapsed: false,
   sessionPanelStorageScope: "",
+  showSessionNavigation: true,
+  persistSessionSelection: true,
 });
 
 const agentStore = useAgentStore();
@@ -47,9 +59,10 @@ const { skillItems } = useSkills();
 
 const workspaceRef = ref<HTMLElement | null>(null);
 const workspaceWidth = ref(0);
+const assistantSidebarBalanceWidth = ref(0);
 const isVerticalLayout = computed(() => props.layoutMode === "vertical");
 const showAssistantSidebar = computed(() =>
-  props.active && (chatStore.showTodoPanel || chatChangesStore.currentPanelVisible),
+  props.active && chatChangesStore.currentPanelVisible,
 );
 const ASSISTANT_PANEL_MIN_CHAT_WIDTH = 560;
 const ASSISTANT_SIDEBAR_SIDE_MAX_WIDTH = 520;
@@ -95,12 +108,94 @@ const assistantSidebarMaxSideWidth = computed(() => {
   );
 });
 let workspaceResizeObserver: ResizeObserverHandle | null = null;
+let assistantSidebarResizeObserver: ResizeObserver | null = null;
+let assistantSidebarShell: HTMLElement | null = null;
+
+function syncAssistantSidebarContentBalance(shell = assistantSidebarShell) {
+  if (isVerticalLayout.value || !shell || !workspaceRef.value) {
+    assistantSidebarBalanceWidth.value = 0;
+    return;
+  }
+  const chatSurface = workspaceRef.value.querySelector<HTMLElement>(".chat-view");
+  if (!chatSurface) {
+    assistantSidebarBalanceWidth.value = 0;
+    return;
+  }
+  assistantSidebarBalanceWidth.value = resolveChatContentBalanceInset(
+    chatSurface.clientWidth,
+    shell.getBoundingClientRect().width,
+  );
+}
+
+function disconnectAssistantSidebarResizeObserver() {
+  assistantSidebarResizeObserver?.disconnect();
+  assistantSidebarResizeObserver = null;
+  assistantSidebarShell = null;
+  assistantSidebarBalanceWidth.value = 0;
+}
+
+function connectAssistantSidebarResizeObserver(shell: HTMLElement) {
+  disconnectAssistantSidebarResizeObserver();
+  assistantSidebarShell = shell;
+  syncAssistantSidebarContentBalance(shell);
+  if (typeof ResizeObserver === "undefined") return;
+  assistantSidebarResizeObserver = new ResizeObserver(() => {
+    syncAssistantSidebarContentBalance(shell);
+  });
+  assistantSidebarResizeObserver.observe(shell);
+  const chatSurface = workspaceRef.value?.querySelector<HTMLElement>(".chat-view");
+  if (chatSurface) {
+    assistantSidebarResizeObserver.observe(chatSurface);
+  }
+}
 
 function handleLayoutModeChange(_mode: ResolvedChatLayoutMode) {}
+
+function selectWorkspaceSession(sessionId: string) {
+  void chatStore.selectSession(sessionId, {
+    persist: props.persistSessionSelection,
+  });
+}
+
+function createWorkspaceSession() {
+  chatStore.newChat({
+    persistSelection: props.persistSessionSelection,
+  });
+}
+
+function publishSessionExecutionState() {
+  const sessionId = chatStore.activeSessionId;
+  if (!sessionId) return;
+  // Fork: publish the effective (per-session override-aware) values.
+  chatStore.applyActiveSessionExecutionState(
+    sessionId,
+    modelStore.effectiveModelId,
+    modelStore.effectiveEffort,
+  );
+  void broadcastSessionExecutionState({
+    sessionId,
+    modelId: modelStore.effectiveModelId,
+    effort: modelStore.effectiveEffort,
+  });
+}
+
+async function selectWorkspaceModel(modelId: string) {
+  // Fork: route to the active session's per-session override instead of
+  // the global selection (per-session model feature).
+  modelStore.selectSessionModel(modelId);
+  await nextTick();
+  publishSessionExecutionState();
+}
+
+function selectWorkspaceEffort(effort: EffortLevel) {
+  modelStore.selectEffort(effort);
+  publishSessionExecutionState();
+}
 
 function beforeEnterSidebarPanel(element: Element) {
   const shell = element as HTMLElement;
   const isBottomLayout = shell.classList.contains("layout-bottom");
+  connectAssistantSidebarResizeObserver(shell);
   shell.dataset.enterAxis = isBottomLayout ? "vertical" : "horizontal";
   shell.style.pointerEvents = "none";
   shell.style.overflow = "hidden";
@@ -112,12 +207,14 @@ function beforeEnterSidebarPanel(element: Element) {
     shell.style.height = "0px";
     shell.style.minHeight = "0px";
     shell.style.maxHeight = "0px";
+    syncAssistantSidebarContentBalance(shell);
     return;
   }
 
   shell.style.width = "0px";
   shell.style.minWidth = "0px";
   shell.style.maxWidth = "0px";
+  syncAssistantSidebarContentBalance(shell);
 }
 
 function enterSidebarPanel(element: Element, done: () => void) {
@@ -298,6 +395,7 @@ function afterLeaveSidebarPanel(element: Element) {
   const shell = element as HTMLElement;
   delete shell.dataset.exitAxis;
   shell.removeAttribute("style");
+  disconnectAssistantSidebarResizeObserver();
 }
 
 function setWorkspaceWidth(width: number) {
@@ -314,6 +412,7 @@ function handleWorkspaceResize(entries: ResizeObserverEntry[]) {
   if (uiStore.isLayoutTransitioning) return;
   const width = entries[0]?.contentRect.width ?? workspaceRef.value?.clientWidth ?? 0;
   setWorkspaceWidth(width);
+  syncAssistantSidebarContentBalance();
 }
 
 function disconnectWorkspaceResizeObserver() {
@@ -330,29 +429,92 @@ function connectWorkspaceResizeObserver() {
   workspaceResizeObserver.observe(workspaceRef.value);
 }
 
-async function saveRawContext(request?: string | SaveRawContextRequest) {
-  const sid = typeof request === "string"
-    ? request
-    : request?.sessionId || chatStore.activeSessionId;
-  const includeSystemPrompt = typeof request === "string"
-    ? true
-    : request?.includeSystemPrompt ?? true;
+function resolveContextSessionId(request?: string | SessionContextExportRequest): string {
+  return (typeof request === "string" ? request : request?.sessionId || chatStore.activeSessionId)?.trim() ?? "";
+}
+
+function reviewContextSkillIntent(): UserIntentMeta {
+  const manifest = skillItems.value.find((skill) =>
+    skill.dirName === "review-context" && skill.source === "project"
+  ) ?? skillItems.value.find((skill) =>
+    skill.dirName === "review-context" && skill.source === "app"
+  );
+  const skill: SkillIntentItem = manifest
+    ? {
+        dirName: manifest.dirName,
+        source: manifest.source,
+        name: manifest.name,
+      }
+    : {
+        dirName: "review-context",
+        source: "app",
+        name: "Review Context",
+      };
+  return {
+    kind: "user_intent_v1",
+    mode: "build",
+    skills: [skill],
+  };
+}
+
+async function exportSessionContext(request?: string | SessionContextExportRequest) {
+  const sid = resolveContextSessionId(request);
   if (!sid) return;
   try {
+    const sessionTitle = chatStore.sessions.find((session) => session.id === sid)?.title || "untitled";
     const filePath = await save({
-      defaultPath: includeSystemPrompt
-        ? `context_${sid.slice(0, 8)}_with_system_prompt.md`
-        : `context_${sid.slice(0, 8)}_without_system_prompt.md`,
-      filters: [{ name: "Markdown", extensions: ["md"] }],
+      defaultPath: sessionContextExportFileName(sid, sessionTitle),
+      filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
     });
     if (!filePath) return;
-    await saveCtx(sid, filePath, includeSystemPrompt);
+    const result = await exportContext(sid, filePath);
+    notificationStore.addNotice("success", t("chat.contextExported", result.filePath), {
+      operation: "exportSessionContext",
+      replaceOperation: true,
+    });
   } catch (e) {
     const err = normalizeAppError(e);
-    console.error("save_raw_context failed:", e);
+    console.error("export_session_context failed:", e);
     notificationStore.addNotice("error", t("app.saveFailed", err.message), {
       code: err.code,
-      operation: "saveRawContext",
+      operation: "exportSessionContext",
+      skipConsoleLog: true,
+    });
+  }
+}
+
+async function reviewSessionContext(request?: string | SessionContextExportRequest) {
+  const sid = resolveContextSessionId(request);
+  if (!sid) return;
+  try {
+    const source = chatStore.sessions.find((session) => session.id === sid);
+    const result = await exportContext(sid, null);
+    const reviewSessionId = await createSession({
+      title: t("chat.contextReviewTitle", source?.title || sid.slice(0, 8)),
+      sessionType: "chat",
+      agentId: agentStore.selectedAgentId || null,
+    });
+    await chatStore.refreshSessions();
+    await chatStore.selectSession(reviewSessionId, {
+      persist: props.persistSessionSelection,
+    });
+    await chatStore.sendMessage(
+      t(
+        "chat.contextReviewPrompt",
+        result.filePath,
+        sid,
+        result.captureQuality,
+      ),
+      [],
+      [],
+      { userIntent: reviewContextSkillIntent() },
+    );
+  } catch (e) {
+    const err = normalizeAppError(e);
+    console.error("review_session_context failed:", e);
+    notificationStore.addNotice("error", t("chat.contextReviewFailed", err.message), {
+      code: err.code,
+      operation: "reviewSessionContext",
       skipConsoleLog: true,
     });
   }
@@ -364,6 +526,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   disconnectWorkspaceResizeObserver();
+  disconnectAssistantSidebarResizeObserver();
 });
 </script>
 
@@ -381,6 +544,8 @@ onUnmounted(() => {
       :layout-mode="layoutMode"
       :default-session-panel-collapsed="defaultSessionPanelCollapsed"
       :session-panel-storage-scope="sessionPanelStorageScope"
+      :show-session-navigation="showSessionNavigation"
+      :content-start-inset="assistantSidebarBalanceWidth"
       :messages="chatStore.messages"
       streaming-text=""
       :typed-text-stream="chatStore.typedStream"
@@ -388,6 +553,7 @@ onUnmounted(() => {
       :streaming-text-order="chatStore.streamingTextOrder"
       :is-streaming="chatStore.isStreaming"
       :is-cancelling="chatStore.isCancelling"
+      :can-resume-interrupted="chatStore.canResumeInterrupted"
       :is-compacting="chatStore.isCompacting"
       :is-thinking="chatStore.isThinking"
       :has-thinking="chatStore.hasStreamingThinking"
@@ -413,6 +579,7 @@ onUnmounted(() => {
       :pending-tool-confirms="chatStore.pendingToolConfirms"
       :sessions="chatStore.sessions"
       :active-session-id="chatStore.activeSessionId"
+      :pending-session-id="chatStore.pendingSelectionSessionId"
       :unity-connected="projectStore.unityConnected"
       :unity-plugin-status="projectStore.pluginToast"
       :unity-plugin-installing="projectStore.pluginInstalling"
@@ -430,17 +597,19 @@ onUnmounted(() => {
       @compact="chatStore.compactSession"
       @fork="chatStore.forkSession"
       @cancel="chatStore.cancelChat"
+      @resume="chatStore.resumeInterrupted"
       @select-agent="(id: string) => agentStore.selectAgent(id)"
-      @select-model="(id: string) => modelStore.selectSessionModel(id)"
-      @select-effort="(level: EffortLevel) => modelStore.selectEffort(level)"
+      @select-model="selectWorkspaceModel"
+      @select-effort="selectWorkspaceEffort"
       @select-fast-mode="(enabled: boolean) => modelStore.selectCodexFastMode(enabled)"
-      @save-raw-context="saveRawContext"
+      @export-session-context="exportSessionContext"
+      @review-session-context="reviewSessionContext"
       @answer-question="chatStore.answerQuestion"
       @answer-tool-confirm="chatStore.answerToolConfirm"
       @answer-all-tool-confirms="chatStore.answerAllToolConfirms"
       @open-thinking="chatStore.openThinkingPanel"
-      @select-session="chatStore.selectSession"
-      @new-chat="chatStore.newChat"
+      @select-session="selectWorkspaceSession"
+      @new-chat="createWorkspaceSession"
       @rename-session="chatStore.renameSession"
       @archive-session="chatStore.archiveSession"
       @delete-session="chatStore.deleteSession"
@@ -472,10 +641,6 @@ onUnmounted(() => {
         :layout="isVerticalLayout ? 'bottom' : 'side'"
         :max-side-width="assistantSidebarMaxSideWidth"
         :storage-scope="sessionPanelStorageScope"
-        :todos="chatStore.visibleTodos"
-        :is-streaming="chatStore.isStreaming"
-        :todo-write-version="chatStore.todoCelebrationVersion"
-        :celebration-enabled="chatStore.todoCelebrationEnabled"
       />
     </Transition>
   </div>

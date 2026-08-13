@@ -43,11 +43,11 @@ fn default_llm_strip_inline_think_tags() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
 
-/// Default `task` subagent nesting depth: the top-level agent may spawn
+/// Default `subagent` nesting depth: the top-level agent may spawn
 /// subagents, but those subagents may not spawn further subagents.
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const SUBAGENT_MAX_DEPTH_LIMIT: u32 = 8;
-/// Default cap on `task` subagents running at the same time within one
+/// Default cap on `subagent` calls running at the same time within one
 /// top-level agent tree.
 pub const DEFAULT_SUBAGENT_MAX_CONCURRENT: u32 = 3;
 pub const SUBAGENT_MAX_CONCURRENT_LIMIT: u32 = 16;
@@ -72,6 +72,10 @@ fn default_debug_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+fn default_async_tasks_enabled() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 fn default_view_windows_above_main() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
@@ -84,6 +88,10 @@ fn default_unity_background_hook_enabled() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
 
+fn default_unity_embed_enabled() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(true))
+}
+
 fn default_unity_state_probe_enabled() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
@@ -92,11 +100,23 @@ fn default_unity_sidecar_compiler() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
 
+fn default_unity_non_public_access() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(true))
+}
+
 fn default_unity_in_process_compile_fallback() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
 
 fn default_unity_hot_reload() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+fn default_tool_failure_log_enabled() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+fn default_unity_external_editor_default_enabled() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
@@ -284,8 +304,19 @@ pub struct AppConfig {
     pub base_url: Option<String>,
     #[serde(default = "default_debug_flag", with = "serde_atomic_bool")]
     pub debug: Arc<AtomicBool>,
+    /// Persist a bounded corpus of failed agent tool calls for later tool
+    /// quality analysis. Default off because entries include call arguments,
+    /// error output and session-position identifiers.
+    #[serde(
+        default = "default_tool_failure_log_enabled",
+        with = "serde_atomic_bool"
+    )]
+    pub tool_failure_log_enabled: Arc<AtomicBool>,
     #[serde(default = "default_debug_flag", with = "serde_atomic_bool")]
     pub file_tool_workspace_boundary: Arc<AtomicBool>,
+    /// Experimental background execution for selected long-running tools.
+    #[serde(default = "default_async_tasks_enabled", with = "serde_atomic_bool")]
+    pub async_tasks_enabled: Arc<AtomicBool>,
     #[serde(default = "default_close_behavior", with = "serde_close_behavior")]
     pub close_behavior: Arc<Mutex<AppCloseBehavior>>,
     #[serde(
@@ -330,6 +361,11 @@ pub struct AppConfig {
         with = "serde_atomic_bool"
     )]
     pub unity_background_hook_enabled: Arc<AtomicBool>,
+    /// Show Locus WebView windows inside Unity editor windows. Default on.
+    /// Turning this off destroys existing embed windows and makes incoming
+    /// overlay control messages inert while leaving the Unity command bridge on.
+    #[serde(default = "default_unity_embed_enabled", with = "serde_atomic_bool")]
+    pub unity_embed_enabled: Arc<AtomicBool>,
     /// Out-of-process native editor-state probe (stack/CPU classification) that
     /// keeps reporting through domain reloads and editor hangs, when the named
     /// pipe is silent. Default on; degrades to pipe+process inference when the
@@ -348,6 +384,15 @@ pub struct AppConfig {
     /// least one release cycle.
     #[serde(default = "default_unity_sidecar_compiler", with = "serde_atomic_bool")]
     pub unity_sidecar_compiler: Arc<AtomicBool>,
+    /// Let unity_execute / unity_run_states generated assemblies bind and
+    /// directly execute private/internal APIs and fields. Default on. The
+    /// per-tool `enable_non_public_access` argument can further disable this
+    /// for an individual call; this persisted setting remains the master gate.
+    #[serde(
+        default = "default_unity_non_public_access",
+        with = "serde_atomic_bool"
+    )]
+    pub unity_non_public_access: Arc<AtomicBool>,
     /// When the sidecar compiler is on and a compile is *unavailable* (sidecar
     /// down / transport error), fall back to the in-Unity Roslyn compile.
     /// Default on (keeps the graceful behavior). Turn off for pure-sidecar /
@@ -364,6 +409,13 @@ pub struct AppConfig {
     /// signature/field changes always go through `unity_recompile`.
     #[serde(default = "default_unity_hot_reload", with = "serde_atomic_bool")]
     pub unity_hot_reload: Arc<AtomicBool>,
+    /// Automatically select Locus as Unity's current external C# editor.
+    /// Registration remains available for manual selection when this is off.
+    #[serde(
+        default = "default_unity_external_editor_default_enabled",
+        with = "serde_atomic_bool"
+    )]
+    pub unity_external_editor_default_enabled: Arc<AtomicBool>,
     /// Route the Tauri↔Unity command channel through the native broker DLL
     /// (`locus_native`) loaded inside the Unity process, so the connection
     /// survives domain reloads. Default on; disabling this disables the Unity
@@ -393,10 +445,7 @@ pub struct AppConfig {
     /// streamed. `0` disables automatic retries; values are clamped to
     /// `llm::retry::MAX_RETRIES_LIMIT`. Mirrored into `llm::retry` at
     /// startup and on change.
-    #[serde(
-        default = "default_llm_retry_max_attempts",
-        with = "serde_atomic_u32"
-    )]
+    #[serde(default = "default_llm_retry_max_attempts", with = "serde_atomic_u32")]
     pub llm_retry_max_attempts: Arc<AtomicU32>,
     /// Reroute literal `<think>`/`<thinking>` prefixes of streamed content
     /// into the thinking channel on the OpenAI-compatible transports
@@ -410,20 +459,17 @@ pub struct AppConfig {
         with = "serde_atomic_bool"
     )]
     pub llm_strip_inline_think_tags: Arc<AtomicBool>,
-    /// Maximum `task` subagent nesting depth. 1 (default) lets the top-level
-    /// agent spawn subagents while subagents themselves cannot; a `task` call
+    /// Maximum `subagent` nesting depth. 1 (default) lets the top-level agent
+    /// spawn subagents while subagents themselves cannot; a `subagent` call
     /// past the cap fails with an error tool result. Clamped to
     /// 1..=SUBAGENT_MAX_DEPTH_LIMIT on read and write.
     #[serde(default = "default_subagent_max_depth", with = "serde_atomic_u32")]
     pub subagent_max_depth: Arc<AtomicU32>,
-    /// Maximum `task` subagents running at once within one top-level agent
+    /// Maximum `subagent` calls running at once within one top-level agent
     /// tree (default 3). Excess calls fail with an error tool result instead
     /// of queueing. Clamped to 1..=SUBAGENT_MAX_CONCURRENT_LIMIT on read and
     /// write.
-    #[serde(
-        default = "default_subagent_max_concurrent",
-        with = "serde_atomic_u32"
-    )]
+    #[serde(default = "default_subagent_max_concurrent", with = "serde_atomic_u32")]
     pub subagent_max_concurrent: Arc<AtomicU32>,
     #[serde(skip)]
     config_path: Arc<Mutex<Option<PathBuf>>>,
@@ -460,7 +506,9 @@ impl AppConfig {
             model,
             base_url,
             debug: Arc::new(AtomicBool::new(debug)),
+            tool_failure_log_enabled: default_tool_failure_log_enabled(),
             file_tool_workspace_boundary: default_debug_flag(),
+            async_tasks_enabled: default_async_tasks_enabled(),
             close_behavior: default_close_behavior(),
             dynamic_tool_loading_mode: default_dynamic_tool_loading_mode(),
             dynamic_tool_loading_native_migrated: true,
@@ -469,11 +517,14 @@ impl AppConfig {
             view_windows_above_main: default_view_windows_above_main(),
             view_open_in_existing_window: default_view_open_in_existing_window(),
             unity_background_hook_enabled: default_unity_background_hook_enabled(),
+            unity_embed_enabled: default_unity_embed_enabled(),
             unity_state_probe_enabled: default_unity_state_probe_enabled(),
             csharp_lsp_enabled: default_debug_flag(),
             unity_sidecar_compiler: default_unity_sidecar_compiler(),
+            unity_non_public_access: default_unity_non_public_access(),
             unity_in_process_compile_fallback: default_unity_in_process_compile_fallback(),
             unity_hot_reload: default_unity_hot_reload(),
+            unity_external_editor_default_enabled: default_unity_external_editor_default_enabled(),
             unity_native_bridge_enabled: default_unity_native_bridge_enabled(),
             unity_inline_force_evaluate_enabled: default_unity_inline_force_evaluate_enabled(),
             code_analysis_tools: default_code_analysis_tools(),
@@ -527,7 +578,10 @@ impl AppConfig {
         let migrated_native_tool_loading = Self::apply_native_tool_loading_migration(&mut value);
         let config = serde_json::from_value::<AppConfig>(value)
             .map_err(|e| format!("failed to deserialize config: {}", e))?;
-        Ok((config, scrubbed_legacy_secret || migrated_native_tool_loading))
+        Ok((
+            config,
+            scrubbed_legacy_secret || migrated_native_tool_loading,
+        ))
     }
 
     /// Rewrites `dynamic_tool_loading_mode` to `native` exactly once per
@@ -587,6 +641,16 @@ impl AppConfig {
         self.persist()
     }
 
+    pub fn tool_failure_log_enabled(&self) -> bool {
+        self.tool_failure_log_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_tool_failure_log_enabled(&self, value: bool) -> Result<(), String> {
+        self.tool_failure_log_enabled
+            .store(value, Ordering::Relaxed);
+        self.persist()
+    }
+
     pub fn file_tool_workspace_boundary_enabled(&self) -> bool {
         self.file_tool_workspace_boundary.load(Ordering::Relaxed)
     }
@@ -594,6 +658,15 @@ impl AppConfig {
     pub fn set_file_tool_workspace_boundary_enabled(&self, value: bool) -> Result<(), String> {
         self.file_tool_workspace_boundary
             .store(value, Ordering::Relaxed);
+        self.persist()
+    }
+
+    pub fn async_tasks_enabled(&self) -> bool {
+        self.async_tasks_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_async_tasks_enabled(&self, value: bool) -> Result<(), String> {
+        self.async_tasks_enabled.store(value, Ordering::Relaxed);
         self.persist()
     }
 
@@ -678,6 +751,15 @@ impl AppConfig {
         self.unity_background_hook_enabled.load(Ordering::Relaxed)
     }
 
+    pub fn unity_embed_enabled(&self) -> bool {
+        self.unity_embed_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_unity_embed_enabled(&self, value: bool) -> Result<(), String> {
+        self.unity_embed_enabled.store(value, Ordering::Relaxed);
+        self.persist()
+    }
+
     pub fn unity_state_probe_enabled(&self) -> bool {
         self.unity_state_probe_enabled.load(Ordering::Relaxed)
     }
@@ -706,6 +788,15 @@ impl AppConfig {
         self.persist()
     }
 
+    pub fn unity_non_public_access_enabled(&self) -> bool {
+        self.unity_non_public_access.load(Ordering::Relaxed)
+    }
+
+    pub fn set_unity_non_public_access_enabled(&self, value: bool) -> Result<(), String> {
+        self.unity_non_public_access.store(value, Ordering::Relaxed);
+        self.persist()
+    }
+
     pub fn unity_in_process_compile_fallback_enabled(&self) -> bool {
         self.unity_in_process_compile_fallback
             .load(Ordering::Relaxed)
@@ -723,6 +814,17 @@ impl AppConfig {
 
     pub fn set_unity_hot_reload_enabled(&self, value: bool) -> Result<(), String> {
         self.unity_hot_reload.store(value, Ordering::Relaxed);
+        self.persist()
+    }
+
+    pub fn unity_external_editor_default_enabled(&self) -> bool {
+        self.unity_external_editor_default_enabled
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn set_unity_external_editor_default_enabled(&self, value: bool) -> Result<(), String> {
+        self.unity_external_editor_default_enabled
+            .store(value, Ordering::Relaxed);
         self.persist()
     }
 
@@ -773,8 +875,10 @@ impl AppConfig {
     }
 
     pub fn set_llm_retry_max_attempts(&self, value: u32) -> Result<(), String> {
-        self.llm_retry_max_attempts
-            .store(crate::llm::retry::clamp_max_retries(value), Ordering::Relaxed);
+        self.llm_retry_max_attempts.store(
+            crate::llm::retry::clamp_max_retries(value),
+            Ordering::Relaxed,
+        );
         self.persist()
     }
 
@@ -1055,6 +1159,29 @@ mod tests {
     }
 
     #[test]
+    fn async_tasks_default_to_disabled_and_persist_opt_in() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{
+  "model": "legacy-model",
+  "debug": false
+}"#,
+        )
+        .expect("legacy config");
+
+        let config = AppConfig::load_from_path(&config_path);
+        assert!(!config.async_tasks_enabled());
+
+        config
+            .set_async_tasks_enabled(true)
+            .expect("persist async task opt-in");
+        let reloaded = AppConfig::load_from_path(&config_path);
+        assert!(reloaded.async_tasks_enabled());
+    }
+
+    #[test]
     fn default_skill_package_namespace_defaults_to_empty() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("config.json");
@@ -1127,6 +1254,24 @@ mod tests {
     }
 
     #[test]
+    fn unity_non_public_access_defaults_to_enabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{
+  "model": "legacy-model",
+  "debug": false
+}"#,
+        )
+        .expect("legacy config");
+
+        let config = AppConfig::load_from_path(&config_path);
+
+        assert!(config.unity_non_public_access_enabled());
+    }
+
+    #[test]
     fn unity_hot_reload_defaults_to_disabled() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("config.json");
@@ -1142,6 +1287,38 @@ mod tests {
         let config = AppConfig::load_from_path(&config_path);
 
         assert!(!config.unity_hot_reload_enabled());
+    }
+
+    #[test]
+    fn tool_failure_log_defaults_to_disabled_and_persists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.json");
+        fs::write(&config_path, r#"{"model":"legacy-model"}"#).expect("legacy config");
+
+        let config = AppConfig::load_from_path(&config_path);
+        assert!(!config.tool_failure_log_enabled());
+
+        config
+            .set_tool_failure_log_enabled(true)
+            .expect("persist tool failure log setting");
+        let reloaded = AppConfig::load_from_path(&config_path);
+        assert!(reloaded.tool_failure_log_enabled());
+    }
+
+    #[test]
+    fn unity_external_editor_default_is_opt_in_and_persists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.json");
+        fs::write(&config_path, r#"{"model":"legacy-model"}"#).expect("legacy config");
+
+        let config = AppConfig::load_from_path(&config_path);
+        assert!(!config.unity_external_editor_default_enabled());
+
+        config
+            .set_unity_external_editor_default_enabled(true)
+            .expect("persist external editor default");
+        let reloaded = AppConfig::load_from_path(&config_path);
+        assert!(reloaded.unity_external_editor_default_enabled());
     }
 
     #[test]
@@ -1199,6 +1376,24 @@ mod tests {
 
         // Phase D rollout: a config that predates the flag gets force-evaluation on.
         assert!(config.unity_inline_force_evaluate_enabled());
+    }
+
+    #[test]
+    fn unity_embed_defaults_to_enabled_and_respects_opt_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let default_path = temp.path().join("default-config.json");
+        fs::write(&default_path, r#"{"model":"legacy-model"}"#).expect("legacy config");
+        let default_config = AppConfig::load_from_path(&default_path);
+        assert!(default_config.unity_embed_enabled());
+
+        let disabled_path = temp.path().join("disabled-config.json");
+        fs::write(
+            &disabled_path,
+            r#"{"model":"legacy-model","unity_embed_enabled":false}"#,
+        )
+        .expect("disabled config");
+        let disabled_config = AppConfig::load_from_path(&disabled_path);
+        assert!(!disabled_config.unity_embed_enabled());
     }
 
     #[test]

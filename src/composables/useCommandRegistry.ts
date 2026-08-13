@@ -1,9 +1,13 @@
 import { computed, type Ref } from "vue";
 import type { SkillManifest } from "../types";
 import { t } from "../i18n";
-import type { CommandDef } from "./chatInputIntents";
+import type { CommandDef, IntentCommandType } from "./chatInputIntents";
 import { rankSearchResults, scoreSearchFields, splitSearchTerms } from "./searchMatcher";
-import { resolveSkillCommandTrigger, skillHasCommandEnabled } from "./skillCommands";
+import {
+  BUILTIN_COMMAND_NAMES,
+  resolveSkillCommandTrigger,
+  skillHasCommandEnabled,
+} from "./skillCommands";
 
 export function getCompactInstruction() {
   return t("chat.command.compactInstruction");
@@ -40,10 +44,28 @@ export function useCommandRegistry(
         commandType: "undo",
       },
       {
+        name: "/export-context",
+        description: t("chat.command.exportContextDesc"),
+        commandKind: "action",
+        commandType: "export-context",
+      },
+      {
+        name: "/review-context",
+        description: t("chat.command.reviewContextDesc"),
+        commandKind: "action",
+        commandType: "review-context",
+      },
+      {
         name: "/unity-console",
         description: t("chat.command.unityConsoleDesc"),
         commandKind: "action",
         commandType: "unity-console",
+      },
+      {
+        name: "/console-error",
+        description: t("chat.command.unityConsoleErrorDesc"),
+        commandKind: "action",
+        commandType: "unity-console-error",
       },
       {
         name: "/plan",
@@ -56,6 +78,10 @@ export function useCommandRegistry(
 
     const skillCommands: CommandDef[] = (skills.value || [])
       .filter((skill) => skillHasCommandEnabled(skill))
+      .filter((skill) => {
+        const trigger = resolveSkillCommandTrigger(skill).toLowerCase();
+        return !BUILTIN_COMMAND_NAMES.some((name) => name.toLowerCase() === trigger);
+      })
       .map((skill) => ({
         name: resolveSkillCommandTrigger(skill),
         description: skill.skillDescription || skill.description || skill.name,
@@ -78,14 +104,21 @@ export function useCommandRegistry(
 
   function filteredCommands(
     token: string,
-    options?: { includeActions?: boolean },
+    options?: {
+      includeActions?: boolean;
+      allowedActionTypes?: readonly IntentCommandType[];
+    },
   ): CommandDef[] {
     const normalized = token.trim().toLowerCase();
     if (!normalized.startsWith("/")) return [];
     if (normalized !== "/" && splitSearchTerms(normalized).length === 0) return [];
 
     const candidates = availableCommands.value.filter((command) => {
-      if (!options?.includeActions && command.commandKind === "action") return false;
+      if (
+        command.commandKind === "action"
+        && !options?.includeActions
+        && !options?.allowedActionTypes?.includes(command.commandType)
+      ) return false;
       return scoreSearchFields(normalized, [
         { text: command.name, weight: 160 },
         { text: command.skill?.name || "", weight: 120 },

@@ -129,7 +129,10 @@ impl SharedFile {
                 self.write_block_locked(&mut guard, text);
             }
             Err(std::sync::TryLockError::WouldBlock) => {
-                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.path)
+                if let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
                 {
                     let _ = file.write_all(text.as_bytes());
                 }
@@ -193,8 +196,16 @@ impl FileLogSink {
     }
 
     /// Default location: `%APPDATA%/locus/logs/locus.log` (persistent config dir).
+    /// Isolated runtimes can select an explicit log directory or inherit the
+    /// runtime database directory.
     pub fn init_default() -> Result<Arc<Self>, String> {
-        let dir = crate::commands::persistent_config_dir()?.join("logs");
+        let dir = match crate::runtime_paths::runtime_log_dir_from_env()? {
+            Some(log_dir) => log_dir,
+            None => match crate::commands::runtime_storage_dir_from_env()? {
+                Some(data_dir) => data_dir.join("logs"),
+                None => crate::commands::persistent_config_dir()?.join("logs"),
+            },
+        };
         Self::init(&dir)
     }
 
@@ -289,7 +300,14 @@ fn render_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
         .unwrap_or_else(|| "<non-string panic payload>".to_string());
     let location = info
         .location()
-        .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
         .unwrap_or_else(|| "<unknown location>".to_string());
     let backtrace = std::backtrace::Backtrace::force_capture();
 
@@ -422,7 +440,11 @@ mod tests {
         let sink = FileLogSink::init_with_max_bytes(dir.path(), 2_048).expect("init sink");
 
         for index in 0..64 {
-            sink.enqueue(entry("info", "Rotate", &format!("line {index} {}", "y".repeat(80))));
+            sink.enqueue(entry(
+                "info",
+                "Rotate",
+                &format!("line {index} {}", "y".repeat(80)),
+            ));
         }
         assert!(sink.flush_blocking(Duration::from_secs(5)));
 
@@ -431,7 +453,10 @@ mod tests {
         let current_len = std::fs::metadata(dir.path().join(LOG_FILE_NAME))
             .expect("current metadata")
             .len();
-        assert!(current_len < 2_048 + 4_096, "current file should restart small");
+        assert!(
+            current_len < 2_048 + 4_096,
+            "current file should restart small"
+        );
         let content = std::fs::read_to_string(dir.path().join(LOG_FILE_NAME)).expect("read log");
         assert!(content.contains("---- log rotated ----"));
     }

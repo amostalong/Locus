@@ -121,9 +121,9 @@ pub(crate) fn engine_module_sym_name(module_file_name: &str) -> &'static str {
 /// ends with a known editor executable file name. Used to guard against PID
 /// reuse when an `EditorInstance.json` omits `app_path`.
 pub(crate) fn path_ends_with_editor_exe(normalized_lower_path: &str) -> bool {
-    EditorFlavor::ALL
-        .iter()
-        .any(|flavor| normalized_lower_path.ends_with(&format!("\\{}", flavor.process_image_name())))
+    EditorFlavor::ALL.iter().any(|flavor| {
+        normalized_lower_path.ends_with(&format!("\\{}", flavor.process_image_name()))
+    })
 }
 
 /// Engine PDB file name for the engine module identified by `module_file_name`
@@ -214,8 +214,12 @@ mod tests {
 
     #[test]
     fn path_guard_accepts_both_editor_exes() {
-        assert!(path_ends_with_editor_exe(r"e:\2022.3.47f1\editor\unity.exe"));
-        assert!(path_ends_with_editor_exe(r"f:\tuanjie\2022.3.62t10\editor\tuanjie.exe"));
+        assert!(path_ends_with_editor_exe(
+            r"e:\2022.3.47f1\editor\unity.exe"
+        ));
+        assert!(path_ends_with_editor_exe(
+            r"f:\tuanjie\2022.3.62t10\editor\tuanjie.exe"
+        ));
         assert!(!path_ends_with_editor_exe(r"c:\windows\explorer.exe"));
     }
 

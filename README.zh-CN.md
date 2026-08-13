@@ -70,6 +70,30 @@ bun tauri dev
 
 该命令会启动 Vite 开发服务器，并打开 Tauri 桌面应用。
 
+### 隔离测试实例
+
+```powershell
+bun run locus:test:app
+```
+
+该命令会启用 WebView2 调试与 Codex MCP，并创建相互隔离的数据库、配置、日志、workspace、WebView2 profile 和进程临时目录。启动时会输出 `LOCUS_RUNTIME_JSON`，用于定位整套测试数据。
+
+自动生成的运行目录按 `--runtime-base`、`LOCUS_ISOLATED_RUNTIME_BASE`、Git 忽略的 `.locus-dev.local.json`、系统临时目录依次解析。每个 checkout 可使用以下本地配置：
+
+```json
+{
+  "isolatedRuntimeBase": "<本机绝对目录>"
+}
+```
+
+也可以显式指定完整运行目录或各个子目录：
+
+```powershell
+bun run locus:test:app -- --runtime-root <绝对运行目录>
+```
+
+等价的 Tauri 入口为 `bun tauri dev-mcp --isolated`。运行 `bun run locus:test:app -- --help` 可查看全部参数。
+
 ### 构建
 
 ```powershell

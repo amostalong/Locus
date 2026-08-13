@@ -37,7 +37,7 @@ export const useUiStore = defineStore("ui", () => {
   const activeTab = ref<"chat" | "editor" | "collab" | "knowledge" | "asset" | "views" | "plugins" | "agent" | "settings">("chat");
   // Union of local (knowledge) + upstream (hotReload | unityConnection | testing).
   // Upstream removed the standalone Knowledge tab in SettingsView; local code may still reference it.
-  const settingsCategoryHint = ref<"api" | "models" | "permissions" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | null>(null);
+  const settingsCategoryHint = ref<"api" | "models" | "modelUsage" | "permissions" | "mcp" | "mcpServer" | "codeAnalysis" | "hotReload" | "unityConnection" | "testing" | "proxy" | "general" | "display" | "notifications" | "shortcuts" | "knowledge" | "archived" | "console" | "about" | "experimental" | null>(null);
   const alwaysOnTop = ref(false);
   const isMaximized = ref(false);
   const isWindowResizing = ref(false);
@@ -54,6 +54,16 @@ export const useUiStore = defineStore("ui", () => {
     id: number;
     dashboard: "design" | "memory" | "skill" | "reference";
     path: string;
+  } | null>(null);
+
+  // Upstream v0.7.0: one-shot asset-open request consumed by the Asset
+  // inspector tab (stageAssetOpen also switches the tab to "asset").
+  const pendingAssetOpen = ref<{
+    id: number;
+    projectPath: string;
+    assetPath: string;
+    line: number;
+    column: number;
   } | null>(null);
 
   const collabMounted = ref(false);
@@ -261,6 +271,20 @@ export const useUiStore = defineStore("ui", () => {
     pendingCodeRef.value = null;
   }
 
+  function stageAssetOpen(request: Omit<NonNullable<typeof pendingAssetOpen.value>, "id">) {
+    pendingAssetOpen.value = {
+      id: Date.now(),
+      ...request,
+    };
+    setTab("asset");
+  }
+
+  function clearPendingAssetOpen(id?: number) {
+    if (!pendingAssetOpen.value) return;
+    if (id != null && pendingAssetOpen.value.id !== id) return;
+    pendingAssetOpen.value = null;
+  }
+
   function stageChatPrefill(text: string, options: ChatPrefillOptions = {}) {
     pendingChatPrefill.value = {
       id: Date.now(),
@@ -351,6 +375,7 @@ export const useUiStore = defineStore("ui", () => {
     pendingChatPrefill,
     pendingCodeRef,
     pendingKnowledgeSelection,
+    pendingAssetOpen,
     collabMounted,
     knowledgeMounted,
     assetMounted,
@@ -366,6 +391,8 @@ export const useUiStore = defineStore("ui", () => {
     clearSettingsCategoryHint,
     stageCodeRef,
     clearPendingCodeRef,
+    stageAssetOpen,
+    clearPendingAssetOpen,
     stageChatPrefill,
     stageChatDraftPrefill,
     clearPendingChatPrefill,

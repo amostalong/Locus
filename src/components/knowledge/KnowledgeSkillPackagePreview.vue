@@ -80,9 +80,7 @@ const injectModeOptions = computed(() => [
   {
     value: "excerpt",
     label: labelForInjectMode("excerpt"),
-    hint: manifest.value?.hasL1 === false
-      ? t("knowledge.skill.l1FallbackDescription")
-      : hintForInjectMode("excerpt"),
+    hint: hintForInjectMode("excerpt"),
   },
 ]);
 
@@ -239,10 +237,10 @@ const surfaceText = computed(() => {
   return t("knowledge.skill.channelsNone");
 });
 const updatedLabel = computed(() =>
-  formatDateTime(manifest.value?.updatedAt ?? props.packageDocument.updatedAt),
+  formatDateTime(manifest.value?.updatedAt ?? props.packageDocument.modifiedAt),
 );
 const injectMode = computed(
-  () => props.packageDocument.injectMode ?? "none",
+  () => props.packageDocument.effectiveInjectMode ?? "none",
 );
 const injectModeDropdownLabel = computed(() =>
   labelForInjectMode(effectiveInjectValue.value, "skill"),
@@ -269,9 +267,6 @@ const capabilityTags = computed(() => {
     tags.push(t("knowledge.skillPackage.auto"));
   }
   if (manifest.value?.hasUnity) tags.push(t("knowledge.skillPackage.unity"));
-  if (manifest.value?.hasL0) tags.push("L0");
-  if (manifest.value?.hasL1) tags.push("L1");
-  if (manifest.value?.hasL2) tags.push("L2");
   return tags;
 });
 
@@ -395,7 +390,6 @@ function onInjectModeChange(value: string) {
   if (!["none", "path", "excerpt"].includes(value)) return;
   emit("updateConfig", {
     injectMode: value as KnowledgeInjectMode,
-    inheritInjectMode: false,
     skillSurface: deriveSkillSurface(commandChannelOn.value, value !== "none"),
   });
 }

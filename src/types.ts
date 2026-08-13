@@ -145,6 +145,7 @@ export interface CsharpLspStatus {
  * Rust `CsharpCompileStatusPayload`). */
 export interface CsharpCompileStatus {
   enabled: boolean;
+  nonPublicAccessEnabled: boolean;
   platformSupported: boolean;
   serverAvailable: boolean;
   running: boolean;
@@ -436,6 +437,8 @@ export interface SessionDetail {
   /** Per-session effort override. When present, the chat composer and
    *  outgoing requests use this level instead of the global `effort`. */
   effort?: string | null;
+  lastModelId?: string | null;
+  lastEffort?: EffortLevel | null;
   sessionType: string;
   parentSessionId: string | null;
   latestCompletedRunId?: string | null;
@@ -444,6 +447,42 @@ export interface SessionDetail {
   messages: ChatMessage[];
   pendingInputs?: PendingSessionInput[];
   runtime?: SessionRuntimeSnapshot | null;
+}
+
+export interface SessionViewSnapshot {
+  session: SessionDetail;
+  userMessageIds?: string[];
+  oldestMessageRowId?: number | null;
+  hasMoreHistory: boolean;
+}
+
+export interface SessionTurnPreview {
+  messageId: string;
+  prompt: string;
+  response: string;
+}
+
+export interface SessionMessagePage {
+  messages: ChatMessage[];
+  oldestMessageRowId?: number | null;
+  hasMoreHistory: boolean;
+}
+
+export interface CompactedContextOutput {
+  messageId: string;
+  snapshotStatus: "complete" | "reconstructed" | "partial" | string;
+  compactionKind: "checkpoint" | "readable" | "codexEncrypted" | string;
+  encryptedContentChars?: number;
+  checkpoint: { summary: string; recent: string } | "empty";
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant" | "tool";
+    content: string;
+    images?: ImageAttachment[];
+    assetRefs?: AssetRefAttachment[];
+    promptPrefixPlaceholder: boolean;
+    promptSuffixPlaceholder: boolean;
+  }>;
 }
 
 export type SessionRunStatus =
@@ -510,9 +549,20 @@ export interface SessionContentChangedEvent {
   changedAt: number;
 }
 
-export interface SaveRawContextRequest {
+export interface SessionTitleUpdatedEvent {
   sessionId: string;
-  includeSystemPrompt: boolean;
+  title: string;
+}
+
+export interface SessionContextExportRequest {
+  sessionId: string;
+}
+
+export interface ContextExportResult {
+  filePath: string;
+  captureQuality: "full" | "partial" | "reconstructed" | string;
+  sessionCount: number;
+  attemptCount: number;
 }
 
 export interface AgentInfo {
@@ -583,7 +633,6 @@ export interface CustomEndpoint {
   apiFormat: ApiFormat;
   apiKey: string;
   contextLength: number;
-  betaFlags: string[];
   supportedReasoningEfforts: EffortLevel[];
   reasoningParamFormat: ReasoningParamFormat;
   replayReasoningContent: boolean;
@@ -598,7 +647,8 @@ export interface CustomProviderModel {
   apiModel: string;
   name: string;
   contextLength: number;
-  betaFlags: string[];
+  /** Protocol-native lazy tool loading (defer_loading/tool_reference); Anthropic format only. */
+  supportsToolLazyLoading: boolean;
   supportedReasoningEfforts: EffortLevel[];
   reasoningParamFormat: ReasoningParamFormat | null;
   replayReasoningContent?: boolean | null;
@@ -691,6 +741,8 @@ export type CodexTransportMode = "http" | "websocket";
 
 export interface CodexModelConfig {
   transport: CodexTransportMode;
+  extendedContext: boolean;
+  generateSessionTitles: boolean;
 }
 
 export interface AuthStatus {
@@ -886,6 +938,29 @@ export interface TokenUsage {
   pricedRounds: number;
   contextTokens: number;
   contextLimit: number;
+}
+
+export interface ModelUsageMetrics {
+  requestCount: number;
+  sessionCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+export interface ModelUsageGroup {
+  modelId: string;
+  provider: string;
+  usage: ModelUsageMetrics;
+}
+
+export interface ModelUsageReport {
+  usage: ModelUsageMetrics;
+  byModel: ModelUsageGroup[];
+  recordedFrom: number | null;
+  recordedTo: number | null;
 }
 
 // ── Todo ──
@@ -1084,7 +1159,6 @@ export type StreamEvent = { runId: string } & (
       toolCallId: string;
       question: string;
       options: AskOption[];
-      sheet?: SheetRequest | null;
     }
   | {
       type: "toolConfirm";
@@ -1147,22 +1221,6 @@ export interface AskOption {
   description: string;
 }
 
-export interface SheetField {
-  key: string;
-  label: string;
-  value: string;
-  description?: string | null;
-  multiline?: boolean;
-  options?: string[];
-  readonly?: boolean;
-}
-
-export interface SheetRequest {
-  description?: string | null;
-  confirmLabel?: string | null;
-  fields: SheetField[];
-}
-
 export type PluginStatus =
   | { status: "missing" }
   | { status: "outdated" }
@@ -1180,7 +1238,6 @@ export interface PendingQuestion {
   toolCallId: string;
   question: string;
   options: AskOption[];
-  sheet?: SheetRequest | null;
 }
 
 export interface PendingToolConfirm {
@@ -1274,9 +1331,6 @@ export interface SkillManifest {
   packageId?: string | null;
   packageVersion?: string | null;
   hasUnity?: boolean;
-  hasL0?: boolean;
-  hasL1?: boolean;
-  hasL2?: boolean;
   pluginId?: string | null;
   pluginScope?: "app" | "project" | string | null;
   /** Absolute on-disk directory of an external (generic-format) skill. */
@@ -1350,6 +1404,8 @@ export interface SkillCreateInput {
 export type KnowledgeDocumentType = "design" | "memory" | "skill" | "reference";
 export type KnowledgeStorageSource = "project" | "app";
 export type KnowledgeInjectMode = "none" | "path" | "excerpt" | "full" | "rule";
+export type KnowledgeInjectModeSetting = "inherit" | KnowledgeInjectMode;
+export type KnowledgeAiMaintainedSetting = "inherit" | boolean;
 export type KnowledgeEditMode =
   | "inherit_parent"
   | "read_only"
@@ -1391,17 +1447,14 @@ export interface KnowledgeDocumentSummary {
   type: KnowledgeDocumentType;
   path: string;
   title: string;
-  injectMode: KnowledgeInjectMode;
-  inheritInjectMode?: boolean;
+  injectMode: KnowledgeInjectModeSetting;
+  effectiveInjectMode: KnowledgeInjectMode;
   injectModeSource?: KnowledgeConfigSource | null;
-  summaryEnabled: boolean;
-  commandEnabled: boolean;
   readOnly: boolean;
-  aiMaintained: boolean;
+  aiMaintained: KnowledgeAiMaintainedSetting;
+  effectiveAiMaintained: boolean;
   storageSource?: KnowledgeStorageSource;
-  inheritAiConfig?: boolean;
   aiConfigSource?: KnowledgeConfigSource | null;
-  explicitMaintenanceRules: boolean;
   externalSource?: KnowledgeExternalSource | null;
   skillEnabled?: boolean | null;
   skillSurface?: SkillSurface | null;
@@ -1409,9 +1462,7 @@ export interface KnowledgeDocumentSummary {
   argumentHint?: string | null;
   tools?: string[];
   summary?: string | null;
-  createdAt: number;
-  updatedAt: number;
-  hasSummary: boolean;
+  modifiedAt: number;
   hasBodyContent?: boolean;
   byteSize?: number;
   lexicalSearchEnabled?: boolean;
@@ -1431,17 +1482,17 @@ export interface KnowledgeDocumentFileMetadata {
 export interface KnowledgeDocument extends KnowledgeDocumentSummary {
   body: string;
   maintenanceRules: string | null;
+  effectiveMaintenanceRules: string | null;
   fileMetadata?: KnowledgeDocumentFileMetadata | null;
 }
 
 export interface KnowledgeDirectoryConfig {
   version: number;
   summary: string;
-  injectMode: KnowledgeInjectMode;
-  inheritInjectMode?: boolean;
-  aiMaintained: boolean;
-  inheritAiConfig?: boolean;
-  explicitMaintenanceRules: boolean;
+  injectMode: KnowledgeInjectModeSetting;
+  effectiveInjectMode: KnowledgeInjectMode;
+  aiMaintained: KnowledgeAiMaintainedSetting;
+  effectiveAiMaintained: boolean;
   lexicalSearch: FolderIndexRuleSetting;
   vectorSearch: FolderIndexRuleSetting;
   inheritToChildren: boolean;
@@ -1449,7 +1500,8 @@ export interface KnowledgeDirectoryConfig {
   allowCreateDirectories: boolean;
   allowMoveDocuments: boolean;
   allowMoveDirectories: boolean;
-  maintenanceRules: string;
+  maintenanceRules: string | null;
+  effectiveMaintenanceRules: string | null;
 }
 
 export interface KnowledgeDirectoryConfigRecord extends KnowledgeDirectoryConfig {
@@ -1488,8 +1540,8 @@ export interface KnowledgeSearchResult {
   path: string;
   title: string;
   storageSource?: KnowledgeStorageSource;
-  injectMode: KnowledgeInjectMode;
-  aiMaintained: boolean;
+  effectiveInjectMode: KnowledgeInjectMode;
+  effectiveAiMaintained: boolean;
   snippet: string;
   matchKind: KnowledgeSearchMatchKind;
   matchedSection?: KnowledgeSearchMatchSection | null;
@@ -1498,7 +1550,13 @@ export interface KnowledgeSearchResult {
   semanticScore?: number | null;
   semanticConfidence?: number | null;
   estimatedTokens?: number;
-  updatedAt?: number;
+  modifiedAt?: number;
+  physicalPath?: string;
+  displayPath?: string;
+  startLine?: number;
+  endLine?: number;
+  summaryStartLine?: number;
+  bodyStartLine?: number;
 }
 
 export interface KnowledgeSearchSelectionContext {
@@ -1751,19 +1809,13 @@ export interface KnowledgeDocumentEditOperation {
 export interface KnowledgeDocumentPatch {
   id?: string;
   type?: KnowledgeDocumentType;
-  title?: string;
-  injectMode?: KnowledgeInjectMode;
-  inheritInjectMode?: boolean;
-  summaryEnabled?: boolean;
-  commandEnabled?: boolean;
+  injectMode?: KnowledgeInjectModeSetting;
   skillEnabled?: boolean;
   skillSurface?: SkillSurface;
   commandTrigger?: string | null;
   argumentHint?: string | null;
   readOnly?: boolean;
-  aiMaintained?: boolean;
-  inheritAiConfig?: boolean;
-  explicitMaintenanceRules?: boolean;
+  aiMaintained?: KnowledgeAiMaintainedSetting;
   externalSource?: KnowledgeExternalSource | null;
   newPath?: string;
   summary?: string | null;
@@ -1773,18 +1825,14 @@ export interface KnowledgeDocumentPatch {
 }
 
 export interface KnowledgeDocumentCreateInput extends KnowledgeDocumentPatch {
-  title?: string;
   body?: string | null;
 }
 
 export interface KnowledgeDirectoryConfigPatch {
   version?: number;
   summary?: string;
-  injectMode?: KnowledgeInjectMode;
-  inheritInjectMode?: boolean;
-  aiMaintained?: boolean;
-  inheritAiConfig?: boolean;
-  explicitMaintenanceRules?: boolean;
+  injectMode?: KnowledgeInjectModeSetting;
+  aiMaintained?: KnowledgeAiMaintainedSetting;
   lexicalSearch?: FolderIndexRuleSetting;
   vectorSearch?: FolderIndexRuleSetting;
   inheritToChildren?: boolean;
@@ -1792,7 +1840,7 @@ export interface KnowledgeDirectoryConfigPatch {
   allowCreateDirectories?: boolean;
   allowMoveDocuments?: boolean;
   allowMoveDirectories?: boolean;
-  maintenanceRules?: string;
+  maintenanceRules?: string | null;
 }
 
 export interface KnowledgeReadInput {
@@ -1800,6 +1848,7 @@ export interface KnowledgeReadInput {
   path: string;
   type?: KnowledgeDocumentType;
   part?: "full" | "summary" | "body" | "maintenanceRules";
+  includeHistory?: boolean;
 }
 
 export interface KnowledgeCreateInput {
@@ -3114,6 +3163,7 @@ export interface AssetTextPreview {
   snippet: string;
   truncated: boolean;
   totalLines: number;
+  startLine?: number;
   language?: string;
 }
 

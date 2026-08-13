@@ -12,17 +12,17 @@ import {
   showInFolder,
 } from "../services/unity";
 // undoPreview removed — undo UI moved to ChatChangesPanel
-import type { ChatComposerSendPayload, ChatMessage, AgentInfo, TokenUsage, ModelOption, PendingQuestion, PendingToolConfirm, EffortLevel, SessionSummary, AssetDbScanEvent, ScanStats, ImageAttachment, AssetRefAttachment, SkillManifest, UserIntentMeta, SaveRawContextRequest, CodexTransportMode, AssistantRenderPart, UnityConnectionStatus, KnowledgeDocumentType } from "../types";
+import type { ChatComposerSendPayload, ChatMessage, AgentInfo, TokenUsage, ModelOption, PendingQuestion, PendingToolConfirm, EffortLevel, SessionSummary, AssetDbScanEvent, ScanStats, ImageAttachment, AssetRefAttachment, SkillManifest, UserIntentMeta, SessionContextExportRequest, CodexTransportMode, AssistantRenderPart, UnityConnectionStatus, KnowledgeDocumentType } from "../types";
 import type { ChangedFile, ToolCallDisplay } from "../types";
 import ModelEffortSelector from "./ModelEffortSelector.vue";
 import SessionPanel from "./chat/SessionPanel.vue";
 import SessionCompactPicker from "./chat/SessionCompactPicker.vue";
 import ChatTranscript from "./chat/ChatTranscript.vue";
+import ChatTurnNavigationRail from "./chat/ChatTurnNavigationRail.vue";
 import ChatStatusIndicators from "./chat/ChatStatusIndicators.vue";
 import RichChatInput from "./chat/RichChatInput.vue";
 import TokenUsageBar from "./chat/TokenUsageBar.vue";
 import AskUserCard from "./chat/AskUserCard.vue";
-import SheetCard from "./chat/SheetCard.vue";
 import ToolConfirmCard from "./chat/ToolConfirmCard.vue";
 import ToolConfirmBatchCard from "./chat/ToolConfirmBatchCard.vue";
 import FileDiffViewer from "./diff/FileDiffViewer.vue";
@@ -33,6 +33,7 @@ import LucideIcon from "./icons/LucideIcon.vue";
 import { refetchDiffByKey } from "../services/diff";
 import { openChatDiffReviewWindow } from "../services/chatDiffReviewWindow";
 import { broadcastPlanApprovalResolved, openPlanViewWindow } from "../services/planViewWindow";
+import { openContextCompactionWindow } from "../services/contextCompactionWindow";
 import type { LocusAssetInspectorWindowPayload } from "../services/locusAssetInspectorWindow";
 import { openLocusAssetInspector } from "../composables/useLocusAssetInspectorPanel";
 import { normalizeAppError } from "../services/errors";
@@ -84,6 +85,7 @@ import {
   useChatInputSettings,
 } from "../composables/useChatInputSettings";
 import { useDisplaySettings } from "../composables/useDisplaySettings";
+import { useKnowledgeDocumentOpen } from "../composables/useKnowledgeDocumentOpen";
 import { useKnowledgeAccessMode } from "../composables/useKnowledgeAccessMode";
 import {
   buildChatMessageClipboardPayload,
@@ -108,6 +110,10 @@ const notificationStore = useNotificationStore();
 const { state: shortcutState } = useKeyboardShortcuts();
 const { state: chatInputSettings } = useChatInputSettings();
 const { state: displaySettings } = useDisplaySettings();
+const {
+  openDocument: openKnowledgeDocument,
+  openInKnowledge: openKnowledgeDocumentInKnowledge,
+} = useKnowledgeDocumentOpen();
 const { state: knowledgeAccessState, setMode: setKnowledgeAccessMode } = useKnowledgeAccessMode();
 
 const planModeActive = computed(() => chatStore.activeSessionPlanMode);
@@ -196,6 +202,7 @@ const props = defineProps<{
   streamingTextOrder?: number;
   isStreaming: boolean;
   isCancelling?: boolean;
+  canResumeInterrupted?: boolean;
   isCompacting: boolean;
   isThinking: boolean;
   hasThinking: boolean;
@@ -221,6 +228,7 @@ const props = defineProps<{
   pendingToolConfirms: PendingToolConfirm[];
   sessions: SessionSummary[];
   activeSessionId: string | null;
+  pendingSessionId?: string | null;
   unityConnected?: boolean;
   unityPluginStatus?: "missing" | "outdated" | null;
   unityPluginInstalling?: boolean;
@@ -237,7 +245,13 @@ const props = defineProps<{
   layoutMode?: ChatLayoutMode;
   defaultSessionPanelCollapsed?: boolean;
   sessionPanelStorageScope?: string;
+  showSessionNavigation?: boolean;
+  contentStartInset?: number;
 }>();
+
+const chatContentStyle = computed(() => ({
+  paddingLeft: `${Math.max(0, props.contentStartInset ?? 0)}px`,
+}));
 
 function hasRunningUnityRecompile(calls: ToolCallDisplay[] | undefined): boolean {
   return !!calls?.some((call) =>
@@ -253,11 +267,13 @@ const emit = defineEmits<{
   compact: [];
   fork: [];
   cancel: [];
+  resume: [];
   selectAgent: [id: string];
   selectModel: [id: string];
   selectEffort: [level: EffortLevel];
   selectFastMode: [enabled: boolean];
-  saveRawContext: [request: SaveRawContextRequest];
+  exportSessionContext: [request: SessionContextExportRequest];
+  reviewSessionContext: [request: SessionContextExportRequest];
   answerQuestion: [answer: string];
   answerToolConfirm: [questionId: string, answer: string];
   answerAllToolConfirms: [questionIds: string[], answer: string];
@@ -714,11 +730,14 @@ function isInsidePassiveMarkdownUnityPreview(target: Element): boolean {
 }
 
 function handleKnowledgeRefClick(docType: KnowledgeDocumentType, path: string) {
-  uiStore.stageKnowledgeSelection({
-    dashboard: docType,
-    path,
+  void openKnowledgeDocument(docType, path).catch((error) => {
+    const err = normalizeAppError(error);
+    notificationStore.addNotice("warning", t("chat.knowledgeRef.openFailed", err.message), {
+      code: err.code,
+      operation: "knowledgeRef",
+      replaceOperation: true,
+    });
   });
-  uiStore.setTab("knowledge");
 }
 
 function handleUnityAssetInspectorClick(filePath: string) {
@@ -957,6 +976,20 @@ async function openInlineDiffInWindow() {
   }
 }
 
+async function openCompactedContext(messageId: string) {
+  const sessionId = props.activeSessionId?.trim();
+  if (!sessionId || !messageId.trim()) return;
+  try {
+    await openContextCompactionWindow({ sessionId, messageId });
+  } catch (cause) {
+    const err = normalizeAppError(cause);
+    notificationStore.addNotice("error", err.message, {
+      code: err.code,
+      operation: "openContextCompactionWindow",
+    });
+  }
+}
+
 async function doAssetRefShowInFolder() {
   const target = assetRefCtxMenu.value?.target;
   if (!target) return;
@@ -981,11 +1014,7 @@ function doAssetRefOpenInKnowledge() {
   const target = assetRefCtxMenu.value?.target;
   if (!target || target.kind !== "knowledge") return;
   closeAssetRefContextMenu();
-  uiStore.stageKnowledgeSelection({
-    dashboard: target.docType,
-    path: target.path,
-  });
-  uiStore.setTab("knowledge");
+  openKnowledgeDocumentInKnowledge(target.docType, target.path);
 }
 
 async function doAssetRefSelectInUnity() {
@@ -1133,6 +1162,7 @@ const inputText = ref("");
 const composerDrafts = ref(new Map<string, string>());
 const composerPanelRef = ref<InstanceType<typeof RichChatInput> | null>(null);
 const transcriptRef = ref<InstanceType<typeof ChatTranscript> | null>(null);
+const transcriptScrollElement = computed(() => transcriptRef.value?.getScrollElement() ?? null);
 
 function draftSessionKey(sessionId: string | null) {
   return sessionId ?? NEW_CHAT_DRAFT_KEY;
@@ -1507,9 +1537,12 @@ let pendingStreamingText = "";
 let streamingTextFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionRestoreLayoutTimer: ReturnType<typeof setTimeout> | null = null;
 const userScrollIntent = createUserScrollIntentTracker();
+const turnNavigationRevealActive = ref(false);
 const STREAMING_TEXT_RENDER_DELAY_MS = STREAMING_RENDER_THROTTLE_MS;
 const STREAM_END_SCROLL_SETTLE_MS = 320;
-const SESSION_RESTORE_LAYOUT_STABILIZE_MS = 180;
+const SESSION_RESTORE_LAYOUT_STABILIZE_MS = 0;
+const SESSION_RESTORE_MAX_SETTLE_FRAMES = 12;
+const SESSION_RESTORE_REQUIRED_STABLE_FRAMES = 2;
 const sessionRestoreLayoutStabilizing = ref(false);
 const sessionRestoreViewportGuarding = ref(false);
 
@@ -1546,32 +1579,40 @@ function finishSessionRestoreLayoutStabilization(
       return;
     }
 
-    const restoreAfterLayoutClassSettled = () => {
-      restoreMessagesScrollState(finalRestore.state, finalRestore.targetSessionId);
-    };
-
     nextTick(() => {
-      sessionRestoreFrame = requestViewportFrame(() => {
+      let frameCount = 0;
+      let stableFrameCount = 0;
+      let previousMetricsKey = "";
+      const restoreUntilSettled = () => {
         sessionRestoreFrame = 0;
         if (props.activeSessionId !== finalRestore.targetSessionId) {
           sessionRestoreViewportGuarding.value = false;
           return;
         }
 
-        restoreAfterLayoutClassSettled();
-        sessionRestoreFrame = requestViewportFrame(() => {
-          sessionRestoreFrame = 0;
-          if (props.activeSessionId !== finalRestore.targetSessionId) {
-            sessionRestoreViewportGuarding.value = false;
-            return;
-          }
+        restoreMessagesScrollState(finalRestore.state, finalRestore.targetSessionId);
+        const metrics = readSessionScrollMetrics();
+        const metricsKey = metrics
+          ? `${metrics.scrollTop}:${metrics.scrollHeight}:${metrics.clientHeight}`
+          : "";
+        const expectsBottom = !finalRestore.state || finalRestore.state.mode === "bottom";
+        const reachedTarget = !expectsBottom || (metrics?.distanceFromBottom ?? 0) <= 1;
+        stableFrameCount = reachedTarget && metricsKey === previousMetricsKey
+          ? stableFrameCount + 1
+          : 0;
+        previousMetricsKey = metricsKey;
+        frameCount += 1;
 
-          restoreAfterLayoutClassSettled();
-          requestViewportFrame(() => {
-            sessionRestoreViewportGuarding.value = false;
-          });
-        });
-      });
+        if (
+          frameCount < SESSION_RESTORE_MAX_SETTLE_FRAMES
+          && stableFrameCount < SESSION_RESTORE_REQUIRED_STABLE_FRAMES
+        ) {
+          sessionRestoreFrame = requestViewportFrame(restoreUntilSettled);
+          return;
+        }
+        sessionRestoreViewportGuarding.value = false;
+      };
+      sessionRestoreFrame = requestViewportFrame(restoreUntilSettled);
     });
   }, SESSION_RESTORE_LAYOUT_STABILIZE_MS);
 }
@@ -1689,6 +1730,8 @@ function handleBottomPanelWheel(event: WheelEvent) {
 
 function markMessagesUserScrollIntent() {
   userScrollIntent.mark();
+  preserveMessagesViewportForUserScroll();
+  requestOlderHistoryAtTop();
 }
 
 function captureCurrentSessionScrollState(el: HTMLElement): ReturnType<typeof captureSessionScrollState> {
@@ -2090,6 +2133,107 @@ function restorePendingSessionScroll(options: { defer?: boolean } = {}) {
   restore();
 }
 
+let olderHistoryRestoreRunning = false;
+
+async function loadOlderHistoryAtTop(el: HTMLElement) {
+  if (
+    olderHistoryRestoreRunning
+    || chatStore.sessionHistoryLoading
+    || !chatStore.sessionHistoryHasMore
+    || el.scrollTop > 160
+  ) {
+    return;
+  }
+  olderHistoryRestoreRunning = true;
+  const sessionId = props.activeSessionId;
+  const anchor = captureScrollAnchor(el);
+  const previousScrollHeight = el.scrollHeight;
+  try {
+    const loaded = await chatStore.loadOlderSessionHistory();
+    if (!loaded || props.activeSessionId !== sessionId) return;
+    await nextTick();
+    if (!anchor) {
+      suppressScrollCapture = true;
+      el.scrollTop += Math.max(0, el.scrollHeight - previousScrollHeight);
+      await new Promise<void>((resolve) => requestViewportFrame(resolve));
+    } else {
+      let stableFrameCount = 0;
+      for (let frameCount = 0; frameCount < SESSION_RESTORE_MAX_SETTLE_FRAMES; frameCount += 1) {
+        if (props.activeSessionId !== sessionId) return;
+        suppressScrollCapture = true;
+        const anchorRestored = restoreScrollAnchor(el, {
+          mode: "anchor",
+          anchorId: anchor.anchorId,
+          offsetTop: anchor.offsetTop,
+          fallbackScrollTop: anchor.fallbackScrollTop,
+        });
+        if (!anchorRestored) {
+          el.scrollTop += Math.max(0, el.scrollHeight - previousScrollHeight);
+          await new Promise<void>((resolve) => requestViewportFrame(resolve));
+          break;
+        }
+        await new Promise<void>((resolve) => requestViewportFrame(resolve));
+        const currentAnchor = Array.from(
+          el.querySelectorAll<HTMLElement>("[data-scroll-anchor-id]"),
+        ).find((candidate) => candidate.dataset.scrollAnchorId === anchor.anchorId);
+        const offset = currentAnchor
+          ? currentAnchor.getBoundingClientRect().top - el.getBoundingClientRect().top
+          : Number.POSITIVE_INFINITY;
+        stableFrameCount = Math.abs(offset - anchor.offsetTop) <= 1
+          ? stableFrameCount + 1
+          : 0;
+        if (stableFrameCount >= SESSION_RESTORE_REQUIRED_STABLE_FRAMES) break;
+      }
+    }
+    suppressScrollCapture = false;
+    if (props.activeSessionId === sessionId) {
+      rememberScrollForSession(sessionId);
+    }
+  } finally {
+    suppressScrollCapture = false;
+    olderHistoryRestoreRunning = false;
+  }
+}
+
+function requestOlderHistoryAtTop() {
+  if (turnNavigationRevealActive.value) return;
+  const el = getMessagesElement();
+  if (el && el.scrollTop <= 160) {
+    void loadOlderHistoryAtTop(el);
+  }
+}
+
+function handleTurnNavigationRevealState(active: boolean, messageId: string) {
+  turnNavigationRevealActive.value = active;
+  if (active) {
+    markMessagesUserScrollIntent();
+    return;
+  }
+  if (props.activeSessionId && props.messages.some((message) => message.id === messageId)) {
+    const el = getMessagesElement();
+    const anchor = el?.querySelector<HTMLElement>(
+      `[data-scroll-anchor-id="${CSS.escape(messageId)}"]`,
+    );
+    if (el && anchor) {
+      chatStore.rememberSessionScrollState(props.activeSessionId, {
+        mode: "anchor",
+        anchorId: messageId,
+        offsetTop: anchor.getBoundingClientRect().top - el.getBoundingClientRect().top,
+        fallbackScrollTop: el.scrollTop,
+      });
+    }
+  }
+}
+
+function preserveMessagesViewportForUserScroll() {
+  cancelSessionRestoreFrame();
+  cancelSessionRestoreLayoutStabilization();
+  scrollToBottomScheduler.cancel();
+  preserveScrollAnchorScheduler.cancel();
+  streamEndScrollScheduler.cancel();
+  rememberScrollForSession();
+}
+
 function onMessagesScroll() {
   if (suppressScrollCapture) {
     recordLayoutDiagnostic("chat.sessionScroll.scrollEventSuppressed", {
@@ -2107,6 +2251,10 @@ function onMessagesScroll() {
     });
     return;
   }
+  // Pagination follows the viewport position itself. A long scrollbar drag can
+  // outlive the user-intent TTL, and an upward wheel at scrollTop=0 produces no
+  // additional scroll event, so either path must be able to request the page.
+  requestOlderHistoryAtTop();
   if (!userScrollIntent.isRecent()) {
     const el = getMessagesElement();
     if (props.activeSessionId && el && isNearBottom(readMessageMetrics(el))) {
@@ -2120,12 +2268,7 @@ function onMessagesScroll() {
     return;
   }
 
-  cancelSessionRestoreFrame();
-  cancelSessionRestoreLayoutStabilization();
-  scrollToBottomScheduler.cancel();
-  preserveScrollAnchorScheduler.cancel();
-  streamEndScrollScheduler.cancel();
-  rememberScrollForSession();
+  preserveMessagesViewportForUserScroll();
   recordLayoutDiagnostic("chat.sessionScroll.userScrollCaptured", {
     sessionId: props.activeSessionId ?? null,
     state: props.activeSessionId ? chatStore.getSessionScrollState(props.activeSessionId) : null,
@@ -2281,6 +2424,15 @@ watch(
     void restoreComposerDraft(nextSessionId ?? null);
     if (shouldRestoreImmediately) {
       restorePendingSessionScroll({ defer: true });
+    } else if (nextSessionId) {
+      // Pinia commits the active id and the ready message page in one update.
+      // Vue can therefore deliver both child props in the same render, leaving
+      // no later message identity change to release the restore sentinel.
+      nextTick(() => {
+        if (pendingRestoreSessionId.value !== nextSessionId) return;
+        pendingRestoreMessagesRef.value = null;
+        restorePendingSessionScroll();
+      });
     }
   },
   { flush: "sync" },
@@ -2454,9 +2606,15 @@ const resolvedLayoutMode = computed<ResolvedChatLayoutMode>(() => {
 });
 const isVerticalLayout = computed(() => resolvedLayoutMode.value === "vertical");
 const showSessionPanel = computed(() =>
-  !showInlineDiff.value && !isVerticalLayout.value && !sessionPanelCollapsed.value,
+  props.showSessionNavigation !== false
+  && !showInlineDiff.value
+  && !isVerticalLayout.value
+  && !sessionPanelCollapsed.value,
 );
-const showSessionCompactPicker = computed(() => isVerticalLayout.value || sessionPanelCollapsed.value);
+const showSessionCompactPicker = computed(() =>
+  props.showSessionNavigation !== false
+  && (isVerticalLayout.value || sessionPanelCollapsed.value),
+);
 
 watch(
   resolvedLayoutMode,
@@ -2749,9 +2907,11 @@ onUnmounted(() => {
     </div>
 
     <SessionPanel
+      v-if="showSessionNavigation !== false"
       v-show="showSessionPanel"
       :sessions="sessions"
       :active-session-id="activeSessionId"
+      :pending-session-id="pendingSessionId"
       :streaming-session-ids="streamingSessionIds"
       :session-panel-width="sessionPanelWidth"
       :working-dir="workingDir"
@@ -2761,21 +2921,29 @@ onUnmounted(() => {
       @rename-session="(id: string, title: string) => emit('renameSession', id, title)"
       @archive-session="emit('archiveSession', $event)"
       @delete-session="emit('deleteSession', $event)"
-      @save-raw-context="emit('saveRawContext', $event)"
+      @export-session-context="emit('exportSessionContext', $event)"
+      @review-session-context="emit('reviewSessionContext', $event)"
       @toggle-panel-collapsed="setSessionPanelCollapsed(true)"
     />
 
-    <div v-show="showSessionPanel" class="session-divider" @mousedown="onSessionSplitterMouseDown"></div>
+    <div
+      v-if="showSessionNavigation !== false"
+      v-show="showSessionPanel"
+      class="session-divider"
+      @mousedown="onSessionSplitterMouseDown"
+    ></div>
 
     <div
       v-show="!showInlineDiff"
       class="chat-view"
       :class="{ 'is-vertical-layout': isVerticalLayout }"
+      :style="chatContentStyle"
     >
       <SessionCompactPicker
         v-if="showSessionCompactPicker"
         :sessions="sessions"
         :active-session-id="activeSessionId"
+        :pending-session-id="pendingSessionId"
         :streaming-session-ids="streamingSessionIds"
         :show-expand-panel-button="sessionPanelCollapsed && !isVerticalLayout"
         :working-dir="workingDir"
@@ -2811,6 +2979,8 @@ onUnmounted(() => {
           :waiting-label="t('chat.transcript.waiting')"
           :compacting-label="t('chat.transcript.compacting')"
           :compacted-label="t('chat.transcript.compacted')"
+          :compacted-context-open-label="t('chat.transcript.openCompactedContext')"
+          :enable-compacted-context-open="!!activeSessionId"
           :thinking-active-label="t('chat.transcript.thinking')"
           :thought-duration-label="t('chat.transcript.thoughtDuration', '{0}')"
           :thought-moment-label="t('chat.transcript.thoughtMoment')"
@@ -2823,6 +2993,7 @@ onUnmounted(() => {
           @content-contextmenu="handleContentContextMenu"
           @open-thinking="emit('openThinking', $event)"
           @open-image="openLightbox"
+          @open-compacted-context="openCompactedContext"
           @apply-knowledge-proposal="chatStore.applyKnowledgeProposal"
           @ignore-knowledge-proposal="chatStore.ignoreKnowledgeProposal"
           @tool-handoff-quiet-change="handleToolHandoffQuietChange"
@@ -2830,6 +3001,17 @@ onUnmounted(() => {
           @tool-viewport-anchor-end="handleToolViewportAnchorEnd"
         >
         </ChatTranscript>
+        <ChatTurnNavigationRail
+          v-if="displaySettings.showTurnNavigationRail"
+          :messages="messages"
+          :session-id="activeSessionId"
+          :user-message-ids="chatStore.sessionUserMessageIds"
+          :scroll-element="transcriptScrollElement"
+          :load-preview="chatStore.loadSessionTurnPreview"
+          :load-turn="chatStore.loadSessionHistoryThroughMessage"
+          @navigate="markMessagesUserScrollIntent"
+          @reveal-state="handleTurnNavigationRevealState"
+        />
         <div v-if="showWelcomeState" class="chat-empty-overlay">
           <div class="empty-state">
             <div class="empty-icon">L</div>
@@ -2870,13 +3052,8 @@ onUnmounted(() => {
         </BaseButton>
       </div>
 
-      <SheetCard
-        v-if="pendingQuestion && pendingQuestion.sheet && !isViewingSubagent"
-        :question="pendingQuestion"
-        @answer="handleQuestionAnswer"
-      />
       <AskUserCard
-        v-else-if="pendingQuestion && !isViewingSubagent"
+        v-if="pendingQuestion && !isViewingSubagent"
         :question="pendingQuestion"
         :queue-index="1"
         :queue-total="pendingQuestionCount"
@@ -2922,122 +3099,129 @@ onUnmounted(() => {
         'is-controls-switching': inputControlsSwitching,
       }"
     >
-      <div class="input-controls-toggle-zone">
-        <button
-          class="input-controls-toggle ui-select-none"
-          :class="{ 'is-collapsed': inputControlsCollapsed }"
-          type="button"
-          :title="inputControlsToggleTitle"
-          :aria-label="inputControlsToggleTitle"
-          :aria-pressed="inputControlsCollapsed"
-          @click="toggleInputControlsCollapsed"
-        >
-          <svg
-            v-if="inputControlsCollapsed"
-            class="input-controls-toggle-icon"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M4 10l4-4 4 4" />
-          </svg>
-          <svg
-            v-else
-            class="input-controls-toggle-icon"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M4 6l4 4 4-4" />
-          </svg>
-        </button>
-      </div>
-      <div v-if="!inputControlsCollapsed" class="input-backdrop-row">
-        <div v-if="!inputControlsCollapsed" class="input-backdrop-status">
-          <ChatStatusIndicators
-            :unity-connected="unityConnected"
-            :unity-plugin-status="unityPluginStatus"
-            :unity-plugin-installing="unityPluginInstalling"
-            :unity-launching="unityLaunching"
-            :unity-launch-state="unityLaunchState"
-            :unity-connection-status="unityConnectionStatus"
-            :unity-recompiling="unityRecompileActive"
-            :working-dir="workingDir"
-            :is-unity-project="isUnityProject"
-            :scan-phase="scanPhase"
-            :last-scan-stats="lastScanStats"
-            :knowledge-access-mode="knowledgeAccessMode"
-            :selected-agent-id="selectedAgentId"
-            @start-scan="emit('startScan')"
-            @install-plugin="emit('installPlugin')"
-            @launch-unity-project="emit('launchUnityProject')"
-            @update-knowledge-access-mode="setKnowledgeAccessMode"
-          />
-        </div>
-        <div class="input-backdrop-action">
+      <div class="chat-input-frame">
+        <div class="input-controls-toggle-zone">
           <button
-            v-if="!isViewingSubagent && hasPanelToggleRow"
-            class="changes-toggle-btn ui-select-none"
-            :class="{ 'is-active': chatChangesStore.currentPanelVisible }"
+            class="input-controls-toggle ui-select-none"
+            :class="{ 'is-collapsed': inputControlsCollapsed }"
             type="button"
-            :disabled="isStreaming"
-            :aria-pressed="chatChangesStore.currentPanelVisible"
-            :aria-label="t('chat.changes.toggle')"
-            @click="chatChangesStore.togglePanel()"
+            :title="inputControlsToggleTitle"
+            :aria-label="inputControlsToggleTitle"
+            :aria-pressed="inputControlsCollapsed"
+            @click="toggleInputControlsCollapsed"
           >
-            <LucideIcon :icon="FileDiff" :size="14" />
-            <span class="changes-toggle-label">{{ t('chat.changes.toggle') }}</span>
+            <svg
+              v-if="inputControlsCollapsed"
+              class="input-controls-toggle-icon"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 10l4-4 4 4" />
+            </svg>
+            <svg
+              v-else
+              class="input-controls-toggle-icon"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 6l4 4 4-4" />
+            </svg>
           </button>
         </div>
+        <div v-if="!inputControlsCollapsed" class="input-backdrop-row">
+          <div v-if="!inputControlsCollapsed" class="input-backdrop-status">
+            <ChatStatusIndicators
+              :unity-connected="unityConnected"
+              :unity-plugin-status="unityPluginStatus"
+              :unity-plugin-installing="unityPluginInstalling"
+              :unity-launching="unityLaunching"
+              :unity-launch-state="unityLaunchState"
+              :unity-connection-status="unityConnectionStatus"
+              :unity-recompiling="unityRecompileActive"
+              :working-dir="workingDir"
+              :is-unity-project="isUnityProject"
+              :scan-phase="scanPhase"
+              :last-scan-stats="lastScanStats"
+              :knowledge-access-mode="knowledgeAccessMode"
+              :selected-agent-id="selectedAgentId"
+              @start-scan="emit('startScan')"
+              @install-plugin="emit('installPlugin')"
+              @launch-unity-project="emit('launchUnityProject')"
+              @update-knowledge-access-mode="setKnowledgeAccessMode"
+            />
+          </div>
+          <div class="input-backdrop-action">
+            <button
+              v-if="!isViewingSubagent && hasPanelToggleRow"
+              class="changes-toggle-btn ui-select-none"
+              :class="{ 'is-active': chatChangesStore.currentPanelVisible }"
+              type="button"
+              :disabled="isStreaming"
+              :aria-pressed="chatChangesStore.currentPanelVisible"
+              :aria-label="t('chat.changes.toggle')"
+              @click="chatChangesStore.togglePanel()"
+            >
+              <LucideIcon :icon="FileDiff" :size="14" />
+              <span class="changes-toggle-label">{{ t('chat.changes.toggle') }}</span>
+            </button>
+          </div>
+        </div>
+        <RichChatInput
+          ref="composerPanelRef"
+          v-model="inputText"
+          :selected-agent-id="selectedAgentId"
+          :skills="skills"
+          :placeholder="chatInputPlaceholder"
+          :is-streaming="isStreaming"
+          :cancelling="isCancelling"
+          :can-resume="canResumeInterrupted"
+          :send-label="isStreaming ? runningSendLabel : t('common.send')"
+          :cancel-label="t('common.cancel')"
+          :resume-label="t('chat.input.resume')"
+          :compact="inputControlsCollapsed"
+          :asset-ref-sync-key="composerAssetRefSyncKey"
+          :message-history="messages"
+          @send="handleComposerSend"
+          @compact="emit('compact')"
+          @fork="emit('fork')"
+          @undo="openUndoChooser"
+          @export-context="emit('exportSessionContext', { sessionId: activeSessionId || '' })"
+          @review-context="emit('reviewSessionContext', { sessionId: activeSessionId || '' })"
+          @clear="handleNewChatRequest"
+          @cancel="emit('cancel')"
+          @resume="emit('resume')"
+        >
+          <template v-if="!inputControlsCollapsed" #footer-start>
+            <ModelEffortSelector
+              align="start"
+              :models="models"
+              :selected-id="selectedModelId"
+              :effort="effort"
+              :efforts="effortLevels"
+              :effort-supported="effortSupported"
+              :fast-mode-enabled="fastModeEnabled"
+              :fast-mode-available="fastModeAvailable"
+              :disabled="isStreaming"
+              @select-model="emit('selectModel', $event)"
+              @select-effort="emit('selectEffort', $event)"
+              @select-fast-mode="emit('selectFastMode', $event)"
+            />
+            <TokenUsageBar
+              :token-usage="tokenUsage"
+            />
+          </template>
+        </RichChatInput>
       </div>
-      <RichChatInput
-        ref="composerPanelRef"
-        v-model="inputText"
-        :selected-agent-id="selectedAgentId"
-        :skills="skills"
-        :placeholder="chatInputPlaceholder"
-        :is-streaming="isStreaming"
-        :cancelling="isCancelling"
-        :send-label="isStreaming ? runningSendLabel : t('common.send')"
-        :cancel-label="t('common.cancel')"
-        :compact="inputControlsCollapsed"
-        :asset-ref-sync-key="composerAssetRefSyncKey"
-        :message-history="messages"
-        @send="handleComposerSend"
-        @compact="emit('compact')"
-        @fork="emit('fork')"
-        @undo="openUndoChooser"
-        @clear="handleNewChatRequest"
-        @cancel="emit('cancel')"
-      >
-        <template v-if="!inputControlsCollapsed" #footer-start>
-          <ModelEffortSelector
-            align="start"
-            :models="models"
-            :selected-id="selectedModelId"
-            :effort="effort"
-            :efforts="effortLevels"
-            :effort-supported="effortSupported"
-            :fast-mode-enabled="fastModeEnabled"
-            :fast-mode-available="fastModeAvailable"
-            :disabled="isStreaming"
-            @select-model="emit('selectModel', $event)"
-            @select-effort="emit('selectEffort', $event)"
-            @select-fast-mode="emit('selectFastMode', $event)"
-          />
-          <TokenUsageBar
-            :token-usage="tokenUsage"
-          />
-        </template>
-      </RichChatInput>
     </div>
     </div><!-- /chat-view -->
 
@@ -3473,8 +3657,8 @@ onUnmounted(() => {
   transition: color 0.12s ease;
 }
 
-:deep(.sp-session-item:hover .sp-session-title),
-:deep(.sp-session-item.active .sp-session-title) {
+:deep(.sp-session-item:hover .sp-session-title:not(.is-running)),
+:deep(.sp-session-item.active .sp-session-title:not(.is-running)) {
   color: var(--text-color);
 }
 
@@ -3528,6 +3712,7 @@ onUnmounted(() => {
 }
 
 .chat-view {
+  --chat-workspace-content-max-width: 980px;
   z-index: 2;
   flex: 1 1 0;
   display: flex;
@@ -3604,12 +3789,23 @@ onUnmounted(() => {
   width: 100%;
   min-width: 0;
   padding: 12px 24px 18px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-color);
+  border-top: 0;
+  background: transparent;
 }
 
 .input-area.is-controls-collapsed {
   padding-bottom: 14px;
+}
+
+.chat-input-frame {
+  position: relative;
+  width: min(100%, var(--chat-workspace-content-max-width));
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.chat-input-frame :deep(.chat-composer:not(.is-compact):not(.has-top-extension)) {
+  min-height: 104px;
 }
 
 .input-backdrop-row {
@@ -3718,7 +3914,9 @@ onUnmounted(() => {
 }
 
 .chat-pending-stack {
+  width: min(100%, var(--chat-workspace-content-max-width));
   min-width: 0;
+  margin-inline: auto;
 }
 
 .chat-view.is-vertical-layout :deep(.chat-transcript-scroll.is-session) {

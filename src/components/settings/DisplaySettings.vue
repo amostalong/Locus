@@ -2,7 +2,15 @@
 import { computed, ref, onMounted } from "vue";
 import { t } from "../../i18n";
 import { useTheme, type ThemePreference } from "../../composables/useTheme";
-import { useDisplaySettings, type AssetRefClickAction, type DiffReviewTarget, type FontSlot, type PlanApprovalTarget } from "../../composables/useDisplaySettings";
+import {
+  useDisplaySettings,
+  SESSION_MESSAGE_PAGE_SIZE_OPTIONS,
+  type AssetRefClickAction,
+  type DiffReviewTarget,
+  type FontSlot,
+  type MemoryFileOpenTarget,
+  type PlanApprovalTarget,
+} from "../../composables/useDisplaySettings";
 import { normalizeAppError } from "../../services/errors";
 import { ipcInvoke } from "../../services/ipc";
 import {
@@ -12,7 +20,7 @@ import {
   setViewWindowsAboveMain,
 } from "../../services/system";
 import { useNotificationStore } from "../../stores/notification";
-import BaseDropdown from "../ui/BaseDropdown.vue";
+import BaseDropdown, { type DropdownOption } from "../ui/BaseDropdown.vue";
 import BaseSegmented from "../ui/BaseSegmented.vue";
 import BaseSwitch from "../ui/BaseSwitch.vue";
 
@@ -39,6 +47,13 @@ const themeOptions = computed(() =>
   })),
 );
 
+const sessionMessagePageSizeOptions = computed<DropdownOption[]>(() =>
+  SESSION_MESSAGE_PAGE_SIZE_OPTIONS.map((value) => ({
+    value: String(value),
+    label: t("settings.display.sessionMessagePageSizeOption", value),
+  })),
+);
+
 const diffReviewTargetOptions = computed(() => [
   { value: "inline", label: t("settings.display.diffReviewInline") },
   { value: "window", label: t("settings.display.diffReviewWindow") },
@@ -47,6 +62,11 @@ const diffReviewTargetOptions = computed(() => [
 const planApprovalTargetOptions = computed(() => [
   { value: "card", label: t("chat.plan.approvalTarget.card") },
   { value: "window", label: t("chat.plan.approvalTarget.window") },
+]);
+
+const memoryFileOpenTargetOptions = computed(() => [
+  { value: "window", label: t("settings.display.memoryFileOpenWindow") },
+  { value: "knowledge", label: t("settings.display.memoryFileOpenKnowledge") },
 ]);
 
 const assetRefClickActionOptions = computed(() => [
@@ -110,6 +130,15 @@ const fontSlots: { slot: FontSlot; labelKey: string; mono: boolean }[] = [
 ];
 
 const systemFonts = ref<string[]>([]);
+
+const fontOptions = computed<DropdownOption[]>(() => [
+  { value: "", label: t("settings.display.fontDefault") },
+  ...systemFonts.value.map((name) => ({
+    value: name,
+    label: name,
+    labelStyle: { fontFamily: name },
+  })),
+]);
 
 onMounted(async () => {
   void refreshViewOpenInExistingWindow();
@@ -217,6 +246,24 @@ async function updateViewWindowsAboveMain(value: boolean) {
   </div>
 
   <div class="settings-section">
+    <div class="section-label">{{ t("settings.display.sessionHistoryTitle") }}</div>
+    <p class="section-desc">{{ t("settings.display.sessionHistoryDesc") }}</p>
+
+    <div class="choice-row">
+      <span class="choice-label">{{ t("settings.display.sessionMessagePageSize") }}</span>
+      <BaseDropdown
+        class="history-page-size-dropdown"
+        :model-value="String(display.sessionMessagePageSize)"
+        :options="sessionMessagePageSizeOptions"
+        :aria-label="t('settings.display.sessionMessagePageSize')"
+        size="sm"
+        menu-align="start"
+        @update:model-value="setDisplay('sessionMessagePageSize', Number($event))"
+      />
+    </div>
+  </div>
+
+  <div class="settings-section">
     <div class="section-label">{{ t("settings.display.mainChromeTitle") }}</div>
     <p class="section-desc">{{ t("settings.display.mainChromeDesc") }}</p>
 
@@ -242,15 +289,6 @@ async function updateViewWindowsAboveMain(value: boolean) {
   <div class="settings-section">
     <div class="section-label">{{ t("settings.display.panelBehaviorTitle") }}</div>
     <p class="section-desc">{{ t("settings.display.panelBehaviorDesc") }}</p>
-
-    <div class="toggle-row">
-      <BaseSwitch
-        :model-value="display.todoAutoOpen"
-        :aria-label="t('settings.display.todoAutoOpen')"
-        @update:model-value="setDisplay('todoAutoOpen', $event)"
-      />
-      <span>{{ t("settings.display.todoAutoOpen") }}</span>
-    </div>
 
     <div class="toggle-row">
       <BaseSwitch
@@ -286,6 +324,15 @@ async function updateViewWindowsAboveMain(value: boolean) {
         @update:model-value="setDisplay('rightAlignUserMessages', $event)"
       />
       <span>{{ t("settings.display.rightAlignUserMessages") }}</span>
+    </div>
+
+    <div class="toggle-row">
+      <BaseSwitch
+        :model-value="display.showTurnNavigationRail"
+        :aria-label="t('settings.display.showTurnNavigationRail')"
+        @update:model-value="setDisplay('showTurnNavigationRail', $event)"
+      />
+      <span>{{ t("settings.display.showTurnNavigationRail") }}</span>
     </div>
 
     <div class="toggle-row">
@@ -387,6 +434,23 @@ async function updateViewWindowsAboveMain(value: boolean) {
   </div>
 
   <div class="settings-section">
+    <div class="section-label">{{ t("settings.display.memoryFileOpenTitle") }}</div>
+    <p class="section-desc">{{ t("settings.display.memoryFileOpenDesc") }}</p>
+
+    <div class="choice-row">
+      <span class="choice-label">{{ t("settings.display.memoryFileOpenTarget") }}</span>
+      <BaseSegmented
+        class="choice-segmented"
+        :model-value="display.memoryFileOpenTarget"
+        :options="memoryFileOpenTargetOptions"
+        :aria-label="t('settings.display.memoryFileOpenTarget')"
+        size="sm"
+        @update:model-value="setDisplay('memoryFileOpenTarget', $event as MemoryFileOpenTarget)"
+      />
+    </div>
+  </div>
+
+  <div class="settings-section">
     <div class="section-label">{{ t("settings.display.assetRefClickTitle") }}</div>
     <p class="section-desc">{{ t("settings.display.assetRefClickDesc") }}</p>
 
@@ -446,19 +510,16 @@ async function updateViewWindowsAboveMain(value: boolean) {
     <div class="font-grid">
       <template v-for="f in fontSlots" :key="f.slot">
         <label class="font-label">{{ t(f.labelKey) }}</label>
-        <select
+        <BaseDropdown
           class="font-select"
-          :value="display.fonts[f.slot]"
-          @change="setFont(f.slot, ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">{{ t("settings.display.fontDefault") }}</option>
-          <option
-            v-for="name in systemFonts"
-            :key="name"
-            :value="name"
-            :style="{ fontFamily: name }"
-          >{{ name }}</option>
-        </select>
+          :model-value="display.fonts[f.slot]"
+          :options="fontOptions"
+          size="md"
+          menu-align="start"
+          teleport
+          :aria-label="t(f.labelKey)"
+          @update:model-value="setFont(f.slot, $event)"
+        />
       </template>
     </div>
   </div>
@@ -516,6 +577,11 @@ async function updateViewWindowsAboveMain(value: boolean) {
   max-width: 100%;
 }
 
+.history-page-size-dropdown {
+  justify-self: start;
+  width: 96px;
+}
+
 .toggle-row {
   display: flex;
   align-items: center;
@@ -550,18 +616,5 @@ async function updateViewWindowsAboveMain(value: boolean) {
 .font-select {
   width: 100%;
   min-width: 0;
-  padding: 5px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 5px;
-  background: var(--input-bg);
-  color: var(--text-color);
-  font-size: 13px;
-  outline: none;
-  cursor: pointer;
-  transition: border-color 0.15s;
-}
-
-.font-select:focus {
-  border-color: var(--accent-color);
 }
 </style>

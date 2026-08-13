@@ -89,7 +89,7 @@
     },
     {
       "path": "src/components/asset/AssetTextViewer.vue",
-      "bytes": 2597
+      "bytes": 3981
     },
     {
       "path": "src/components/diff/BinaryPreviewHost.vue",
@@ -185,7 +185,7 @@
     },
     {
       "path": "src/components/unity/UnityEnumField.vue",
-      "bytes": 2961
+      "bytes": 2638
     },
     {
       "path": "src/components/unity/UnityFlagsField.vue",
@@ -217,7 +217,7 @@
     },
     {
       "path": "src/components/unity/UnitySerializedPropertyTree.vue",
-      "bytes": 42134
+      "bytes": 42547
     },
     {
       "path": "src/components/unity/UnityVectorField.vue",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/components/ui/BaseDropdown.vue",
-      "bytes": 9312
+      "bytes": 14370
     },
     {
       "path": "src/components/ui/BaseSegmented.vue",
@@ -297,15 +297,15 @@
     },
     {
       "path": "src/language/en.json",
-      "bytes": 246732
+      "bytes": 257334
     },
     {
       "path": "src/language/zh.json",
-      "bytes": 240273
+      "bytes": 250592
     },
     {
       "path": "src/services/asset.ts",
-      "bytes": 4001
+      "bytes": 4101
     },
     {
       "path": "src/services/diff.ts",
@@ -321,7 +321,7 @@
     },
     {
       "path": "src/services/unity.ts",
-      "bytes": 12439
+      "bytes": 13847
     },
     {
       "path": "src/services/unitySerializedProperty.ts",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/types.ts",
-      "bytes": 81450
+      "bytes": 79923
     }
   ]
 }

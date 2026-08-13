@@ -7,8 +7,10 @@ export type UnityIntegrationSuite =
   | "type-index"
   | "state-probe"
   | "native-bridge"
+  | "unity-test"
   | "hot-reload"
-  | "execute";
+  | "execute"
+  | "yaml-parity";
 
 export type TypeIndexSampleMode = "sample32" | "all";
 
@@ -19,6 +21,8 @@ export interface UnityIntegrationTestRunRequest {
   installPlugin?: boolean;
   forceEditMode?: boolean;
   typeIndexSampleMode?: TypeIndexSampleMode;
+  yamlParitySampleCount?: number;
+  yamlParitySeed?: number;
   connectTimeoutMs?: number;
   suiteTimeoutMs?: number;
   pollMs?: number;

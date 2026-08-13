@@ -6,7 +6,8 @@ use crate::asset_db::types::{parse_guid_hex, Guid};
 use super::references;
 use super::tokenizer::{
     count_braces, extract_field_name, extract_field_name_ref, extract_internal_file_id,
-    extract_plain_value, extract_value, find_closing_brace, parse_doc_header_full,
+    extract_plain_value, extract_value, find_closing_brace, is_unclosed_single_quoted,
+    parse_doc_header_full, trimmed_value_after,
 };
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,10 @@ pub struct HierarchyNode {
     pub is_active: bool,
 }
 
+/// Recursion guard shared by tree building and transform-chain walks; deep
+/// enough for any sane hierarchy, shallow enough to never overflow the stack.
+const MAX_HIERARCHY_DEPTH: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TransformWorldInfo {
     pub position: [f64; 3],
@@ -81,7 +86,14 @@ struct TransformWorldState {
 }
 
 pub fn parse_yaml_docs(content: &[u8]) -> Vec<YamlDoc> {
-    parse_yaml_docs_impl(content, false, false).0 .0
+    let text = String::from_utf8_lossy(content);
+    parse_yaml_docs_impl(&text, false, false).0 .0
+}
+
+/// Parse from an already-decoded string, letting callers that also need the
+/// line-split text pay for `from_utf8_lossy` once instead of twice.
+pub fn parse_yaml_docs_str(text: &str) -> Vec<YamlDoc> {
+    parse_yaml_docs_impl(text, false, false).0 .0
 }
 
 /// Single-pass variant that additionally captures every guid-bearing flow map
@@ -91,7 +103,8 @@ pub fn parse_yaml_docs(content: &[u8]) -> Vec<YamlDoc> {
 /// standalone reference extractor back to back (and keeps the two from ever
 /// disagreeing about document boundaries or field context).
 pub fn parse_yaml_docs_with_refs(content: &[u8]) -> (Vec<YamlDoc>, Vec<references::RawYamlRef>) {
-    parse_yaml_docs_impl(content, true, false).0
+    let text = String::from_utf8_lossy(content);
+    parse_yaml_docs_impl(&text, true, false).0
 }
 
 /// Like [`parse_yaml_docs_with_refs`] but also captures raw serialized member
@@ -105,20 +118,19 @@ pub fn parse_yaml_docs_with_refs_and_bindings(
     Vec<references::RawYamlRef>,
     Vec<references::RawMemberBinding>,
 ) {
-    let ((docs, raw_refs), bindings) = parse_yaml_docs_impl(content, true, true);
+    let text = String::from_utf8_lossy(content);
+    let ((docs, raw_refs), bindings) = parse_yaml_docs_impl(&text, true, true);
     (docs, raw_refs, bindings)
 }
 
 fn parse_yaml_docs_impl(
-    content: &[u8],
+    text: &str,
     collect_refs: bool,
     collect_bindings: bool,
 ) -> (
     (Vec<YamlDoc>, Vec<references::RawYamlRef>),
     Vec<references::RawMemberBinding>,
 ) {
-    let text = String::from_utf8_lossy(content);
-
     let mut docs: Vec<YamlDoc> = Vec::new();
     let mut raw_refs: Vec<references::RawYamlRef> = Vec::new();
     let mut raw_seen: references::RawRefSeen = HashSet::new();
@@ -140,6 +152,8 @@ fn parse_yaml_docs_impl(
     let mut last_field: Option<String> = None;
     let mut pending_line: Option<String> = None;
     let mut pending_braces: i32 = 0;
+    let mut pending_indent: usize = 0;
+    let mut pending_dashed: bool = false;
     let mut cur_is_stripped: bool = false;
     let mut cur_source_prefab_guid: Option<Guid> = None;
     let mut cur_transform_parent_id: Option<i64> = None;
@@ -154,9 +168,12 @@ fn parse_yaml_docs_impl(
     let mut cur_transform_children: Vec<i64> = Vec::new();
     let mut cur_m_script_guid: Option<Guid> = None;
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_prefab_meta_from_flow(
         ct: &str,
         field: &str,
+        field_indent: usize,
+        field_dashed: bool,
         class_id: Option<i32>,
         is_stripped: bool,
         m_go_id: &mut Option<i64>,
@@ -165,26 +182,34 @@ fn parse_yaml_docs_impl(
         prefab_instance_id: &mut Option<i64>,
         source_prefab_guid: &mut Option<Guid>,
     ) {
+        // These are document-level fields (indent 2, or 4 for the fields
+        // nested under `m_Modification:` in a PrefabInstance). A serialized
+        // user field that happens to share the name deeper in a component
+        // (`  data:\n  - m_GameObject: {fileID: ...}`) must not overwrite the
+        // component's own header fields.
+        let doc_level = field_indent == 2 && !field_dashed;
+        let pi_meta_level = field_indent <= 4 && !field_dashed;
+
         let has_file_id = ct.contains("fileID:");
         let has_guid = ct.contains("guid:");
 
         if has_file_id && !has_guid {
             if let Some(fid) = extract_internal_file_id(ct) {
                 match field {
-                    "m_GameObject" => {
+                    "m_GameObject" if doc_level => {
                         if fid != 0 {
                             *m_go_id = Some(fid);
                         }
                     }
-                    "m_Father" => {
+                    "m_Father" if doc_level => {
                         if fid != 0 {
                             *m_father = Some(fid);
                         }
                     }
-                    "m_TransformParent" if class_id == Some(1001) => {
+                    "m_TransformParent" if class_id == Some(1001) && pi_meta_level => {
                         *transform_parent_id = Some(fid);
                     }
-                    "m_PrefabInstance" if is_stripped => {
+                    "m_PrefabInstance" if is_stripped && doc_level => {
                         if fid != 0 {
                             *prefab_instance_id = Some(fid);
                         }
@@ -194,7 +219,7 @@ fn parse_yaml_docs_impl(
             }
         }
 
-        if has_guid && field == "m_SourcePrefab" && class_id == Some(1001) {
+        if has_guid && field == "m_SourcePrefab" && class_id == Some(1001) && doc_level {
             if let Some(guid_str) = extract_value(ct, "guid:") {
                 let hex = guid_str.trim().trim_end_matches(',');
                 // `get(..32)` instead of `[..32]`: byte 32 can land inside a
@@ -263,6 +288,8 @@ fn parse_yaml_docs_impl(
                     extract_prefab_meta_from_flow(
                         ct,
                         field,
+                        pending_indent,
+                        pending_dashed,
                         cur_class_id,
                         cur_is_stripped,
                         &mut cur_m_go_id,
@@ -272,7 +299,12 @@ fn parse_yaml_docs_impl(
                         &mut cur_source_prefab_guid,
                     );
                     // Extract m_Script GUID from multi-line flow
-                    if cur_class_id == Some(114) && field == "m_Script" && ct.contains("guid:") {
+                    if cur_class_id == Some(114)
+                        && field == "m_Script"
+                        && pending_indent == 2
+                        && !pending_dashed
+                        && ct.contains("guid:")
+                    {
                         if let Some(start) = ct.find("guid:") {
                             let after = &ct[start + 5..];
                             let after = after.trim_start();
@@ -350,13 +382,25 @@ fn parse_yaml_docs_impl(
             first_key = false;
         }
 
+        let indent = line.len() - line.trim_start().len();
+        let dashed = trimmed.starts_with('-');
+        // Document-level fields sit at indent 2 and never behind a `- ` list
+        // marker. Same-named serialized user fields nested deeper inside a
+        // component (or inside list items at indent 2) must not clobber them.
+        let doc_level = indent == 2 && !dashed;
+
         if let Some(f) = extract_field_name_ref(trimmed) {
-            if f == "m_Name" {
+            if f == "m_Name" && doc_level {
                 if let Some(val) = extract_plain_value(trimmed, "m_Name:") {
-                    cur_m_name = Some(val);
+                    // A multi-line quoted name would only yield its first
+                    // fragment here (`'line1`); drop it rather than storing a
+                    // half scalar with a dangling quote.
+                    if !is_unclosed_single_quoted(trimmed_value_after(trimmed, "m_Name:")) {
+                        cur_m_name = Some(val);
+                    }
                 }
             }
-            if cur_class_id == Some(1) {
+            if cur_class_id == Some(1) && doc_level {
                 if f == "m_Layer" {
                     if let Some(val) = extract_plain_value(trimmed, "m_Layer:") {
                         if let Ok(n) = val.trim().parse::<i32>() {
@@ -381,7 +425,7 @@ fn parse_yaml_docs_impl(
                     }
                 }
             }
-            if f == "m_Enabled" {
+            if f == "m_Enabled" && doc_level {
                 if let Some(val) = extract_plain_value(trimmed, "m_Enabled:") {
                     if let Ok(n) = val.trim().parse::<i32>() {
                         cur_m_enabled = Some(n != 0);
@@ -389,13 +433,13 @@ fn parse_yaml_docs_impl(
                 }
             }
             if cur_class_id == Some(4) || cur_class_id == Some(224) {
-                if f == "m_RootOrder" {
+                if f == "m_RootOrder" && doc_level {
                     if let Some(val) = extract_plain_value(trimmed, "m_RootOrder:") {
                         if let Ok(n) = val.trim().parse::<i32>() {
                             cur_transform_root_order = Some(n);
                         }
                     }
-                } else if f == "m_Children" {
+                } else if f == "m_Children" && doc_level {
                     cur_transform_children.clear();
                 }
             }
@@ -407,7 +451,11 @@ fn parse_yaml_docs_impl(
                 } else if f == "value" && awaiting_name_value {
                     if cur_m_name.is_none() {
                         if let Some(val) = extract_plain_value(trimmed, "value:") {
-                            if !val.is_empty() {
+                            if !val.is_empty()
+                                && !is_unclosed_single_quoted(trimmed_value_after(
+                                    trimmed, "value:",
+                                ))
+                            {
                                 cur_m_name = Some(val);
                             }
                         }
@@ -418,7 +466,7 @@ fn parse_yaml_docs_impl(
                 }
             }
             // Extract m_Script GUID for MonoBehaviour docs
-            if cur_class_id == Some(114) && f == "m_Script" {
+            if cur_class_id == Some(114) && f == "m_Script" && doc_level {
                 if trimmed.contains("guid:") {
                     if let Some(start) = trimmed.find("guid:") {
                         let after = &trimmed[start + 5..];
@@ -498,12 +546,16 @@ fn parse_yaml_docs_impl(
                 buf.push_str(trimmed);
                 pending_line = Some(buf);
                 pending_braces = balance;
+                pending_indent = indent;
+                pending_dashed = dashed;
                 continue;
             }
             if let Some(ref field) = last_field {
                 extract_prefab_meta_from_flow(
                     trimmed,
                     field,
+                    indent,
+                    dashed,
                     cur_class_id,
                     cur_is_stripped,
                     &mut cur_m_go_id,
@@ -854,8 +906,10 @@ pub fn build_go_tree(docs: &[YamlDoc]) -> Vec<HierarchyNode> {
         )
     });
 
+    #[allow(clippy::too_many_arguments)]
     fn build_node(
         node_id: i64,
+        depth: usize,
         node_names: &HashMap<i64, &str>,
         parent_map: &HashMap<i64, i64>,
         children_map: &HashMap<i64, Vec<i64>>,
@@ -869,22 +923,30 @@ pub fn build_go_tree(docs: &[YamlDoc]) -> Vec<HierarchyNode> {
         go_props: &HashMap<i64, (Option<String>, Option<i32>, Option<i64>, Option<i32>)>,
     ) -> HierarchyNode {
         let name = node_names.get(&node_id).copied().unwrap_or("?").to_string();
-        let child_ids = ordered_children_for_parent(
-            node_id,
-            parent_map,
-            children_map,
-            go_to_transform,
-            transform_to_go,
-            stripped_transform_to_prefab,
-            prefab_root_transform,
-            transform_children,
-            node_doc_index,
-        );
+        // Stack-depth guard: procedurally generated chains can nest thousands
+        // deep; recursing further would overflow the stack, so the subtree is
+        // truncated instead. Real hierarchies stay far below this.
+        let child_ids = if depth >= MAX_HIERARCHY_DEPTH {
+            Vec::new()
+        } else {
+            ordered_children_for_parent(
+                node_id,
+                parent_map,
+                children_map,
+                go_to_transform,
+                transform_to_go,
+                stripped_transform_to_prefab,
+                prefab_root_transform,
+                transform_children,
+                node_doc_index,
+            )
+        };
         let children = child_ids
             .iter()
             .map(|&child_id| {
                 build_node(
                     child_id,
+                    depth + 1,
                     node_names,
                     parent_map,
                     children_map,
@@ -920,6 +982,7 @@ pub fn build_go_tree(docs: &[YamlDoc]) -> Vec<HierarchyNode> {
         .map(|id| {
             build_node(
                 id,
+                0,
                 &node_names,
                 &parent_map,
                 &children_map,
@@ -1000,6 +1063,27 @@ fn parse_vector_field<const N: usize>(
     parse_block_vector(lines, pos, end, &components)
 }
 
+/// `f64` parsing that also accepts the YAML 1.1 leading-dot special floats
+/// (`.inf` / `-.inf` / `.nan`) some external tools emit. Unity itself writes
+/// `Infinity` / `NaN`, which Rust's parser already accepts case-insensitively.
+fn parse_yaml_f64(s: &str) -> Option<f64> {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("-.") {
+        if rest.eq_ignore_ascii_case("inf") {
+            return Some(f64::NEG_INFINITY);
+        }
+    }
+    if let Some(rest) = t.strip_prefix("+.").or_else(|| t.strip_prefix('.')) {
+        if rest.eq_ignore_ascii_case("inf") {
+            return Some(f64::INFINITY);
+        }
+        if rest.eq_ignore_ascii_case("nan") {
+            return Some(f64::NAN);
+        }
+    }
+    t.parse::<f64>().ok()
+}
+
 fn parse_flow_vector<const N: usize>(text: &str, components: &[&str; N]) -> Option<[f64; N]> {
     let open = text.find('{')?;
     let close = text.rfind('}')?;
@@ -1014,7 +1098,7 @@ fn parse_flow_vector<const N: usize>(text: &str, components: &[&str; N]) -> Opti
         let key = part[..colon].trim();
         let value = part[colon + 1..].trim().trim_end_matches(',');
         let idx = components.iter().position(|component| *component == key)?;
-        values[idx] = value.parse::<f64>().ok()?;
+        values[idx] = parse_yaml_f64(value)?;
         found[idx] = true;
     }
 
@@ -1057,7 +1141,7 @@ fn parse_block_vector<const N: usize>(
         let key = trimmed[..colon].trim();
         let value = trimmed[colon + 1..].trim().trim_end_matches(',');
         let component_idx = components.iter().position(|component| *component == key)?;
-        values[component_idx] = value.parse::<f64>().ok()?;
+        values[component_idx] = parse_yaml_f64(value)?;
         found[component_idx] = true;
         consumed += 1;
         idx += 1;
@@ -1079,7 +1163,7 @@ fn compute_world_transform_state(
     if let Some(state) = cache.get(&transform_id).copied() {
         return Some(state);
     }
-    if !visiting.insert(transform_id) {
+    if visiting.len() >= MAX_HIERARCHY_DEPTH || !visiting.insert(transform_id) {
         return None;
     }
 
@@ -1379,6 +1463,13 @@ fn find_node_in_siblings<'a>(
     siblings: &'a [HierarchyNode],
     segment: &str,
 ) -> Option<&'a HierarchyNode> {
+    // Literal names win first: an object actually named "Enemy[2]" must stay
+    // reachable even when duplicate "Enemy" siblings exist. Ordinal syntax
+    // only kicks in when no literal sibling matches.
+    if let Some(node) = siblings.iter().find(|node| node.name == segment) {
+        return Some(node);
+    }
+
     let (name, ordinal) = parse_path_segment(segment);
     if let Some(ordinal) = ordinal {
         if let Some(node) = siblings
@@ -1390,18 +1481,33 @@ fn find_node_in_siblings<'a>(
         }
     }
 
-    siblings.iter().find(|node| node.name == segment)
+    // Tolerate stray whitespace in the request while keeping exact-name
+    // objects (names with leading/trailing spaces are real) addressable via
+    // the untrimmed match above.
+    let trimmed = segment.trim();
+    if trimmed != segment {
+        return find_node_in_siblings(siblings, trimmed);
+    }
+    None
 }
 
 pub fn find_hierarchy_node_by_path<'a>(
     roots: &'a [HierarchyNode],
     path: &str,
 ) -> Option<&'a HierarchyNode> {
-    let parts: Vec<&str> = path
-        .split('/')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Defensively strip the `⟦ ⟧` display wrappers if a caller pasted them
+    // from list output despite the "omit the markers" instruction.
+    let cleaned;
+    let path = if path.contains('⟦') || path.contains('⟧') {
+        cleaned = path.replace(['⟦', '⟧'], "");
+        cleaned.as_str()
+    } else {
+        path
+    };
+    // Segments are matched untrimmed first (names with leading/trailing
+    // spaces exist in real projects and the ⟦ ⟧ display wrapping is designed
+    // to make them visible); whitespace-only segments are still skipped.
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.trim().is_empty()).collect();
     if parts.is_empty() {
         return None;
     }
@@ -1475,7 +1581,6 @@ pub fn get_components_for_go(docs: &[YamlDoc], go_file_id: i64) -> Vec<usize> {
     result
 }
 
-/// guid_resolver: guid hex string → Option<asset path>
 pub fn format_doc_state_lines(doc: &YamlDoc) -> String {
     let mut out = String::new();
     if let Some(enabled) = doc.m_enabled {
@@ -1487,18 +1592,21 @@ pub fn format_doc_state_lines(doc: &YamlDoc) -> String {
     out
 }
 
+/// `external_resolver`: `(guid hex, fileID)` → readable asset/object path.
+/// The fileID is required for importer subassets because every object inside
+/// one FBX/texture shares the same GUID.
 pub fn resolve_references_in_lines(
     lines: &[&str],
     start: usize,
     end: usize,
-    guid_resolver: &dyn Fn(&str) -> Option<String>,
+    external_resolver: &dyn Fn(&str, Option<i64>) -> Option<String>,
     internal_resolver: &dyn Fn(i64) -> Option<String>,
 ) -> String {
     resolve_references_in_lines_skipping_fields(
         lines,
         start,
         end,
-        guid_resolver,
+        external_resolver,
         internal_resolver,
         &[],
     )
@@ -1508,7 +1616,7 @@ pub fn resolve_references_in_lines_skipping_fields(
     lines: &[&str],
     start: usize,
     end: usize,
-    guid_resolver: &dyn Fn(&str) -> Option<String>,
+    external_resolver: &dyn Fn(&str, Option<i64>) -> Option<String>,
     internal_resolver: &dyn Fn(i64) -> Option<String>,
     skipped_fields: &[&str],
 ) -> String {
@@ -1530,7 +1638,7 @@ pub fn resolve_references_in_lines_skipping_fields(
                 let complete = pending_line.take().unwrap();
                 out.push_str(&resolve_line_refs(
                     &complete,
-                    guid_resolver,
+                    external_resolver,
                     internal_resolver,
                 ));
                 out.push('\n');
@@ -1559,7 +1667,11 @@ pub fn resolve_references_in_lines_skipping_fields(
                 i += 1;
                 continue;
             }
-            out.push_str(&resolve_line_refs(line, guid_resolver, internal_resolver));
+            out.push_str(&resolve_line_refs(
+                line,
+                external_resolver,
+                internal_resolver,
+            ));
         } else {
             out.push_str(&format_decimal_line(line));
         }
@@ -1649,13 +1761,29 @@ fn try_merge_vector_lines(lines: &[&str], pos: usize, end: usize) -> Option<(Str
     Some((merged, fields.len() + 1))
 }
 
+/// Shorten a decimal for display without destroying small values: float-noise
+/// like `0.30000001192092896` collapses to `0.3`, but `0.001` stays `0.001`
+/// (the old fixed `{:.2}` rendered it as a misleading `0.00`) and sub-1e-6
+/// magnitudes keep their original (often scientific) notation.
 pub(super) fn round_decimal_str(s: &str) -> String {
-    if let Ok(f) = s.parse::<f64>() {
-        if s.contains('.') {
-            format!("{:.2}", f)
-        } else {
-            s.to_string()
-        }
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let Ok(f) = s.parse::<f64>() else {
+        return s.to_string();
+    };
+    if f != 0.0 && f.abs() < 1e-6 {
+        return s.to_string();
+    }
+    let mut shortened = format!("{:.6}", f);
+    while shortened.ends_with('0') {
+        shortened.pop();
+    }
+    if shortened.ends_with('.') {
+        shortened.push('0');
+    }
+    if shortened.len() < s.len() {
+        shortened
     } else {
         s.to_string()
     }
@@ -1666,10 +1794,16 @@ fn format_decimal_line(line: &str) -> String {
     if let Some(colon_idx) = trimmed.find(':') {
         let val = trimmed[colon_idx + 1..].trim();
         if !val.is_empty() && val.contains('.') {
-            if let Ok(f) = val.parse::<f64>() {
-                let indent = &line[..line.len() - trimmed.len()];
+            let rounded = round_decimal_str(val);
+            if rounded != val {
+                // Indent length must count leading whitespace only; `trim()`
+                // also strips trailing whitespace, and folding those bytes
+                // into the indent slice could split a multi-byte char (CJK
+                // field names) and panic.
+                let indent_len = line.len() - line.trim_start().len();
+                let indent = &line[..indent_len];
                 let key = &trimmed[..colon_idx];
-                return format!("{}{}: {:.2}", indent, key, f);
+                return format!("{}{}: {}", indent, key, rounded);
             }
         }
     }
@@ -1678,57 +1812,67 @@ fn format_decimal_line(line: &str) -> String {
 
 fn resolve_line_refs(
     line: &str,
-    guid_resolver: &dyn Fn(&str) -> Option<String>,
+    external_resolver: &dyn Fn(&str, Option<i64>) -> Option<String>,
     internal_resolver: &dyn Fn(i64) -> Option<String>,
 ) -> String {
     let bytes = line.as_bytes();
     let mut result = String::new();
+    // Copy the gaps between flow maps as string slices, not byte-by-byte
+    // chars: non-ASCII field names/values (CJK identifiers are legal C#)
+    // would otherwise be mangled into Latin-1 mojibake. Slice bounds always
+    // land on the ASCII `{`/`}` bytes, so slicing is UTF-8 safe.
+    let mut last = 0;
     let mut i = 0;
 
     while i < bytes.len() {
         if bytes[i] == b'{' {
             if let Some(end) = find_closing_brace(bytes, i) {
+                result.push_str(&line[last..i]);
                 let block = &line[i..=end];
-                let resolved = resolve_single_ref(block, guid_resolver, internal_resolver);
+                let resolved = resolve_single_ref(block, external_resolver, internal_resolver);
                 result.push_str(&resolved);
                 i = end + 1;
+                last = i;
                 continue;
             }
         }
-        result.push(bytes[i] as char);
         i += 1;
     }
+    result.push_str(&line[last..]);
 
     result
 }
 
 fn resolve_single_ref(
     block: &str,
-    guid_resolver: &dyn Fn(&str) -> Option<String>,
+    external_resolver: &dyn Fn(&str, Option<i64>) -> Option<String>,
     internal_resolver: &dyn Fn(i64) -> Option<String>,
 ) -> String {
     let has_guid = block.contains("guid:");
     let has_file_id = block.contains("fileID:");
+    let file_id = if has_file_id {
+        extract_value(block, "fileID:")
+            .and_then(|value| value.trim().trim_end_matches(',').parse::<i64>().ok())
+    } else {
+        None
+    };
 
     if has_guid {
         if let Some(guid_str) = extract_value(block, "guid:") {
             let guid_hex = guid_str.trim().trim_end_matches(',');
-            if let Some(path) = guid_resolver(guid_hex) {
+            if let Some(path) = external_resolver(guid_hex, file_id) {
                 return format!("{{{}}}", path);
             }
             return format!("{{guid:{}}}", guid_hex);
         }
         "{unresolved external ref}".to_string()
     } else if has_file_id {
-        if let Some(fid_str) = extract_value(block, "fileID:") {
-            let fid_str = fid_str.trim().trim_end_matches(',');
-            if let Ok(fid) = fid_str.parse::<i64>() {
-                if fid == 0 {
-                    return "{none}".to_string();
-                }
-                if let Some(desc) = internal_resolver(fid) {
-                    return format!("{{{}}}", desc);
-                }
+        if let Some(fid) = file_id {
+            if fid == 0 {
+                return "{none}".to_string();
+            }
+            if let Some(desc) = internal_resolver(fid) {
+                return format!("{{{}}}", desc);
             }
         }
         "{unresolved internal ref}".to_string()
@@ -1750,6 +1894,7 @@ pub fn build_internal_id_map(docs: &[YamlDoc]) -> HashMap<i64, String> {
     let mut map: HashMap<i64, String> = HashMap::new();
 
     for doc in docs {
+        let display_label = format_doc_display_label(doc);
         let desc = if doc.class_id == 1 {
             let path = go_paths
                 .get(&doc.file_id)
@@ -1767,24 +1912,55 @@ pub fn build_internal_id_map(docs: &[YamlDoc]) -> HashMap<i64, String> {
                 .get(&go_id)
                 .cloned()
                 .unwrap_or_else(|| go_names.get(&go_id).copied().unwrap_or("?").to_string());
-            format!("{}.{}", go_path, doc.type_name)
+            format!("{}.{}", go_path, display_label)
         } else if doc.is_stripped {
             if let Some(pi_id) = doc.prefab_instance_id {
                 let pi_path = go_paths
                     .get(&pi_id)
                     .cloned()
                     .unwrap_or_else(|| go_names.get(&pi_id).copied().unwrap_or("?").to_string());
-                format!("{}.{} (stripped)", pi_path, doc.type_name)
+                format!("{}.{} (stripped)", pi_path, display_label)
             } else {
-                format!("{} (stripped)", doc.type_name)
+                format!("{} (stripped)", display_label)
             }
         } else {
-            doc.type_name.clone()
+            display_label
         };
         map.insert(doc.file_id, desc);
     }
 
     map
+}
+
+/// Human-facing label for a serialized document. Unity stores every scripted
+/// object under the generic `MonoBehaviour` YAML key, even when the object has
+/// a useful serialized name. Keep the engine type as secondary context while
+/// promoting that semantic name for headings and internal-reference labels.
+pub fn format_doc_display_label(doc: &YamlDoc) -> String {
+    let type_name = if doc.type_name.trim().is_empty() {
+        if doc.class_id == 114 {
+            "MonoBehaviour"
+        } else {
+            "Unknown"
+        }
+    } else {
+        doc.type_name.trim()
+    };
+
+    if doc.class_id != 114 && type_name != "MonoBehaviour" {
+        return type_name.to_string();
+    }
+
+    let Some(name) = doc
+        .m_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(type_name))
+    else {
+        return type_name.to_string();
+    };
+
+    format!("{} ({})", name, type_name)
 }
 
 pub fn collect_guids_from_lines(lines: &[&str], start: usize, end: usize) -> Vec<Guid> {

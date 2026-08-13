@@ -5,15 +5,25 @@ use crate::commands::CodexTransportMode;
 use crate::session::models::{ChatMessage, ImageData, MessageRole, ServerToolKind, ToolCallInfo};
 use futures::{SinkExt, StreamExt};
 use http::Uri;
-use hyper_util::client::legacy::connect::proxy::{SocksV4, SocksV5, Tunnel};
+use hyper_util::client::legacy::connect::proxy::SocksV4;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::proxy::matcher::Intercept;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
-use tokio_tungstenite::client_async;
+use tokio_tungstenite::client_async_with_config;
+use tokio_tungstenite::proxy::connect_via_proxy;
+use tokio_tungstenite::tungstenite::extensions::compression::deflate::DeflateConfig;
+use tokio_tungstenite::tungstenite::extensions::ExtensionsConfig;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::proxy::{
+    ProxyAuth as TungsteniteProxyAuth, ProxyConfig as TungsteniteProxyConfig,
+    ProxyScheme as TungsteniteProxyScheme,
+};
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use tower_service::Service;
@@ -22,12 +32,18 @@ use url::Url;
 const DEFAULT_CODEX_PROVIDER_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_ENDPOINT_PATH: &str = "/responses";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const X_CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE: &str = "websocket_connection_limit_reached";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE: &str = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.";
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
+const PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE: &str =
+    "Previous response was not found. Retrying the full request.";
 const CODEX_ORIGINATOR_HEADER_VALUE: &str = "opencode";
 const MAX_SAFE_STREAM_RECOVERY_RETRIES: u32 = 2;
 const SAFE_STREAM_RECOVERY_DELAY_MS: u64 = 1200;
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBSOCKET_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 trait CodexAsyncIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
@@ -36,16 +52,126 @@ impl<T> CodexAsyncIo for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite
 type BoxedCodexIo = Box<dyn CodexAsyncIo>;
 type CodexWebSocket = tokio_tungstenite::WebSocketStream<BoxedCodexIo>;
 
+struct CodexWebsocketStream {
+    tx_command: mpsc::Sender<CodexWebsocketCommand>,
+    rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
+    pump_task: tokio::task::JoinHandle<()>,
+}
+
+enum CodexWebsocketCommand {
+    Send {
+        message: Message,
+        tx_result: oneshot::Sender<Result<(), WsError>>,
+    },
+}
+
+impl CodexWebsocketStream {
+    fn new(inner: CodexWebSocket) -> Self {
+        let (tx_command, mut rx_command) = mpsc::channel::<CodexWebsocketCommand>(32);
+        let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
+
+        let pump_task = tokio::spawn(async move {
+            let mut inner = inner;
+            loop {
+                tokio::select! {
+                    command = rx_command.recv() => {
+                        let Some(command) = command else {
+                            break;
+                        };
+                        match command {
+                            CodexWebsocketCommand::Send { message, tx_result } => {
+                                let result = inner.send(message).await;
+                                let should_break = result.is_err();
+                                let _ = tx_result.send(result);
+                                if should_break {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    message = inner.next() => {
+                        let Some(message) = message else {
+                            break;
+                        };
+                        match message {
+                            Ok(Message::Ping(payload)) => {
+                                if let Err(error) = inner.send(Message::Pong(payload)).await {
+                                    let _ = tx_message.send(Err(error));
+                                    break;
+                                }
+                            }
+                            Ok(Message::Pong(_)) => {}
+                            Ok(message @ (Message::Text(_)
+                            | Message::Binary(_)
+                            | Message::Close(_)
+                            | Message::Frame(_))) => {
+                                let is_close = matches!(message, Message::Close(_));
+                                if tx_message.send(Ok(message)).is_err() {
+                                    break;
+                                }
+                                if is_close {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = tx_message.send(Err(error));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            tx_command,
+            rx_message,
+            pump_task,
+        }
+    }
+
+    async fn send(&self, message: Message) -> Result<(), WsError> {
+        let (tx_result, rx_result) = oneshot::channel();
+        if self
+            .tx_command
+            .send(CodexWebsocketCommand::Send { message, tx_result })
+            .await
+            .is_err()
+        {
+            return Err(WsError::ConnectionClosed);
+        }
+        rx_result.await.unwrap_or(Err(WsError::ConnectionClosed))
+    }
+
+    async fn next(&mut self) -> Option<Result<Message, WsError>> {
+        self.rx_message.recv().await
+    }
+}
+
+impl Drop for CodexWebsocketStream {
+    fn drop(&mut self) {
+        self.pump_task.abort();
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TurnState {
     sticky_routing_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CodexStreamOptions {
     pub include_web_search: bool,
     pub use_session_continuation: bool,
     pub fast_mode: bool,
+    pub max_output_tokens: Option<u32>,
+    structured_output: Option<CodexStructuredOutput>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexStructuredOutput {
+    name: String,
+    schema: serde_json::Value,
 }
 
 impl Default for CodexStreamOptions {
@@ -54,6 +180,8 @@ impl Default for CodexStreamOptions {
             include_web_search: true,
             use_session_continuation: true,
             fast_mode: false,
+            max_output_tokens: None,
+            structured_output: None,
         }
     }
 }
@@ -64,11 +192,30 @@ impl CodexStreamOptions {
             include_web_search: false,
             use_session_continuation: false,
             fast_mode: false,
+            max_output_tokens: None,
+            structured_output: None,
         }
     }
 
     pub fn with_fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
+        self
+    }
+
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = (max_output_tokens > 0).then_some(max_output_tokens);
+        self
+    }
+
+    pub fn with_output_schema(
+        mut self,
+        name: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Self {
+        self.structured_output = Some(CodexStructuredOutput {
+            name: name.into(),
+            schema,
+        });
         self
     }
 }
@@ -83,7 +230,7 @@ struct LastWebsocketResponse {
 
 #[derive(Default)]
 struct CachedWebsocketSession {
-    connection: Option<CodexWebSocket>,
+    connection: Option<CodexWebsocketStream>,
     last_response: Option<LastWebsocketResponse>,
     disable_websockets: bool,
     connection_key: Option<String>,
@@ -165,10 +312,21 @@ fn authority_host(host: &str) -> String {
     }
 }
 
-/// Extracts the opaque remote-compaction payload stored on a context-handoff
-/// message. The Codex `/responses/compact` endpoint returns the summary as an
-/// encrypted compaction item that must be replayed verbatim to the API; it is
-/// stashed in the handoff message's response-request metadata.
+/// Extracts the canonical replacement window stored on a context-handoff
+/// message. Standalone `/responses/compact` output must be replayed as-is; it
+/// generally includes retained response items in addition to the opaque
+/// compaction item.
+fn codex_compaction_output(metadata: &serde_json::Value) -> Option<&[serde_json::Value]> {
+    metadata
+        .get("codex_compaction")?
+        .get("output")?
+        .as_array()
+        .filter(|output| !output.is_empty())
+        .map(Vec::as_slice)
+}
+
+/// Reads the legacy single-item representation and the optional diagnostic
+/// copy retained alongside canonical replacement windows.
 fn codex_compaction_encrypted_content(metadata: &serde_json::Value) -> Option<&str> {
     metadata
         .get("codex_compaction")?
@@ -240,6 +398,13 @@ fn build_input_with_metadata(
 
     let mut input = Vec::new();
     for msg in history {
+        if let Some(output) = response_request_metadata
+            .and_then(|metadata| metadata.get(&msg.id))
+            .and_then(codex_compaction_output)
+        {
+            input.extend(output.iter().cloned());
+            continue;
+        }
         if let Some(encrypted_content) = response_request_metadata
             .and_then(|metadata| metadata.get(&msg.id))
             .and_then(codex_compaction_encrypted_content)
@@ -427,8 +592,19 @@ fn build_request_body(
 
     apply_reasoning_effort(&mut body, model, thinking_level);
     apply_text_verbosity_default(&mut body, model);
+    if let Some(output) = options.structured_output.as_ref() {
+        body["text"]["format"] = serde_json::json!({
+            "type": "json_schema",
+            "name": output.name,
+            "strict": true,
+            "schema": output.schema,
+        });
+    }
     if options.fast_mode {
         body["service_tier"] = serde_json::json!("priority");
+    }
+    if let Some(max_output_tokens) = options.max_output_tokens {
+        body["max_output_tokens"] = serde_json::json!(max_output_tokens);
     }
 
     if !responses_tools.is_empty() {
@@ -450,16 +626,19 @@ fn build_tool_search_declaration(description: &str) -> serde_json::Value {
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query for deferred tools."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of tools to return. Defaults to 8."
+                "wire_names": {
+                    "type": "array",
+                    "description": "One to eight complete deferred-tool wire names copied verbatim from the prompt, a Skill document, or a tool result. Include only tools required for the current step. Natural-language queries and aliases are rejected.",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "uniqueItems": true
                 }
             },
-            "required": ["query"],
+            "required": ["wire_names"],
             "additionalProperties": false
         }
     })
@@ -511,6 +690,87 @@ fn request_without_input(body: &serde_json::Value) -> serde_json::Value {
         map.remove("tool_choice");
     }
     request
+}
+
+// Keep websocket reuse checks aligned with codex-rs: input is compared item by
+// item, while every request property that affects the response remains part of
+// the signature. Transport-only metadata does not invalidate a continuation.
+fn websocket_request_signature(body: &serde_json::Value) -> serde_json::Value {
+    let mut request = body.clone();
+    if let Some(map) = request.as_object_mut() {
+        map.remove("input");
+        map.remove("previous_response_id");
+        map.remove("type");
+        map.remove("client_metadata");
+        map.remove("stream_options");
+    }
+    request
+}
+
+fn clear_internal_response_item_metadata(item: &mut serde_json::Value) {
+    if let Some(map) = item.as_object_mut() {
+        map.remove("internal_chat_message_metadata_passthrough");
+    }
+}
+
+fn response_items_equal_ignoring_internal_metadata(
+    previous: &serde_json::Value,
+    current: &serde_json::Value,
+) -> bool {
+    if previous == current {
+        return true;
+    }
+
+    let mut previous = previous.clone();
+    clear_internal_response_item_metadata(&mut previous);
+    let mut current = current.clone();
+    clear_internal_response_item_metadata(&mut current);
+    previous == current
+}
+
+// Locus persists assistant text and tool calls in ChatMessage rather than the
+// raw Responses output item. Project server output back to the request shape
+// produced by build_input_with_metadata before comparing the next full input.
+fn cached_response_item_for_request(
+    response_item: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let item_type = response_item.get("type").and_then(|value| value.as_str());
+    if item_type == Some("reasoning") {
+        // The active websocket keeps reasoning in the previous-response state;
+        // Locus does not replay it in its reconstructed ChatMessage history.
+        return None;
+    }
+
+    let mut item = response_item.clone();
+    clear_internal_response_item_metadata(&mut item);
+    let Some(map) = item.as_object_mut() else {
+        return Some(item);
+    };
+
+    map.remove("id");
+    match item_type {
+        Some("message") => {
+            map.remove("type");
+            map.remove("status");
+            map.remove("phase");
+            if let Some(content) = map
+                .get_mut("content")
+                .and_then(|value| value.as_array_mut())
+            {
+                for part in content {
+                    if let Some(part) = part.as_object_mut() {
+                        part.remove("annotations");
+                        part.remove("logprobs");
+                    }
+                }
+            }
+        }
+        Some("function_call") => {
+            map.remove("status");
+        }
+        _ => {}
+    }
+    Some(item)
 }
 
 struct ContinuationRequestInput {
@@ -577,7 +837,7 @@ fn build_cached_websocket_request_input(
         .and_then(|value| value.as_array())
         .cloned()
         .unwrap_or_default();
-    let current_request = request_without_input(body);
+    let current_request = websocket_request_signature(body);
 
     if let Some(last_response) = last_response {
         if last_response.request_signature == current_request {
@@ -587,11 +847,32 @@ fn build_cached_websocket_request_input(
                     previous_response_id: None,
                 };
             }
-            let mut baseline = last_response.input.clone();
-            baseline.extend(last_response.items_added.clone());
-            if full_input.starts_with(&baseline) {
+            let previous_input_matches = last_response.input.len() <= full_input.len()
+                && last_response
+                    .input
+                    .iter()
+                    .zip(&full_input)
+                    .all(|(previous, current)| {
+                        response_items_equal_ignoring_internal_metadata(previous, current)
+                    });
+            let mut incremental_start = last_response.input.len();
+            let response_items_match = previous_input_matches
+                && last_response.items_added.iter().all(|response_item| {
+                    let Some(previous) = cached_response_item_for_request(response_item) else {
+                        return true;
+                    };
+                    let Some(current) = full_input.get(incremental_start) else {
+                        return false;
+                    };
+                    if !response_items_equal_ignoring_internal_metadata(&previous, current) {
+                        return false;
+                    }
+                    incremental_start += 1;
+                    true
+                });
+            if response_items_match {
                 return ContinuationRequestInput {
-                    input: full_input[baseline.len()..].to_vec(),
+                    input: full_input[incremental_start..].to_vec(),
                     previous_response_id: Some(last_response.response_id.clone()),
                 };
             }
@@ -688,11 +969,40 @@ fn codex_compact_endpoint(base_url: Option<&str>) -> String {
 const COMPACT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct CodexRemoteCompactOutcome {
-    pub encrypted_content: String,
-    pub output_item_count: usize,
+    pub output: Vec<serde_json::Value>,
+    pub encrypted_content: Option<String>,
     pub raw_request: String,
     pub raw_response: String,
 }
+
+#[derive(Debug)]
+pub struct CodexRemoteCompactError {
+    pub message: String,
+    pub raw_request: String,
+    pub raw_response: String,
+}
+
+impl CodexRemoteCompactError {
+    fn new(
+        message: impl Into<String>,
+        raw_request: impl Into<String>,
+        raw_response: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            raw_request: raw_request.into(),
+            raw_response: raw_response.into(),
+        }
+    }
+}
+
+impl fmt::Display for CodexRemoteCompactError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CodexRemoteCompactError {}
 
 /// Mirrors codex-rs `ApiCompactionInput`: the same shape as a normal Responses
 /// request minus `stream`/`store`, sent to the unary compact endpoint.
@@ -722,6 +1032,7 @@ fn build_compact_request_body(
         body["prompt_cache_key"] = serde_json::json!(sid);
     }
     apply_reasoning_effort(&mut body, model, thinking_level);
+    apply_text_verbosity_default(&mut body, model);
     if fast_mode {
         body["service_tier"] = serde_json::json!("priority");
     }
@@ -732,17 +1043,78 @@ fn extract_compaction_encrypted_content(output: &[serde_json::Value]) -> Option<
     output
         .iter()
         .rev()
-        .find(|item| item.get("type").and_then(|value| value.as_str()) == Some("compaction"))
+        .find(|item| {
+            matches!(
+                item.get("type").and_then(|value| value.as_str()),
+                Some("compaction" | "compaction_summary" | "context_compaction")
+            )
+        })
         .and_then(|item| item.get("encrypted_content"))
         .and_then(|value| value.as_str())
         .filter(|content| !content.is_empty())
         .map(|content| content.to_string())
 }
 
+fn compact_output_type_summary(output: &[serde_json::Value]) -> String {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for item in output {
+        let item_type = item
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<missing>");
+        *counts.entry(item_type).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(item_type, count)| format!("{}={}", item_type, count))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn codex_routing_hint(model: &str, fast_mode: bool) -> String {
+    if fast_mode {
+        format!("model={model};tier=priority")
+    } else {
+        format!("model={model}")
+    }
+}
+
+fn parse_compact_response(
+    raw_request: String,
+    response_text: String,
+) -> Result<CodexRemoteCompactOutcome, CodexRemoteCompactError> {
+    let parsed: serde_json::Value = serde_json::from_str(&response_text).map_err(|error| {
+        CodexRemoteCompactError::new(
+            format!("Codex compact response was not valid JSON: {}", error),
+            raw_request.clone(),
+            response_text.clone(),
+        )
+    })?;
+    let output = parsed
+        .get("output")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if output.is_empty() {
+        return Err(CodexRemoteCompactError::new(
+            "Codex compact response contained an empty canonical output window",
+            raw_request,
+            response_text,
+        ));
+    }
+    let encrypted_content = extract_compaction_encrypted_content(&output);
+    Ok(CodexRemoteCompactOutcome {
+        output,
+        encrypted_content,
+        raw_request,
+        raw_response: response_text,
+    })
+}
+
 /// Runs remote conversation compaction against the dedicated Codex
 /// `POST /responses/compact` endpoint (the default codex-rs strategy for
-/// ChatGPT subscription providers). Returns the encrypted compaction item that
-/// must be replayed to the API in subsequent requests.
+/// ChatGPT subscription providers). Returns the complete canonical replacement
+/// window that must be replayed to the API in subsequent requests.
 pub async fn compact_conversation_history(
     access_token: &str,
     account_id: Option<&str>,
@@ -756,7 +1128,7 @@ pub async fn compact_conversation_history(
     session_id: Option<&str>,
     response_request_metadata: Option<&HashMap<String, serde_json::Value>>,
     debug: bool,
-) -> Result<CodexRemoteCompactOutcome, String> {
+) -> Result<CodexRemoteCompactOutcome, CodexRemoteCompactError> {
     let body = build_compact_request_body(
         model,
         system_prompt,
@@ -769,6 +1141,7 @@ pub async fn compact_conversation_history(
     );
     let raw_request = serde_json::to_string_pretty(&body).unwrap_or_default();
     let api_url = codex_compact_endpoint(base_url);
+    let routing_hint = codex_routing_hint(model, fast_mode);
 
     eprintln!(
         "[OpenAI Codex][compact] POST model={} messages={} tools={}",
@@ -786,7 +1159,12 @@ pub async fn compact_conversation_history(
             ("Content-Type", "application/json"),
             ("originator", CODEX_ORIGINATOR_HEADER_VALUE),
             ("version", CODEX_CLIENT_VERSION),
+            (X_CODEX_ROUTING_HINT_HEADER, routing_hint.as_str()),
         ];
+        if let Some(sid) = session_id {
+            headers.push(("session-id", sid));
+            headers.push(("thread-id", sid));
+        }
         if let Some(aid) = account_id {
             headers.push(("ChatGPT-Account-ID", aid));
         }
@@ -797,7 +1175,8 @@ pub async fn compact_conversation_history(
         crate::network::ReqwestClientOptions::new()
             .tcp_keepalive(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(30)),
-    )?;
+    )
+    .map_err(|error| CodexRemoteCompactError::new(error, raw_request.clone(), ""))?;
     let mut req = client
         .post(&api_url)
         .timeout(COMPACT_REQUEST_TIMEOUT)
@@ -805,46 +1184,44 @@ pub async fn compact_conversation_history(
         .header("Content-Type", "application/json")
         .header("originator", CODEX_ORIGINATOR_HEADER_VALUE)
         .header("version", CODEX_CLIENT_VERSION)
+        .header(X_CODEX_ROUTING_HINT_HEADER, &routing_hint)
         .json(&body);
+    if let Some(sid) = session_id {
+        req = req.header("session-id", sid).header("thread-id", sid);
+    }
     if let Some(aid) = account_id {
         req = req.header("ChatGPT-Account-ID", aid);
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Codex compact request failed: {}", e))?;
+    let resp = req.send().await.map_err(|error| {
+        CodexRemoteCompactError::new(
+            format!("Codex compact request failed: {}", error),
+            raw_request.clone(),
+            "",
+        )
+    })?;
     let status = resp.status();
     let response_text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!(
-            "OpenAI Codex API error ({} {}): {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or(""),
-            response_text
+        return Err(CodexRemoteCompactError::new(
+            format!(
+                "OpenAI Codex API error ({} {}): {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                response_text
+            ),
+            raw_request,
+            response_text,
         ));
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(&response_text)
-        .map_err(|e| format!("Codex compact response was not valid JSON: {}", e))?;
-    let output = parsed
-        .get("output")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let Some(encrypted_content) = extract_compaction_encrypted_content(&output) else {
-        return Err(format!(
-            "Codex compact response contained no compaction item ({} output items)",
-            output.len()
-        ));
-    };
-
-    Ok(CodexRemoteCompactOutcome {
-        encrypted_content,
-        output_item_count: output.len(),
-        raw_request,
-        raw_response: response_text,
-    })
+    let outcome = parse_compact_response(raw_request, response_text)?;
+    eprintln!(
+        "[OpenAI Codex][compact] canonical output items={} types={}",
+        outcome.output.len(),
+        compact_output_type_summary(&outcome.output)
+    );
+    Ok(outcome)
 }
 
 fn codex_websocket_url(base_url: Option<&str>) -> Result<Url, String> {
@@ -929,7 +1306,7 @@ async fn take_cached_websocket_session_state(
     connection_key: &str,
 ) -> (
     SharedCachedWebsocketSession,
-    Option<CodexWebSocket>,
+    Option<CodexWebsocketStream>,
     Option<LastWebsocketResponse>,
     bool,
 ) {
@@ -957,7 +1334,7 @@ async fn take_cached_websocket_session_state(
 async fn store_cached_websocket_session_state(
     shared: &SharedCachedWebsocketSession,
     connection_key: &str,
-    socket: CodexWebSocket,
+    socket: CodexWebsocketStream,
     last_response: LastWebsocketResponse,
 ) {
     let mut state = shared.lock().await;
@@ -977,6 +1354,40 @@ async fn clear_cached_websocket_session_state(
     state.last_response = None;
     state.disable_websockets = disable_websockets;
     state.connection_key = Some(connection_key.to_string());
+}
+
+async fn cached_websocket_http_fallback_enabled(
+    session_id: Option<&str>,
+    base_url: Option<&str>,
+    account_id: Option<&str>,
+) -> bool {
+    let Some(session_id) = session_id else {
+        return false;
+    };
+    let Some(shared) = existing_cached_websocket_session(session_id) else {
+        return false;
+    };
+    let connection_key = websocket_connection_key(base_url, account_id);
+    let state = shared.lock().await;
+    state.connection_key.as_deref() == Some(connection_key.as_str()) && state.disable_websockets
+}
+
+async fn enable_cached_websocket_http_fallback(
+    session_id: Option<&str>,
+    base_url: Option<&str>,
+    account_id: Option<&str>,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let connection_key = websocket_connection_key(base_url, account_id);
+    let shared = cached_websocket_session(session_id);
+    clear_cached_websocket_session_state(
+        &shared,
+        &connection_key,
+        /*disable_websockets*/ true,
+    )
+    .await;
 }
 
 fn websocket_proxy_match_uri(uri: &Uri) -> Result<Uri, String> {
@@ -1101,55 +1512,23 @@ async fn connect_tcp_stream(uri: &Uri) -> Result<tokio::net::TcpStream, String> 
     Ok(connection.into_inner())
 }
 
-async fn establish_http_connect_tunnel<S>(
-    mut stream: S,
-    host: &str,
-    port: u16,
-    proxy_auth: Option<&http::HeaderValue>,
-) -> Result<S, String>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
-    if let Some(auth) = proxy_auth {
-        request.push_str("Proxy-Authorization: ");
-        request.push_str(auth.to_str().unwrap_or_default());
-        request.push_str("\r\n");
-    }
-    request.push_str("\r\n");
-
-    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to send proxy CONNECT request: {}", e))?;
-
-    let mut response = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 1024];
-    while !response.windows(4).any(|window| window == b"\r\n\r\n") {
-        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk)
-            .await
-            .map_err(|e| format!("Failed to read proxy CONNECT response: {}", e))?;
-        if n == 0 {
-            return Err("Proxy CONNECT response ended unexpectedly".to_string());
-        }
-        response.extend_from_slice(&chunk[..n]);
-        if response.len() > 8192 {
-            return Err("Proxy CONNECT response headers exceeded 8 KiB".to_string());
-        }
-    }
-
-    if response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200") {
-        return Ok(stream);
-    }
-    if response.starts_with(b"HTTP/1.1 407") || response.starts_with(b"HTTP/1.0 407") {
-        return Err("Proxy requires authentication for websocket CONNECT".to_string());
-    }
-
-    let status_line = response
-        .split(|byte| *byte == b'\n')
-        .next()
-        .map(|line| String::from_utf8_lossy(line).trim().to_string())
-        .unwrap_or_else(|| "unknown proxy response".to_string());
-    Err(format!("Proxy CONNECT failed: {}", status_line))
+fn tungstenite_proxy_config(
+    proxy: &Intercept,
+    scheme: TungsteniteProxyScheme,
+) -> Result<TungsteniteProxyConfig, String> {
+    let (host, port) = uri_host_port(proxy.uri())?;
+    let auth = proxy
+        .raw_auth()
+        .map(|(username, password)| TungsteniteProxyAuth {
+            username: username.to_string(),
+            password: password.to_string(),
+        });
+    Ok(TungsteniteProxyConfig {
+        scheme,
+        host,
+        port,
+        auth,
+    })
 }
 
 async fn connect_via_http_proxy(
@@ -1162,15 +1541,13 @@ async fn connect_via_http_proxy(
         proxy_display_uri(&proxy_uri)
     );
 
-    let mut tunnel = Tunnel::new(proxy_uri, build_tcp_connector());
-    if let Some(auth) = proxy.basic_auth().cloned() {
-        tunnel = tunnel.with_auth(auth);
-    }
-    let connection = tunnel
-        .call(target_uri.clone())
+    let (target_host, target_port) = uri_host_port(target_uri)?;
+    let proxy_config = tungstenite_proxy_config(proxy, TungsteniteProxyScheme::Http)?;
+    let tcp = connect_tcp_stream(&proxy_uri).await?;
+    let tunneled = connect_via_proxy(tcp, &proxy_config, &target_host, target_port)
         .await
         .map_err(|e| format!("Failed to establish HTTP proxy tunnel: {}", e))?;
-    Ok(Box::new(connection.into_inner()))
+    Ok(Box::new(tunneled))
 }
 
 async fn connect_via_https_proxy(
@@ -1185,15 +1562,16 @@ async fn connect_via_https_proxy(
 
     let (proxy_host, _) = uri_host_port(&proxy_uri)?;
     let (target_host, target_port) = uri_host_port(target_uri)?;
+    let proxy_config = tungstenite_proxy_config(proxy, TungsteniteProxyScheme::Http)?;
 
     let tcp = connect_tcp_stream(&proxy_uri).await?;
     let proxy_tls = tls_connector()?
         .connect(&proxy_host, tcp)
         .await
         .map_err(|e| format!("Failed to establish TLS to HTTPS proxy: {}", e))?;
-    let tunneled =
-        establish_http_connect_tunnel(proxy_tls, &target_host, target_port, proxy.basic_auth())
-            .await?;
+    let tunneled = connect_via_proxy(proxy_tls, &proxy_config, &target_host, target_port)
+        .await
+        .map_err(|e| format!("Failed to establish HTTPS proxy tunnel: {}", e))?;
 
     Ok(Box::new(tunneled))
 }
@@ -1229,18 +1607,17 @@ async fn connect_via_socks5_proxy(
         proxy_display_uri(&proxy_uri)
     );
 
-    let mut socks = SocksV5::new(proxy_uri, build_tcp_connector());
-    if proxy.uri().scheme_str() == Some("socks5") {
-        socks = socks.local_dns(true);
-    }
-    if let Some((user, pass)) = proxy.raw_auth() {
-        socks = socks.with_auth(user.to_string(), pass.to_string());
-    }
-    let connection = socks
-        .call(target_uri.clone())
+    let scheme = match proxy.uri().scheme_str() {
+        Some("socks5h") => TungsteniteProxyScheme::Socks5h,
+        _ => TungsteniteProxyScheme::Socks5,
+    };
+    let (target_host, target_port) = uri_host_port(target_uri)?;
+    let proxy_config = tungstenite_proxy_config(proxy, scheme)?;
+    let tcp = connect_tcp_stream(&proxy_uri).await?;
+    let tunneled = connect_via_proxy(tcp, &proxy_config, &target_host, target_port)
         .await
         .map_err(|e| format!("Failed to establish SOCKS5 proxy tunnel: {}", e))?;
-    Ok(Box::new(connection.into_inner()))
+    Ok(Box::new(tunneled))
 }
 
 async fn connect_websocket_transport(request: &http::Request<()>) -> Result<BoxedCodexIo, String> {
@@ -1293,7 +1670,7 @@ enum WebsocketConnectOutcome<S> {
 async fn connect_codex_websocket(
     request: http::Request<()>,
     turn_state: &mut TurnState,
-) -> Result<WebsocketConnectOutcome<CodexWebSocket>, String> {
+) -> Result<WebsocketConnectOutcome<CodexWebsocketStream>, String> {
     let connect = async move {
         let transport = connect_websocket_transport(&request)
             .await
@@ -1301,10 +1678,10 @@ async fn connect_codex_websocket(
         let transport = wrap_websocket_transport_tls(&request, transport)
             .await
             .map_err(ws_io_error)?;
-        client_async(request, transport).await
+        client_async_with_config(request, transport, Some(websocket_config())).await
     };
 
-    match tokio::time::timeout(Duration::from_secs(30), connect).await {
+    match tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect).await {
         Ok(Ok((socket, response))) => {
             turn_state.store_header(
                 response
@@ -1322,7 +1699,9 @@ async fn connect_codex_websocket(
                 ));
             }
 
-            Ok(WebsocketConnectOutcome::Connected(socket))
+            Ok(WebsocketConnectOutcome::Connected(
+                CodexWebsocketStream::new(socket),
+            ))
         }
         Ok(Err(WsError::Http(response)))
             if response.status() == http::StatusCode::UPGRADE_REQUIRED =>
@@ -1332,6 +1711,15 @@ async fn connect_codex_websocket(
         Ok(Err(err)) => Err(format!("Codex websocket connect failed: {}", err)),
         Err(_) => Err("Codex websocket connect timed out".to_string()),
     }
+}
+
+fn websocket_config() -> WebSocketConfig {
+    let mut extensions = ExtensionsConfig::default();
+    extensions.permessage_deflate = Some(DeflateConfig::default());
+
+    let mut config = WebSocketConfig::default();
+    config.extensions = extensions;
+    config
 }
 
 fn websocket_event_error_message(payload: &str) -> Option<String> {
@@ -1351,6 +1739,9 @@ fn websocket_event_error_message(payload: &str) -> Option<String> {
         });
     if code == Some(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE) {
         return Some(WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE.to_string());
+    }
+    if code == Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
+        return Some(PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE.to_string());
     }
 
     let status = event.get("status").and_then(|value| value.as_u64());
@@ -1861,17 +2252,17 @@ where
                                 })
                                 .unwrap_or_default();
                             if !call_id.is_empty() {
-                                let entry = state
-                                    .tool_calls_map
-                                    .entry(item_id)
-                                    .or_insert_with(|| PartialToolCall {
-                                        call_id,
-                                        name: TOOL_SEARCH_HISTORY_TOOL_NAME.to_string(),
-                                        arguments: String::new(),
-                                        arguments_done: false,
-                                        item_done: false,
-                                        notified: false,
-                                        start_order: None,
+                                let entry =
+                                    state.tool_calls_map.entry(item_id).or_insert_with(|| {
+                                        PartialToolCall {
+                                            call_id,
+                                            name: TOOL_SEARCH_HISTORY_TOOL_NAME.to_string(),
+                                            arguments: String::new(),
+                                            arguments_done: false,
+                                            item_done: false,
+                                            notified: false,
+                                            start_order: None,
+                                        }
                                     });
                                 if !arguments.is_empty() {
                                     entry.arguments = arguments;
@@ -2050,7 +2441,18 @@ fn should_retry_safe_codex_error(error: &str) -> bool {
         return true;
     }
 
-    if lower.contains("previous response with id") && lower.contains("not found") {
+    if lower.contains("previous response was not found")
+        || (lower.contains("previous response with id") && lower.contains("not found"))
+    {
+        return true;
+    }
+
+    if lower.contains("codex websocket connect failed")
+        || lower.contains("codex websocket connect timed out")
+        || lower.contains("failed to send websocket request")
+        || lower.starts_with("websocket read error:")
+        || lower == "websocket read timed out"
+    {
         return true;
     }
 
@@ -2072,7 +2474,32 @@ fn should_retry_safe_codex_error(error: &str) -> bool {
     no_visible_output
         && (lower.contains("stream ended without response.completed")
             || lower.contains("stream ended before the response finalized")
+            || lower.contains("websocket ended before the response finalized")
             || lower.contains("response completed with"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafeStreamRecoveryAction {
+    Retry,
+    FallbackToHttp,
+    Fail,
+}
+
+fn safe_stream_recovery_action(
+    transport: CodexTransportMode,
+    retries: u32,
+    error: &str,
+) -> SafeStreamRecoveryAction {
+    if !should_retry_safe_codex_error(error) {
+        return SafeStreamRecoveryAction::Fail;
+    }
+    if retries < MAX_SAFE_STREAM_RECOVERY_RETRIES {
+        return SafeStreamRecoveryAction::Retry;
+    }
+    if transport == CodexTransportMode::Websocket {
+        return SafeStreamRecoveryAction::FallbackToHttp;
+    }
+    SafeStreamRecoveryAction::Fail
 }
 
 enum CodexWebsocketAttempt {
@@ -2153,13 +2580,23 @@ where
     G: Fn(String) + Send + Sync + 'static,
     H: Fn(String, String) + Send + Sync,
 {
-    let mut last_error = String::new();
+    let transport_session_id = options
+        .use_session_continuation
+        .then_some(session_id)
+        .flatten();
+    let mut active_transport = transport;
+    if active_transport == CodexTransportMode::Websocket
+        && cached_websocket_http_fallback_enabled(transport_session_id, base_url, account_id).await
+    {
+        active_transport = CodexTransportMode::Http;
+    }
+    let mut retries = 0u32;
 
-    for attempt in 0..=MAX_SAFE_STREAM_RECOVERY_RETRIES {
+    loop {
         match stream_chat_once(
             access_token,
             account_id,
-            transport,
+            active_transport,
             base_url,
             model,
             system_prompt,
@@ -2171,7 +2608,7 @@ where
             session_id,
             response_request_metadata,
             turn_state,
-            options,
+            options.clone(),
             on_text_delta,
             on_thinking_delta,
             on_tool_call_start,
@@ -2180,27 +2617,51 @@ where
         {
             Ok(resp) => return Ok(resp),
             Err(err) => {
-                last_error = err;
-                if should_retry_safe_codex_error(&last_error)
-                    && attempt < MAX_SAFE_STREAM_RECOVERY_RETRIES
+                if active_transport == CodexTransportMode::Websocket
+                    && cached_websocket_http_fallback_enabled(
+                        transport_session_id,
+                        base_url,
+                        account_id,
+                    )
+                    .await
                 {
-                    let delay = SAFE_STREAM_RECOVERY_DELAY_MS * (attempt as u64 + 1);
-                    eprintln!(
-                        "[OpenAI Codex] retrying safe stream interruption (attempt {}/{}, retrying in {}ms): {}",
-                        attempt + 1,
-                        MAX_SAFE_STREAM_RECOVERY_RETRIES + 1,
-                        delay,
-                        last_error
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    active_transport = CodexTransportMode::Http;
+                    retries = 0;
                     continue;
                 }
-                return Err(last_error);
+
+                match safe_stream_recovery_action(active_transport, retries, &err) {
+                    SafeStreamRecoveryAction::Retry => {
+                        retries += 1;
+                        let delay = SAFE_STREAM_RECOVERY_DELAY_MS * retries as u64;
+                        eprintln!(
+                            "[OpenAI Codex] retrying safe stream interruption ({}/{}, retrying in {}ms): {}",
+                            retries,
+                            MAX_SAFE_STREAM_RECOVERY_RETRIES,
+                            delay,
+                            err
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
+                    SafeStreamRecoveryAction::FallbackToHttp => {
+                        enable_cached_websocket_http_fallback(
+                            transport_session_id,
+                            base_url,
+                            account_id,
+                        )
+                        .await;
+                        eprintln!(
+                            "[OpenAI Codex] websocket recovery exhausted; falling back to HTTPS for this session: {}",
+                            err
+                        );
+                        active_transport = CodexTransportMode::Http;
+                        retries = 0;
+                    }
+                    SafeStreamRecoveryAction::Fail => return Err(err),
+                }
             }
         }
     }
-
-    Err(last_error)
 }
 
 async fn stream_chat_once<F, G, H>(
@@ -2240,7 +2701,7 @@ where
         thinking_level,
         session_id,
         response_request_metadata,
-        options,
+        options.clone(),
     );
     let transport_session_id = options
         .use_session_continuation
@@ -2814,7 +3275,8 @@ where
     const MAX_WEBSOCKET_ERRORS: u32 = 3;
 
     loop {
-        let message = match tokio::time::timeout(Duration::from_secs(90), socket.next()).await {
+        let message = match tokio::time::timeout(WEBSOCKET_STREAM_IDLE_TIMEOUT, socket.next()).await
+        {
             Ok(Some(Ok(message))) => {
                 consecutive_errors = 0;
                 message
@@ -2946,18 +3408,9 @@ where
                     break;
                 }
             }
-            Message::Ping(payload) => {
-                if let Err(e) = socket.send(Message::Pong(payload)).await {
-                    clear_cached_websocket_session_state(
-                        &shared_session,
-                        &connection_key,
-                        /*disable_websockets*/ false,
-                    )
-                    .await;
-                    return Err(format!("Failed to respond to websocket ping: {}", e));
-                }
-            }
-            Message::Pong(_) | Message::Frame(_) => {}
+            // The dedicated websocket pump consumes Ping/Pong and sends Pong
+            // immediately, so response processing only observes data frames.
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
             Message::Close(frame) => {
                 if !stream_state.got_terminal_event {
                     terminal_stream_error = Some(match frame {
@@ -3036,7 +3489,7 @@ where
         &connection_key,
         socket,
         LastWebsocketResponse {
-            request_signature: request_without_input(&body),
+            request_signature: websocket_request_signature(&body),
             input: body
                 .get("input")
                 .and_then(|value| value.as_array())
@@ -3091,21 +3544,32 @@ mod tests {
     use super::{
         build_codex_websocket_handshake_request, build_compact_request_body,
         build_history_transport_request, build_input, build_input_with_metadata,
-        build_request_body, build_request_body_with_tool_search,
-        build_websocket_transport_request, codex_websocket_url, collect_complete_tool_calls,
-        drain_sse_buffer, establish_http_connect_tunnel, extract_compaction_encrypted_content,
-        process_sse_event_block, request_without_input, uri_host_port,
-        websocket_event_error_message, websocket_proxy_match_uri, CodexStreamOptions,
-        CodexStreamState, LastWebsocketResponse, PartialToolCall, CODEX_ORIGINATOR_HEADER_VALUE,
-        RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE, TOOL_SEARCH_HISTORY_TOOL_NAME,
-        X_CODEX_TURN_STATE_HEADER,
+        build_request_body, build_request_body_with_tool_search, build_websocket_transport_request,
+        cached_websocket_http_fallback_enabled, codex_routing_hint, codex_websocket_url,
+        collect_complete_tool_calls, drain_sse_buffer, enable_cached_websocket_http_fallback,
+        extract_compaction_encrypted_content, parse_compact_response, process_sse_event_block,
+        request_without_input, safe_stream_recovery_action, uri_host_port, websocket_config,
+        websocket_event_error_message, websocket_proxy_match_uri, websocket_request_signature,
+        BoxedCodexIo, CodexStreamOptions, CodexStreamState, CodexWebsocketStream,
+        LastWebsocketResponse, PartialToolCall, SafeStreamRecoveryAction,
+        CODEX_ORIGINATOR_HEADER_VALUE, MAX_SAFE_STREAM_RECOVERY_RETRIES,
+        PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE, RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE,
+        TOOL_SEARCH_HISTORY_TOOL_NAME, X_CODEX_TURN_STATE_HEADER,
     };
+    use crate::commands::CodexTransportMode;
     use crate::llm::CODEX_CLIENT_VERSION;
     use crate::session::models::{
         ChatMessage, ImageData, MessageRole, ServerToolKind, ToolCallInfo,
     };
+    use futures::{SinkExt, StreamExt};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use tokio_tungstenite::proxy::connect_via_proxy;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::proxy::{
+        ProxyConfig as TungsteniteProxyConfig, ProxyScheme as TungsteniteProxyScheme,
+    };
+    use tokio_tungstenite::tungstenite::Message;
 
     fn ignore_text(_: String) {}
     fn ignore_thinking(_: String) {}
@@ -3232,7 +3696,7 @@ mod tests {
         items_added: &[serde_json::Value],
     ) -> LastWebsocketResponse {
         LastWebsocketResponse {
-            request_signature: request_without_input(body),
+            request_signature: websocket_request_signature(body),
             input: body
                 .get("input")
                 .and_then(|value| value.as_array())
@@ -3290,7 +3754,7 @@ mod tests {
 
     #[test]
     fn build_input_replays_tool_search_round_as_typed_items() {
-        let output_json = r#"{"tools":[{"type":"function","name":"pdf_export","description":"Export PDF.","parameters":{"type":"object"},"defer_loading":true}]}"#;
+        let output_json = r#"{"tools":[{"type":"function","name":"pdf_export","description":"Export PDF.","parameters":{"type":"object"},"defer_loading":true},{"type":"function","name":"pdf_preview","description":"Preview PDF.","parameters":{"type":"object"},"defer_loading":true}]}"#;
         let input = build_input(&[
             assistant_message_with_tool_calls(
                 "assistant-1",
@@ -3298,7 +3762,7 @@ mod tests {
                 Some("resp_prev"),
                 vec![tool_search_call_info(
                     "search-1",
-                    r#"{"limit":2,"query":"pdf export"}"#,
+                    r#"{"wire_names":["pdf_export","pdf_preview"]}"#,
                 )],
             ),
             tool_message("tool-1", "search-1", output_json),
@@ -3310,7 +3774,7 @@ mod tests {
         assert_eq!(input[0]["execution"], serde_json::json!("client"));
         assert_eq!(
             input[0]["arguments"],
-            serde_json::json!({"query": "pdf export", "limit": 2})
+            serde_json::json!({"wire_names": ["pdf_export", "pdf_preview"]})
         );
         assert_eq!(input[1]["type"], serde_json::json!("tool_search_output"));
         assert_eq!(input[1]["call_id"], serde_json::json!("search-1"));
@@ -3323,6 +3787,10 @@ mod tests {
             input[1]["tools"][0]["defer_loading"],
             serde_json::json!(true)
         );
+        assert_eq!(
+            input[1]["tools"][1]["name"],
+            serde_json::json!("pdf_preview")
+        );
     }
 
     #[test]
@@ -3331,7 +3799,10 @@ mod tests {
             "assistant-1",
             "",
             Some("resp_prev"),
-            vec![tool_search_call_info("search-1", r#"{"query":"pdf"}"#)],
+            vec![tool_search_call_info(
+                "search-1",
+                r#"{"wire_names":["pdf_export"]}"#,
+            )],
         )]);
 
         assert_eq!(input.len(), 2);
@@ -3347,9 +3818,16 @@ mod tests {
                 "assistant-1",
                 "",
                 Some("resp_prev"),
-                vec![tool_search_call_info("search-1", r#"{"query":"pdf"}"#)],
+                vec![tool_search_call_info(
+                    "search-1",
+                    r#"{"wire_names":["pdf_export"]}"#,
+                )],
             ),
-            tool_message("tool-1", "search-1", "query must not be empty"),
+            tool_message(
+                "tool-1",
+                "search-1",
+                "tool_search requires a `wire_names` array of exact deferred-tool names.",
+            ),
         ]);
 
         assert_eq!(input.len(), 2);
@@ -3379,8 +3857,39 @@ mod tests {
         assert_eq!(search["execution"], serde_json::json!("client"));
         assert_eq!(
             search["parameters"]["required"],
-            serde_json::json!(["query"])
+            serde_json::json!(["wire_names"])
         );
+        assert!(
+            search["parameters"]["properties"]["wire_names"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("complete deferred-tool wire names")
+        );
+        assert_eq!(
+            search["parameters"]["properties"]["wire_names"]["items"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            search["parameters"]["properties"]["wire_names"]["items"]["minLength"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            search["parameters"]["properties"]["wire_names"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            search["parameters"]["properties"]["wire_names"]["maxItems"],
+            serde_json::json!(8)
+        );
+        assert_eq!(
+            search["parameters"]["properties"]["wire_names"]["uniqueItems"],
+            serde_json::json!(true)
+        );
+        assert!(search["parameters"]["properties"]
+            .get("wire_name")
+            .is_none());
+        assert!(search["parameters"]["properties"].get("query").is_none());
+        assert!(search["parameters"]["properties"].get("limit").is_none());
 
         // The declaration is excluded from the continuation signature the
         // same way every tool is.
@@ -3572,7 +4081,7 @@ mod tests {
         )
         .expect("output_item.added should parse");
         process_sse_event_block(
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_1\",\"type\":\"tool_search_call\",\"call_id\":\"search_1\",\"status\":\"completed\",\"execution\":\"client\",\"arguments\":{\"limit\":2,\"query\":\"pdf export\"}}}",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_1\",\"type\":\"tool_search_call\",\"call_id\":\"search_1\",\"status\":\"completed\",\"execution\":\"client\",\"arguments\":{\"wire_names\":[\"pdf_export\",\"pdf_preview\"]}}}",
             false,
             &mut state,
             &ignore_text,
@@ -3588,8 +4097,10 @@ mod tests {
         assert_eq!(collected[0].tool_call.name, TOOL_SEARCH_HISTORY_TOOL_NAME);
         let arguments: serde_json::Value =
             serde_json::from_str(&collected[0].tool_call.arguments).expect("arguments JSON");
-        assert_eq!(arguments["query"], serde_json::json!("pdf export"));
-        assert_eq!(arguments["limit"], serde_json::json!(2));
+        assert_eq!(
+            arguments["wire_names"],
+            serde_json::json!(["pdf_export", "pdf_preview"])
+        );
 
         let started = started.lock().expect("tool mutex poisoned");
         assert_eq!(started.len(), 1);
@@ -3878,6 +4389,39 @@ mod tests {
     }
 
     #[test]
+    fn request_body_includes_strict_structured_output_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "maxLength": 36 }
+            },
+            "required": ["title"],
+            "additionalProperties": false
+        });
+        let body = build_request_body(
+            "gpt-5.6-luna",
+            "Generate a title",
+            &[user_message_with_images("Fix OAuth callback", vec![])],
+            &[],
+            Some("low"),
+            None,
+            None,
+            CodexStreamOptions::compact().with_output_schema("session_title", schema.clone()),
+        );
+
+        assert_eq!(body["text"]["verbosity"].as_str(), Some("low"));
+        assert_eq!(body["text"]["format"]["type"].as_str(), Some("json_schema"));
+        assert_eq!(
+            body["text"]["format"]["name"].as_str(),
+            Some("session_title")
+        );
+        assert_eq!(body["text"]["format"]["strict"].as_bool(), Some(true));
+        assert_eq!(body["text"]["format"]["schema"], schema);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
     fn build_request_body_injects_priority_service_tier_for_fast_mode() {
         let body = build_request_body(
             "gpt-5.6-sol",
@@ -3887,10 +4431,13 @@ mod tests {
             Some("low"),
             None,
             None,
-            CodexStreamOptions::default().with_fast_mode(true),
+            CodexStreamOptions::default()
+                .with_fast_mode(true)
+                .with_max_output_tokens(8_192),
         );
 
         assert_eq!(body["service_tier"].as_str(), Some("priority"));
+        assert_eq!(body["max_output_tokens"], serde_json::json!(8_192));
     }
 
     #[test]
@@ -3920,6 +4467,41 @@ mod tests {
         // Without metadata the handoff is sent as a regular assistant message.
         let plain = build_input(&[handoff]);
         assert_eq!(plain[0]["role"].as_str(), Some("assistant"));
+    }
+
+    #[test]
+    fn build_input_replays_canonical_compact_window_as_is() {
+        let handoff = assistant_message("handoff-1", "## Context Handoff\n\nlocal digest", None);
+        let next_user = user_message_with_images("继续", vec![]);
+        let canonical_output = serde_json::json!([
+            {
+                "type": "compaction_summary",
+                "encrypted_content": "opaque-blob"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "retained request" }]
+            }
+        ]);
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "handoff-1".to_string(),
+            serde_json::json!({
+                "codex_compaction": {
+                    "output": canonical_output,
+                    "encrypted_content": "opaque-blob"
+                }
+            }),
+        );
+
+        let input = build_input_with_metadata(&[handoff, next_user], Some(&metadata));
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0], canonical_output[0]);
+        assert_eq!(input[1], canonical_output[1]);
+        assert_eq!(input[2]["role"].as_str(), Some("user"));
+        assert_eq!(input[2]["content"][0]["text"].as_str(), Some("继续"));
     }
 
     #[test]
@@ -3987,6 +4569,58 @@ mod tests {
     }
 
     #[test]
+    fn extract_compaction_encrypted_content_accepts_codex_aliases() {
+        assert_eq!(
+            extract_compaction_encrypted_content(&[serde_json::json!({
+                "type": "compaction_summary",
+                "encrypted_content": "summary"
+            })])
+            .as_deref(),
+            Some("summary")
+        );
+        assert_eq!(
+            extract_compaction_encrypted_content(&[serde_json::json!({
+                "type": "context_compaction",
+                "encrypted_content": "context"
+            })])
+            .as_deref(),
+            Some("context")
+        );
+    }
+
+    #[test]
+    fn compact_response_accepts_nonempty_canonical_window_without_exact_compaction_type() {
+        let response = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "retained" }]
+            }]
+        })
+        .to_string();
+
+        let outcome = parse_compact_response("request".to_string(), response.clone())
+            .expect("accept canonical output");
+
+        assert_eq!(outcome.output.len(), 1);
+        assert_eq!(outcome.encrypted_content, None);
+        assert_eq!(outcome.raw_request, "request");
+        assert_eq!(outcome.raw_response, response);
+    }
+
+    #[test]
+    fn fast_compact_routing_hint_matches_codex() {
+        assert_eq!(
+            codex_routing_hint("gpt-5.6-sol", true),
+            "model=gpt-5.6-sol;tier=priority"
+        );
+        assert_eq!(
+            codex_routing_hint("gpt-5.6-sol", false),
+            "model=gpt-5.6-sol"
+        );
+    }
+
+    #[test]
     fn compact_request_body_omits_web_search_and_prompt_cache_key() {
         let options = CodexStreamOptions::compact();
         let body = build_request_body(
@@ -3997,7 +4631,7 @@ mod tests {
             None,
             Some("session-1"),
             None,
-            options,
+            options.clone(),
         );
 
         assert!(!options.include_web_search);
@@ -4085,6 +4719,12 @@ mod tests {
             request.get("model").and_then(|value| value.as_str()),
             Some("gpt-5.4")
         );
+    }
+
+    #[test]
+    fn websocket_config_enables_permessage_deflate() {
+        let config = websocket_config();
+        assert!(config.extensions.permessage_deflate.is_some());
     }
 
     #[test]
@@ -4186,6 +4826,118 @@ mod tests {
             message.as_deref(),
             Some("OpenAI Codex websocket error (HTTP 429): usage limit reached")
         );
+    }
+
+    #[test]
+    fn websocket_event_error_message_recovers_missing_previous_response() {
+        let message = websocket_event_error_message(
+            r#"{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_old' not found."}}"#,
+        );
+
+        assert_eq!(
+            message.as_deref(),
+            Some(PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn websocket_recovery_falls_back_only_after_safe_retries() {
+        let keepalive_timeout = concat!(
+            "WebSocket closed by server: keepalive ping timeout. ",
+            "OpenAI Codex websocket ended before the response finalized ",
+            "(text_len=0, complete_tool_calls=0, incomplete_tool_calls=0)."
+        );
+
+        assert_eq!(
+            safe_stream_recovery_action(CodexTransportMode::Websocket, 0, keepalive_timeout),
+            SafeStreamRecoveryAction::Retry
+        );
+        assert_eq!(
+            safe_stream_recovery_action(
+                CodexTransportMode::Websocket,
+                MAX_SAFE_STREAM_RECOVERY_RETRIES,
+                keepalive_timeout,
+            ),
+            SafeStreamRecoveryAction::FallbackToHttp
+        );
+        assert_eq!(
+            safe_stream_recovery_action(
+                CodexTransportMode::Http,
+                MAX_SAFE_STREAM_RECOVERY_RETRIES,
+                keepalive_timeout,
+            ),
+            SafeStreamRecoveryAction::Fail
+        );
+
+        let partial_response = concat!(
+            "WebSocket closed by server. OpenAI Codex websocket ended before the response ",
+            "finalized (text_len=3, complete_tool_calls=0, incomplete_tool_calls=1)."
+        );
+        assert_eq!(
+            safe_stream_recovery_action(
+                CodexTransportMode::Websocket,
+                MAX_SAFE_STREAM_RECOVERY_RETRIES,
+                partial_response,
+            ),
+            SafeStreamRecoveryAction::Fail
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_pump_answers_ping_while_connection_is_idle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind websocket test server");
+        let address = listener.local_addr().expect("websocket server address");
+        let expected_payload = vec![1, 2, 3, 4];
+        let server_payload = expected_payload.clone();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept websocket client");
+            let mut socket = tokio_tungstenite::accept_async(tcp)
+                .await
+                .expect("accept websocket handshake");
+            socket
+                .send(Message::Ping(server_payload.clone().into()))
+                .await
+                .expect("send server ping");
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                .await
+                .expect("timed out waiting for pong")
+                .expect("websocket closed before pong")
+                .expect("failed reading pong");
+            assert_eq!(reply, Message::Pong(server_payload.into()));
+        });
+
+        let tcp = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect websocket test client");
+        let request = format!("ws://{address}/responses")
+            .into_client_request()
+            .expect("build websocket test request");
+        let transport: BoxedCodexIo = Box::new(tcp);
+        let (socket, _) = tokio_tungstenite::client_async(request, transport)
+            .await
+            .expect("connect websocket test client");
+        let _idle_stream = CodexWebsocketStream::new(socket);
+
+        server.await.expect("websocket test server task");
+    }
+
+    #[tokio::test]
+    async fn websocket_http_fallback_is_sticky_for_session() {
+        let session_id = format!("fallback-test-{}", uuid::Uuid::new_v4());
+        enable_cached_websocket_http_fallback(Some(&session_id), None, Some("account-1")).await;
+
+        assert!(
+            cached_websocket_http_fallback_enabled(Some(&session_id), None, Some("account-1"))
+                .await
+        );
+        assert!(
+            !cached_websocket_http_fallback_enabled(Some(&session_id), None, Some("account-2"))
+                .await
+        );
+
+        super::invalidate_cached_session(&session_id);
     }
 
     #[test]
@@ -4433,6 +5185,142 @@ mod tests {
     }
 
     #[test]
+    fn websocket_transport_request_ignores_server_metadata_and_reasoning_for_incremental_input() {
+        let previous_body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }]
+            }],
+            "stream": true,
+            "store": false,
+            "instructions": "You are Codex",
+            "tools": [{
+                "type": "function",
+                "name": "read",
+                "description": "Read a file",
+                "parameters": { "type": "object" }
+            }],
+            "tool_choice": "auto",
+        });
+        let response_items = serde_json::json!([
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "content": [],
+                "encrypted_content": "encrypted",
+                "internal_chat_message_metadata_passthrough": { "turn_id": "turn-1" }
+            },
+            {
+                "id": "msg_1",
+                "type": "message",
+                "status": "completed",
+                "phase": "commentary",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "checking",
+                    "annotations": [],
+                    "logprobs": []
+                }],
+                "internal_chat_message_metadata_passthrough": { "turn_id": "turn-1" }
+            },
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_1",
+                "name": "read",
+                "arguments": "{\"path\":\"a.rs\"}",
+                "internal_chat_message_metadata_passthrough": { "turn_id": "turn-1" }
+            }
+        ]);
+        let current_body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [
+                previous_body["input"][0].clone(),
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "checking" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "{\"path\":\"a.rs\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "file contents"
+                }
+            ],
+            "stream": true,
+            "store": false,
+            "instructions": "You are Codex",
+            "tools": previous_body["tools"].clone(),
+            "tool_choice": "auto",
+        });
+
+        let request = build_websocket_transport_request(
+            &current_body,
+            Some(&websocket_last_response(
+                &previous_body,
+                "resp_prev",
+                response_items.as_array().expect("response items"),
+            )),
+            /*include_type_field*/ true,
+        );
+
+        assert_eq!(
+            request
+                .get("previous_response_id")
+                .and_then(|value| value.as_str()),
+            Some("resp_prev")
+        );
+        assert_eq!(
+            request.get("input").and_then(|value| value.as_array()),
+            Some(
+                serde_json::json!([{
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "file contents"
+                }])
+                .as_array()
+                .expect("incremental input")
+            )
+        );
+    }
+
+    #[test]
+    fn websocket_transport_request_replays_full_input_when_tools_change() {
+        let previous_body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [],
+            "stream": true,
+            "store": false,
+            "tools": [{ "type": "function", "name": "read" }],
+            "tool_choice": "auto",
+        });
+        let current_body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "go" }] }],
+            "stream": true,
+            "store": false,
+            "tools": [{ "type": "function", "name": "write" }],
+            "tool_choice": "auto",
+        });
+        let request = build_websocket_transport_request(
+            &current_body,
+            Some(&websocket_last_response(&previous_body, "resp_prev", &[])),
+            /*include_type_field*/ true,
+        );
+
+        assert!(request.get("previous_response_id").is_none());
+        assert_eq!(request["input"], current_body["input"]);
+    }
+
+    #[test]
     fn websocket_transport_request_starts_full_replay_without_cached_response() {
         let body = serde_json::json!({
             "model": "gpt-5.4",
@@ -4505,8 +5393,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn establish_http_connect_tunnel_accepts_success_response() {
+    async fn native_proxy_connector_accepts_success_response() {
         let (client, mut server) = tokio::io::duplex(512);
+        let proxy = TungsteniteProxyConfig {
+            scheme: TungsteniteProxyScheme::Http,
+            host: "127.0.0.1".to_string(),
+            port: 7897,
+            auth: None,
+        };
 
         let server_task = tokio::spawn(async move {
             let mut buf = [0u8; 256];
@@ -4520,9 +5414,9 @@ mod tests {
                 .expect("write connect response");
         });
 
-        establish_http_connect_tunnel(client, "api.openai.com", 443, None)
+        connect_via_proxy(client, &proxy, "api.openai.com", 443)
             .await
-            .expect("connect tunnel should succeed");
+            .expect("native proxy connector should succeed");
 
         server_task.await.expect("server task");
     }

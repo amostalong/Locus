@@ -34,6 +34,7 @@ import {
   type ActiveOperator,
   type CommandDef,
   type ComposerIntentState,
+  type IntentCommandType,
 } from "../../composables/chatInputIntents";
 import { buildProjectKnowledgeRefPath, extractChatAssetRefs } from "../../composables/chatAssetRefs";
 import {
@@ -56,7 +57,9 @@ import {
 } from "../../composables/useChatInputSettings";
 import {
   checkUnityConnectionStatus,
+  filterUnityConsoleErrorPayload,
   getUnityConsoleText,
+  isUnityConsoleErrorLevel,
   subscribeLocusFileDrop,
   subscribeLocusFileDragState,
   subscribeUnityEmbedAssetDrop,
@@ -148,8 +151,10 @@ const props = withDefaults(defineProps<{
   disabled?: boolean;
   isStreaming?: boolean;
   cancelling?: boolean;
+  canResume?: boolean;
   sendLabel?: string;
   cancelLabel?: string;
+  resumeLabel?: string;
   allowImages?: boolean;
   maxImages?: number;
   showTopPlanBadge?: boolean;
@@ -164,8 +169,10 @@ const props = withDefaults(defineProps<{
   disabled: false,
   isStreaming: false,
   cancelling: false,
+  canResume: false,
   sendLabel: "",
   cancelLabel: "",
+  resumeLabel: "",
   allowImages: true,
   maxImages: 5,
   showTopPlanBadge: true,
@@ -180,10 +187,13 @@ const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
   (e: "send", payload: ChatComposerSendPayload): void;
   (e: "cancel"): void;
+  (e: "resume"): void;
   (e: "clear"): void;
   (e: "compact"): void;
   (e: "fork"): void;
   (e: "undo"): void;
+  (e: "exportContext"): void;
+  (e: "reviewContext"): void;
 }>();
 
 const composerRef = ref<InstanceType<typeof ChatComposer> | null>(null);
@@ -314,15 +324,28 @@ const commandToken = computed(() =>
   activeOperator.value?.kind === "slash" ? activeOperator.value.token : "",
 );
 
+const RUNTIME_SAFE_ACTION_COMMANDS: readonly IntentCommandType[] = [
+  "fork",
+  "export-context",
+  "review-context",
+];
+
 const allowActionCommands = computed(() =>
   !!activeOperator.value
   && activeOperator.value.kind === "slash"
   && props.modelValue.trim() === activeOperator.value.token.trim(),
 );
 
+const actionCommandFilterOptions = computed(() => ({
+  includeActions: allowActionCommands.value && !props.isStreaming,
+  allowedActionTypes: allowActionCommands.value && props.isStreaming
+    ? RUNTIME_SAFE_ACTION_COMMANDS
+    : undefined,
+}));
+
 const filteredCommands = computed(() =>
   commandToken.value
-    ? getFilteredCommands(commandToken.value, { includeActions: allowActionCommands.value })
+    ? getFilteredCommands(commandToken.value, actionCommandFilterOptions.value)
     : [],
 );
 
@@ -792,13 +815,6 @@ function dismissOperatorPopupForCursor(text: string, cursor: number) {
 
 function syncOperatorState() {
   const previousOperator = activeOperator.value;
-  if (props.isStreaming) {
-    activeOperator.value = null;
-    showCommandPopup.value = false;
-    closeMentionPopup();
-    return;
-  }
-
   const textarea = getComposerTextarea();
   if (!textarea) return;
 
@@ -825,7 +841,7 @@ function syncOperatorState() {
   }
 
   if (operator.kind === "slash") {
-    const matches = getFilteredCommands(operator.token, { includeActions: allowActionCommands.value });
+    const matches = getFilteredCommands(operator.token, actionCommandFilterOptions.value);
     showCommandPopup.value = matches.length > 0;
     const sameSlashToken =
       previousOperator?.kind === "slash"
@@ -1243,12 +1259,7 @@ function consoleTextSource(item: Pick<ConsoleTextAttachment, "source">) {
 function consoleTextLevelClass(level: string) {
   const normalized = level.trim().toLowerCase();
   if (normalized.includes("warning")) return "level-warning";
-  if (
-    normalized.includes("error")
-    || normalized.includes("assert")
-    || normalized.includes("exception")
-    || normalized.includes("fatal")
-  ) {
+  if (isUnityConsoleErrorLevel(normalized)) {
     return "level-error";
   }
   return "level-log";
@@ -1506,12 +1517,16 @@ function buildAssetRefsPromptBlock(assetRefs: AssetRefAttachment[]) {
   if (assetRefs.length === 0) return "";
   const lines = assetRefs.map((assetRef) => {
     if (assetRef.kind === "knowledge") {
-      return `- project knowledge: \`${assetRef.path}\` (use \`knowledge_read\`)`;
+      const path = assetRef.path.replace(/\\/g, "/").replace(/^\/+/, "");
+      const readablePath = path.startsWith("Locus/knowledge/")
+        ? path
+        : `Locus/knowledge/${path}`;
+      return `- project knowledge: \`${readablePath}\` (use \`read\`)`;
     }
     const label = assetRef.kind === "sceneObject" ? "scene object" : "asset";
     return `- ${label}: {@${assetRef.path}}`;
   });
-  return `<locus-references>\nUse Unity refs as exact asset anchors. Use project knowledge refs as exact knowledge_read paths.\n${lines.join("\n")}\n</locus-references>`;
+  return `<locus-references>\nUse Unity refs as exact asset anchors. Use project knowledge refs as exact filesystem paths.\n${lines.join("\n")}\n</locus-references>`;
 }
 
 function appendAssetRefsPromptBlock(text: string, assetRefs: AssetRefAttachment[]) {
@@ -1681,25 +1696,32 @@ function clearActionCommandInput() {
   });
 }
 
-async function attachUnityConsoleFromCommand() {
+async function attachUnityConsoleFromCommand(filter: "all" | "error" = "all") {
   if (unityConsoleCommandPending.value) return;
 
+  const operation = filter === "error" ? "unityConsoleErrorCommand" : "unityConsoleCommand";
   unityConsoleCommandPending.value = true;
   try {
     const status = await checkUnityConnectionStatus();
     if (!status.connected) {
       notificationStore.addNotice("error", t("chat.command.unityConsoleDisconnected"), {
-        operation: "unityConsoleCommand",
+        operation,
         replaceOperation: true,
       });
       return;
     }
 
-    const payload = await getUnityConsoleText();
+    const consolePayload = await getUnityConsoleText();
+    const payload = filter === "error"
+      ? filterUnityConsoleErrorPayload(consolePayload)
+      : consolePayload;
     if (!hasUnityConsolePayloadText(payload)) {
       clearActionCommandInput();
-      notificationStore.addNotice("warning", t("chat.command.unityConsoleEmpty"), {
-        operation: "unityConsoleCommand",
+      const messageKey = filter === "error"
+        ? "chat.command.unityConsoleErrorEmpty"
+        : "chat.command.unityConsoleEmpty";
+      notificationStore.addNotice("warning", t(messageKey), {
+        operation,
         replaceOperation: true,
       });
       return;
@@ -1711,7 +1733,7 @@ async function attachUnityConsoleFromCommand() {
     const normalized = normalizeAppError(error);
     notificationStore.addNotice("error", t("chat.command.unityConsoleFailed", normalized.message), {
       code: normalized.code,
-      operation: "unityConsoleCommand",
+      operation,
       replaceOperation: true,
     });
   } finally {
@@ -1748,6 +1770,10 @@ function canExecuteActionCommand(): boolean {
 
 function executeActionCommand(command: CommandDef): boolean {
   if (command.commandKind !== "action" || !canExecuteActionCommand()) return false;
+  if (
+    props.isStreaming
+    && !RUNTIME_SAFE_ACTION_COMMANDS.includes(command.commandType)
+  ) return false;
 
   if (command.commandType === "clear") {
     resetDraft();
@@ -1773,8 +1799,25 @@ function executeActionCommand(command: CommandDef): boolean {
     return true;
   }
 
+  if (command.commandType === "export-context") {
+    resetDraft();
+    emit("exportContext");
+    return true;
+  }
+
+  if (command.commandType === "review-context") {
+    resetDraft();
+    emit("reviewContext");
+    return true;
+  }
+
   if (command.commandType === "unity-console") {
     void attachUnityConsoleFromCommand();
+    return true;
+  }
+
+  if (command.commandType === "unity-console-error") {
+    void attachUnityConsoleFromCommand("error");
     return true;
   }
 
@@ -1796,7 +1839,7 @@ function handleSend() {
     return;
   }
 
-  if (!props.isStreaming && tryHandleExactActionCommand()) {
+  if (tryHandleExactActionCommand()) {
     return;
   }
 
@@ -2596,8 +2639,10 @@ defineExpose({
       :is-streaming="isStreaming"
       :cancelling="cancelling"
       :can-send="canSend"
+      :can-resume="canResume"
       :send-label="sendLabel"
       :cancel-label="cancelLabel"
+      :resume-label="resumeLabel"
       :submit-mode="chatInputSettings.submitMode"
       :compact="compact"
       :show-action="showAction"
@@ -2618,6 +2663,7 @@ defineExpose({
       @focus="handleTextareaInteraction"
       @send="handleSend"
       @cancel="emit('cancel')"
+      @resume="emit('resume')"
     >
       <template #overlay>
         <div v-if="hasTopAttachments" class="composer-attachment-list">

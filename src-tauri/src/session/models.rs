@@ -53,6 +53,10 @@ pub struct SessionDetail {
     pub model_id: Option<String>,
     /// Per-session effort override. `None` = follow global `lastEffort`.
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_effort: Option<String>,
     pub session_type: String,
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +68,40 @@ pub struct SessionDetail {
     pub pending_inputs: Vec<PendingSessionInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<SessionRuntimeSnapshot>,
+}
+
+/// Display-oriented session payload used by the main chat workspace.
+///
+/// The regular `SessionDetail` remains the full-history contract for exports,
+/// context reconstruction, and compatibility callers. The workspace loads a
+/// bounded tail page first and requests older pages with the stable SQLite
+/// row-id cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionViewSnapshot {
+    pub session: SessionDetail,
+    #[serde(default)]
+    pub user_message_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_message_row_id: Option<i64>,
+    pub has_more_history: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTurnPreview {
+    pub message_id: String,
+    pub prompt: String,
+    pub response: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessagePage {
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_message_row_id: Option<i64>,
+    pub has_more_history: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,8 +173,27 @@ pub struct PendingQuestion {
     pub tool_call_id: String,
     pub question: String,
     pub options: Vec<crate::commands::AskOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextAttempt {
+    pub id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub iteration: u32,
+    pub attempt: u32,
+    pub attempt_kind: String,
+    pub status: String,
+    pub backend: String,
+    pub model_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sheet: Option<crate::commands::SheetRequest>,
+    pub effort: Option<String>,
+    pub request: serde_json::Value,
+    pub response: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,7 +371,7 @@ pub struct ImageData {
     pub mime_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetRefData {
     pub path: String,

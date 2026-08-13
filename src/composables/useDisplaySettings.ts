@@ -9,6 +9,7 @@ export type DiffReviewTarget = "inline" | "window";
 export type ChatDiffReviewTarget = DiffReviewTarget;
 export type GitDiffReviewTarget = DiffReviewTarget;
 export type PlanApprovalTarget = "card" | "window";
+export type MemoryFileOpenTarget = "window" | "knowledge";
 export type AssetRefClickAction =
   | "editor"
   | "unitySelect"
@@ -17,6 +18,18 @@ export type AssetRefClickAction =
   | "locusInspectorAuto"
   | "locusInspectorEmbedded"
   | "locusInspectorWindow";
+
+export const DEFAULT_SESSION_MESSAGE_PAGE_SIZE = 120;
+export const SESSION_MESSAGE_PAGE_SIZE_OPTIONS = [80, 120, 160, 240, 400] as const;
+
+export function normalizeSessionMessagePageSize(value: unknown): number {
+  const parsed = Number(value);
+  return SESSION_MESSAGE_PAGE_SIZE_OPTIONS.includes(
+    parsed as (typeof SESSION_MESSAGE_PAGE_SIZE_OPTIONS)[number],
+  )
+    ? parsed
+    : DEFAULT_SESSION_MESSAGE_PAGE_SIZE;
+}
 
 export interface DisplaySettings {
   /** Show the welcome subtitle above the chat input */
@@ -47,12 +60,18 @@ export interface DisplaySettings {
   gitDiffReviewTarget: DiffReviewTarget;
   /** Default surface for the exit_plan_mode approval (inline card or standalone window) */
   planApprovalTarget: PlanApprovalTarget;
+  /** Default target when opening a Memory document reference */
+  memoryFileOpenTarget: MemoryFileOpenTarget;
   /** Default action when clicking a Unity asset reference in chat messages */
   assetRefClickAction: AssetRefClickAction;
   /** Click action override for chat running inside the Unity embed window */
   unityEmbedAssetRefClickAction: AssetRefClickAction;
   /** Right-align user messages in the session transcript */
   rightAlignUserMessages: boolean;
+  /** Show the user-turn navigation rail when the transcript has enough left gutter */
+  showTurnNavigationRail: boolean;
+  /** Number of messages requested for initial session history and each older page */
+  sessionMessagePageSize: number;
   /** Collapse completed tool call batches in chat transcript */
   compactToolCalls: boolean;
   /** Hide completed thinking blocks in chat transcript */
@@ -131,14 +150,17 @@ const defaults: DisplaySettings = {
   // (see components/editor/EditorView.vue) so users get a code editor instead
   // of the Locus Inspector. The Locus Inspector modes are still available
   // from the Display settings picker for users who want them.
+  memoryFileOpenTarget: "knowledge",
   assetRefClickAction: "editor",
   // Inside the Unity embed window the editor's own Inspector is one click
   // away, so asset/GameObject refs open there by default.
   unityEmbedAssetRefClickAction: "unityInspector",
   rightAlignUserMessages: true,
+  showTurnNavigationRail: true,
+  sessionMessagePageSize: DEFAULT_SESSION_MESSAGE_PAGE_SIZE,
   compactToolCalls: true,
   hideThinkingBlocks: true,
-  showViewsInSessionPanel: true,
+  showViewsInSessionPanel: false,
   showViewLogBar: false,
   mergeGitTreeStatusIcon: true,
   hideGitCommandSuggestions: false,
@@ -166,7 +188,12 @@ function load(): DisplaySettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...defaults, ...parsed, fonts: { ...defaultFonts, ...parsed.fonts } };
+      return {
+        ...defaults,
+        ...parsed,
+        sessionMessagePageSize: normalizeSessionMessagePageSize(parsed.sessionMessagePageSize),
+        fonts: { ...defaultFonts, ...parsed.fonts },
+      };
     }
   } catch { /* ignore */ }
   return { ...defaults, fonts: { ...defaultFonts } };
@@ -194,7 +221,11 @@ if (typeof window !== "undefined") {
 
 export function useDisplaySettings() {
   function set<K extends keyof DisplaySettings>(key: K, value: DisplaySettings[K]) {
-    state[key] = value;
+    state[key] = (
+      key === "sessionMessagePageSize"
+        ? normalizeSessionMessagePageSize(value)
+        : value
+    ) as DisplaySettings[K];
     save({ ...state });
   }
 
