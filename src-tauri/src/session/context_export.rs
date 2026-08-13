@@ -991,6 +991,7 @@ mod tests {
             is_thinking: true,
             thinking_duration: 3,
             pending_question: None,
+            pending_questions: Vec::new(),
             pending_tool_confirms: Vec::new(),
             is_compacting: false,
         };

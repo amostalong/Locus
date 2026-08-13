@@ -298,10 +298,10 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
         let run_session_id = store
-            .create_session("Run Owner", None, None, "chat", None, None, None)
+            .create_session("Run Owner", None, None, "chat", None)
             .expect("create run session");
         let other_session_id = store
-            .create_session("Other", None, None, "chat", None, None, None)
+            .create_session("Other", None, None, "chat", None)
             .expect("create other session");
 
         store
