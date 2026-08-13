@@ -23,8 +23,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::agent::definition::{AgentDef, AgentDefRegistry};
 use crate::agent::workspace_execution_lock::{
-    process_workspace_execution_lock, WorkspaceExecutionGuard, WorkspaceExecutionLockMode,
-    WorkspaceExecutionLockOwner,
+    normalize_workspace_path_key, process_workspace_execution_lock, WorkspaceExecutionGuard,
+    WorkspaceExecutionLockOwner, WorkspaceExecutionLockRequest,
 };
 use crate::commands::{
     BasicToolConfirmDisplay, KnowledgeToolConfirmDirectoryMode, KnowledgeToolConfirmOperation,
@@ -935,6 +935,10 @@ pub(super) fn finalize_tool_call_record(
     }
 
     finalized
+}
+
+fn model_response_needs_follow_up(tool_calls: &[ToolCallInfo], end_turn: Option<bool>) -> bool {
+    !tool_calls.is_empty() || matches!(end_turn, Some(false))
 }
 
 fn validate_llm_tool_calls(tool_calls: &[ToolCallInfo]) -> Result<(), String> {
@@ -7188,6 +7192,7 @@ impl AgentInstance {
                     text: resp.text,
                     tool_calls: resp.tool_calls,
                     finish_reason: resp.finish_reason,
+                    end_turn: resp.end_turn,
                     response_id: resp.response_id,
                     input_tokens: resp.input_tokens,
                     output_tokens: resp.output_tokens,
@@ -7227,6 +7232,7 @@ impl AgentInstance {
                     text: resp.text,
                     tool_calls: resp.tool_calls,
                     finish_reason: resp.finish_reason,
+                    end_turn: None,
                     response_id: None,
                     input_tokens: resp.input_tokens,
                     output_tokens: resp.output_tokens,
@@ -7317,6 +7323,7 @@ impl AgentInstance {
                     text: resp.text,
                     tool_calls: resp.tool_calls,
                     finish_reason: resp.finish_reason,
+                    end_turn: resp.end_turn,
                     response_id: resp.response_id,
                     input_tokens: resp.input_tokens,
                     output_tokens: resp.output_tokens,
@@ -7409,6 +7416,7 @@ impl AgentInstance {
                             text: resp.text,
                             tool_calls: resp.tool_calls,
                             finish_reason: resp.finish_reason,
+                            end_turn: resp.end_turn,
                             response_id: resp.response_id,
                             input_tokens: resp.input_tokens,
                             output_tokens: resp.output_tokens,
@@ -7452,6 +7460,7 @@ impl AgentInstance {
                             text: resp.text,
                             tool_calls: resp.tool_calls,
                             finish_reason: resp.finish_reason,
+                            end_turn: resp.end_turn,
                             response_id: resp.response_id,
                             input_tokens: resp.input_tokens,
                             output_tokens: resp.output_tokens,
@@ -7499,6 +7508,7 @@ impl AgentInstance {
                             text: resp.text,
                             tool_calls: resp.tool_calls,
                             finish_reason: resp.finish_reason,
+                            end_turn: None,
                             response_id: None,
                             input_tokens: resp.input_tokens,
                             output_tokens: resp.output_tokens,
@@ -7664,9 +7674,7 @@ impl AgentInstance {
                 None,
                 None,
                 &mut compact_turn_state,
-                codex::CodexStreamOptions::compact()
-                    .with_fast_mode(self.codex_fast_mode)
-                    .with_max_output_tokens(max_output_tokens),
+                codex::CodexStreamOptions::compact().with_fast_mode(self.codex_fast_mode),
                 &|_| {},
                 &|_| {},
                 &|_, _| {},
@@ -7697,9 +7705,7 @@ impl AgentInstance {
                         None,
                         None,
                         &mut compact_turn_state,
-                        codex::CodexStreamOptions::compact()
-                            .with_fast_mode(self.codex_fast_mode)
-                            .with_max_output_tokens(max_output_tokens),
+                        codex::CodexStreamOptions::compact().with_fast_mode(self.codex_fast_mode),
                         &|_| {},
                         &|_| {},
                         &|_, _| {},
@@ -7712,6 +7718,7 @@ impl AgentInstance {
                 text: resp.text,
                 tool_calls: resp.tool_calls,
                 finish_reason: resp.finish_reason,
+                end_turn: resp.end_turn,
                 response_id: resp.response_id,
                 input_tokens: resp.input_tokens,
                 output_tokens: resp.output_tokens,
@@ -7891,10 +7898,9 @@ impl AgentInstance {
     }
 
     /// Default compaction path for the OpenAI Codex subscription backend,
-    /// aligned with codex-rs: a unary `POST /responses/compact` call whose
-    /// complete canonical output window is stored on the handoff message and
-    /// replayed to the Codex API by the payload builders. The handoff text
-    /// itself remains a local fallback for other backends.
+    /// aligned with codex-rs Remote Compaction V2: a streaming `POST /responses`
+    /// request ending in `compaction_trigger`. The canonical opaque output is
+    /// stored on the handoff message and replayed by later Codex requests.
     async fn execute_codex_remote_compact(
         &self,
         app_handle: &AppHandle,
@@ -7907,7 +7913,12 @@ impl AgentInstance {
         trigger: crate::commands::CompactTrigger,
         iteration: usize,
     ) -> Result<Option<u32>, String> {
-        let LlmBackend::OpenAiCodex { auth, base_url, .. } = &self.backend else {
+        let LlmBackend::OpenAiCodex {
+            auth,
+            transport,
+            base_url,
+        } = &self.backend
+        else {
             return Ok(None);
         };
 
@@ -7956,9 +7967,10 @@ impl AgentInstance {
         let (access_token, account_id) = resolve_codex_request_auth(auth, false)
             .await
             .map_err(|e| format!("OpenAI Codex token failed (please re-login): {}", e))?;
-        let compact_result = match codex::compact_conversation_history(
+        let compact_result = match codex::compact_conversation_history_v2(
             &access_token,
             account_id.as_deref(),
+            *transport,
             base_url.as_deref(),
             actual_model,
             &system_prompt,
@@ -7980,9 +7992,10 @@ impl AgentInstance {
                 let (access_token, account_id) = resolve_codex_request_auth(auth, true)
                     .await
                     .map_err(|e| format!("OpenAI Codex token refresh failed: {}", e))?;
-                codex::compact_conversation_history(
+                codex::compact_conversation_history_v2(
                     &access_token,
                     account_id.as_deref(),
+                    *transport,
                     base_url.as_deref(),
                     actual_model,
                     &system_prompt,
@@ -8127,11 +8140,12 @@ impl AgentInstance {
         iteration: usize,
     ) -> Result<Option<u32>, String> {
         let trigger = compact_trigger(force_compact, attempt_kind);
-        // Codex subscription sessions default to the remote compaction endpoint
-        // (codex-rs default strategy); the prompt-based flow below stays as the
-        // fallback when the endpoint is unavailable or returns no compaction.
+        // Codex subscription sessions require the canonical remote compaction
+        // window. A local checkpoint is a different protocol and cannot safely
+        // replace opaque Codex provider state, so any remote failure must stop
+        // the run with the original prompt left intact.
         if matches!(self.backend, LlmBackend::OpenAiCodex { .. }) {
-            match self
+            return self
                 .execute_codex_remote_compact(
                     app_handle,
                     store,
@@ -8144,16 +8158,16 @@ impl AgentInstance {
                     iteration,
                 )
                 .await
-            {
-                Ok(Some(post_tokens)) => return Ok(Some(post_tokens)),
-                Ok(None) => return Ok(None),
-                Err(error) => {
+                .map_err(|error| {
                     eprintln!(
-                        "[Agent {}] codex remote compact failed, falling back to prompt-based compact: {}",
+                        "[Agent {}] codex remote compact failed; stopping the run: {}",
                         self.id, error
                     );
-                }
-            }
+                    format!(
+                        "Codex context compaction failed; the run was stopped and the original context was preserved: {}",
+                        error
+                    )
+                });
         }
 
         let messages = store.get_messages_for_prompt(&self.session_id)?;
@@ -9289,6 +9303,15 @@ impl AgentInstance {
             };
             let ctx_limit = self.context_limit();
             let messages = store.get_messages_for_prompt(&self.session_id)?;
+            if messages.is_empty() {
+                let visible_message_count = store.get_messages(&self.session_id)?.len();
+                if visible_message_count > 0 {
+                    return Err(format!(
+                        "Cannot compact this session because its active context is empty while {} history messages are visible. The session fork prompt window must be repaired before compaction can continue.",
+                        visible_message_count
+                    ));
+                }
+            }
             let prepared_messages = compact::prepare_messages_for_llm(&messages);
             let prepared_tools = self
                 .prepare_request_tools(
@@ -9621,8 +9644,6 @@ impl AgentInstance {
         let final_continuation_request;
         let final_content_order;
         let final_thinking_order;
-        let mut done_already_emitted = false;
-        let mut terminal_done_message_id: Option<String> = None;
         // Tracks whether this run has persisted any assistant message yet; a
         // cancel before that revokes the user message back to the composer.
         let mut assistant_round_persisted = false;
@@ -10460,8 +10481,8 @@ impl AgentInstance {
                 }
             }
 
-            let has_executable_tool_calls = ordered_tool_calls.iter()
-                .any(|tc| !tc.is_server_tool());
+            let model_needs_follow_up =
+                model_response_needs_follow_up(&ordered_tool_calls, response.end_turn);
 
             if !ordered_tool_calls.is_empty() {
                 eprintln!(
@@ -10804,6 +10825,92 @@ impl AgentInstance {
                     }
                 }
 
+                let has_pending_mutation = prepared.iter().any(|(tc, args)| {
+                    !blocked_results.contains_key(&tc.id)
+                        && !precompleted_results.contains_key(&tc.id)
+                        && !self.tool_call_runs_in_background(&effective_name(tc), args)
+                        && self
+                            .workspace_execution_request_for_tool(&tc.name, args)
+                            .is_some()
+                });
+                if has_pending_mutation {
+                    let mode_ref = mode.as_str();
+                    let run_id_ref = run_id.as_str();
+                    let assistant_msg_id_ref = assistant_msg_id.as_str();
+                    let active_skill_tool_names_ref = &active_skill_tool_names;
+                    let agent = &*self;
+                    let mut pending = futures::stream::FuturesUnordered::new();
+                    for (index, (tc, args)) in prepared.iter().enumerate() {
+                        let name = effective_name(tc);
+                        if blocked_results.contains_key(&tc.id)
+                            || precompleted_results.contains_key(&tc.id)
+                            || name == "subagent"
+                            || name == "ask_user_question"
+                            || name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
+                            || self
+                                .workspace_execution_request_for_tool(&tc.name, args)
+                                .is_some()
+                        {
+                            continue;
+                        }
+                        let preapproved = confirmation_preapproved.contains(&tc.id);
+                        pending.push(async move {
+                            let result = agent
+                                .execute_single_tool(
+                                    app_handle,
+                                    store,
+                                    tc,
+                                    args,
+                                    run_id_ref,
+                                    assistant_msg_id_ref,
+                                    mode_ref,
+                                    active_skill_tool_names_ref,
+                                    preapproved,
+                                )
+                                .await;
+                            (index, result)
+                        });
+                    }
+
+                    while let Some((index, result)) = pending.next().await {
+                        let (tc, args) = &prepared[index];
+                        if !self.run_is_current_for_session(
+                            store,
+                            &run_id,
+                            "readonly_phase_result_completed",
+                            Some(&tc.id),
+                        ) {
+                            return Ok(String::new());
+                        }
+                        let resolved_tool_name = effective_name(tc);
+                        self.record_failed_tool_call(
+                            app_handle,
+                            &run_id,
+                            &assistant_msg_id,
+                            tc,
+                            &resolved_tool_name,
+                            args,
+                            &result,
+                            "readonly_phase",
+                        )
+                        .await;
+                        let stored_output = self.stream_completed_tool_result(
+                            app_handle,
+                            store,
+                            &run_id,
+                            tc,
+                            &result,
+                        );
+                        precompleted_results.insert(
+                            tc.id.clone(),
+                            CompletedToolResult {
+                                executed: result,
+                                stored_output,
+                            },
+                        );
+                    }
+                }
+
                 let is_active = |tc: &ToolCallInfo| {
                     !blocked_results.contains_key(&tc.id)
                         && !precompleted_results.contains_key(&tc.id)
@@ -10821,28 +10928,25 @@ impl AgentInstance {
                         && !self.tool_call_runs_in_background(&effective_name(tc), args)
                         && Self::is_unity_execution_barrier_tool(&effective_name(tc))
                 });
-                let active_local_call_count = prepared
-                    .iter()
-                    .filter(|(tc, _)| {
-                        if !is_active(tc) {
-                            return false;
-                        }
-                        let name = effective_name(tc);
-                        name != "subagent"
-                            && name != "ask_user_question"
-                            && !name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
-                    })
-                    .count();
-                let workspace_lock_mode = if active_local_call_count == 0 {
-                    None
-                } else if needs_undo || has_unity_execution_barrier {
-                    Some(WorkspaceExecutionLockMode::Write)
-                } else {
-                    Some(WorkspaceExecutionLockMode::Read)
-                };
-                let execute_sequentially = workspace_lock_mode
-                    == Some(WorkspaceExecutionLockMode::Write)
-                    || has_ask;
+                let workspace_lock_request = prepared.iter().fold(None, |current, (tc, args)| {
+                    if !is_active(tc)
+                        || self.tool_call_runs_in_background(&effective_name(tc), args)
+                    {
+                        return current;
+                    }
+                    let name = effective_name(tc);
+                    if name == "subagent"
+                        || name == "ask_user_question"
+                        || name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
+                    {
+                        return current;
+                    }
+                    Self::merge_workspace_execution_request(
+                        current,
+                        self.workspace_execution_request_for_tool(&tc.name, args),
+                    )
+                });
+                let execute_sequentially = workspace_lock_request.is_some() || has_ask;
                 let blocked_tool_call_ids: HashSet<String> = blocked_results
                     .keys()
                     .chain(precompleted_results.keys())
@@ -10868,11 +10972,9 @@ impl AgentInstance {
                     } else {
                         "parallel"
                     },
-                    workspace_lock_mode
-                        .map(|mode| match mode {
-                            WorkspaceExecutionLockMode::Read => "read",
-                            WorkspaceExecutionLockMode::Write => "write",
-                        })
+                    workspace_lock_request
+                        .as_ref()
+                        .map(WorkspaceExecutionLockRequest::label)
                         .unwrap_or("none"),
                     prepared.len().saturating_sub(blocked_results.len()),
                     blocked_results.len(),
@@ -10884,7 +10986,7 @@ impl AgentInstance {
                 );
 
                 let mut workspace_round_guard: Option<WorkspaceExecutionGuard> =
-                    if let Some(lock_mode) = workspace_lock_mode {
+                    if let Some(lock_request) = workspace_lock_request {
                         let owner = WorkspaceExecutionLockOwner {
                             session_id: self.session_id.clone(),
                             run_id: run_id.clone(),
@@ -10898,7 +11000,7 @@ impl AgentInstance {
                         };
                         match process_workspace_execution_lock(&self.working_dir)
                             .acquire_with_diagnostics(
-                                lock_mode,
+                                lock_request,
                                 owner,
                                 self.cancel_waiter(),
                                 app_handle,
@@ -11557,13 +11659,16 @@ impl AgentInstance {
                 if let Some(checkpoint) = pre_checkpoint {
                     if let Some(ref undo_mgr) = self.undo_manager {
                         let recorded = undo_mgr
-                            .after_round(
+                            .after_round_for_paths(
                                 &self.session_id,
                                 &assistant_msg_id,
                                 Some(run_id.as_str()),
                                 checkpoint,
                                 has_unity_execute,
                                 &self.working_dir,
+                                workspace_round_guard
+                                    .as_ref()
+                                    .and_then(WorkspaceExecutionGuard::path_keys),
                             )
                             .await;
                         match recorded {
@@ -11634,10 +11739,6 @@ impl AgentInstance {
                     return Ok(String::new());
                 }
 
-                if !has_executable_tool_calls {
-                    store.close_run_pending_input_queue(&run_id)?;
-                }
-
                 if self.drain_queued_pending_inputs(
                     app_handle,
                     store,
@@ -11648,25 +11749,13 @@ impl AgentInstance {
                     continue 'agent_loop;
                 }
 
-                if has_executable_tool_calls {
-                    continue;
-                }
-                // Server-tool-only round: model already provided its answer alongside the
-                // server tool results. toolCallRoundDone already emitted, message already stored.
-                final_text = response.text;
-                final_thinking_text = response.thinking_text;
-                final_thinking_duration = response.thinking_duration_secs;
-                final_thinking_signature = response.thinking_signature;
-                final_response_id = response.response_id;
-                final_continuation_request = response.continuation_request;
-                final_content_order = response_content_order;
-                final_thinking_order = response_thinking_order;
-                done_already_emitted = true;
-                terminal_done_message_id = Some(assistant_msg_id);
-                break;
+                debug_assert!(model_needs_follow_up);
+                continue;
             }
 
-            store.close_run_pending_input_queue(&run_id)?;
+            if !model_needs_follow_up {
+                store.close_run_pending_input_queue(&run_id)?;
+            }
             let pending_inputs = {
                 let queue_state: tauri::State<'_, crate::PendingInputQueueHandle> =
                     app_handle.state();
@@ -11675,7 +11764,7 @@ impl AgentInstance {
                     .map_err(|e| format!("Failed to lock pending input queue: {}", e))?;
                 queue.claim_immediate(&self.session_id, &run_id)
             };
-            if !pending_inputs.is_empty() {
+            if model_needs_follow_up || !pending_inputs.is_empty() {
                 let thinking_opt = if response.thinking_text.is_empty() {
                     None
                 } else {
@@ -11743,8 +11832,7 @@ impl AgentInstance {
             break;
         }
 
-        if !done_already_emitted {
-            let thinking_opt = if final_thinking_text.is_empty() {
+        let thinking_opt = if final_thinking_text.is_empty() {
                 None
             } else {
                 Some(final_thinking_text.as_str())
@@ -11832,53 +11920,7 @@ impl AgentInstance {
                     render_parts: Some(final_render_parts),
                 },
             );
-            self.partial_assistant.reset();
-        } else {
-            // Server-tool-only rounds already persisted their assistant message via
-            // ToolCallRoundDone. The explicit Done event still needs to fire with the
-            // same message id so the frontend can clear its in-flight run state while
-            // still seeing the terminal response text.
-            let terminal_message_id = terminal_done_message_id.clone().unwrap_or_default();
-
-            if let Err(error) = store.set_latest_completed_run_id(&self.session_id, Some(&run_id)) {
-                eprintln!(
-                    "[Agent {}] failed to persist latest completed run id for session {} run {}: {}",
-                    self.id, self.session_id, run_id, error
-                );
-                crate::error::AppError::emit_background(
-                    app_handle,
-                    &crate::error::AppError::new(
-                        "session.latest_run_persist_failed",
-                        "Latest run boundary may be unavailable for this session.",
-                    )
-                    .detail(error)
-                    .operation("session")
-                    .severity(crate::error::ErrorSeverity::Warning),
-                );
-            }
-
-            eprintln!(
-                "[Agent {}] emitting Done for session {} run {} message {} (server-tool-only round) text_len={}",
-                self.id,
-                self.session_id,
-                run_id,
-                terminal_message_id,
-                final_text.len()
-            );
-            emit_stream(
-                app_handle,
-                &run_id,
-                StreamEvent::Done {
-                    session_id: self.session_id.clone(),
-                    message_id: terminal_message_id,
-                    full_text: final_text.clone(),
-                    content_order: final_content_order,
-                    thinking_order: final_thinking_order,
-                    render_parts: None,
-                },
-            );
-            self.partial_assistant.reset();
-        }
+        self.partial_assistant.reset();
 
         if let Err(error) = self
             .flush_pending_knowledge_proposal(app_handle, store, &run_id)
@@ -12032,6 +12074,75 @@ impl AgentInstance {
         };
 
         self.tool_registry.mutates_workspace(target_name)
+    }
+
+    fn workspace_execution_target(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> (String, serde_json::Value) {
+        if name != "tool_call" {
+            return (name.to_string(), args.clone());
+        }
+        let Some(target_name) = args
+            .get("toolName")
+            .or_else(|| args.get("tool_name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return (name.to_string(), args.clone());
+        };
+        let canonical = self
+            .canonical_tool_name(target_name)
+            .unwrap_or_else(|| target_name.to_string());
+        let mut target_args = args
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        normalize_tool_args(&mut target_args);
+        self.inject_working_dir(&canonical, &mut target_args);
+        (canonical, target_args)
+    }
+
+    fn workspace_execution_request_for_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Option<WorkspaceExecutionLockRequest> {
+        let (target_name, target_args) = self.workspace_execution_target(name, args);
+        if matches!(target_name.as_str(), "write" | "edit") {
+            return Some(
+                target_args
+                    .get("filePath")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|path| {
+                        WorkspaceExecutionLockRequest::PathWrite(vec![
+                            normalize_workspace_path_key(&self.working_dir, path),
+                        ])
+                    })
+                    .unwrap_or(WorkspaceExecutionLockRequest::Exclusive),
+            );
+        }
+        if self.tool_registry.mutates_workspace(&target_name)
+            || Self::is_unity_execution_barrier_tool(&target_name)
+        {
+            Some(WorkspaceExecutionLockRequest::Exclusive)
+        } else {
+            None
+        }
+    }
+
+    fn merge_workspace_execution_request(
+        current: Option<WorkspaceExecutionLockRequest>,
+        next: Option<WorkspaceExecutionLockRequest>,
+    ) -> Option<WorkspaceExecutionLockRequest> {
+        match (current, next) {
+            (Some(current), Some(next)) => Some(current.merge(next)),
+            (Some(current), None) => Some(current),
+            (None, Some(next)) => Some(next),
+            (None, None) => None,
+        }
     }
 
     fn effective_tool_name_for_round(&self, name: &str, args: &serde_json::Value) -> String {
@@ -13025,6 +13136,9 @@ impl AgentInstance {
         let session_id = self.session_id.clone();
         let working_dir = self.working_dir.clone();
         let mutates_workspace = self.tool_registry.mutates_workspace(&tool_name);
+        let workspace_request = (tool_name != "subagent")
+            .then(|| self.workspace_execution_request_for_tool(&tool_name, &args))
+            .flatten();
         let executor = self.clone_for_background_task(started.cancel_rx.clone());
 
         let initial_manager = manager.clone();
@@ -13076,16 +13190,9 @@ impl AgentInstance {
                 tools: vec![tool_name.clone()],
             };
             let mut cancel_rx = started.cancel_rx.clone();
-            let _workspace_guard = if matches!(tool_name.as_str(), "subagent" | "unity_execute") {
-                None
-            } else {
-                let mode = if mutates_workspace {
-                    WorkspaceExecutionLockMode::Write
-                } else {
-                    WorkspaceExecutionLockMode::Read
-                };
+            let workspace_guard = if let Some(request) = workspace_request {
                 match process_workspace_execution_lock(&working_dir)
-                    .acquire_with_diagnostics(mode, owner, cancel_rx.clone(), &app_handle)
+                    .acquire_with_diagnostics(request, owner, cancel_rx.clone(), &app_handle)
                     .await
                 {
                     Ok(guard) => Some(guard),
@@ -13108,6 +13215,8 @@ impl AgentInstance {
                         return;
                     }
                 }
+            } else {
+                None
             };
 
             let undo_round = if mutates_workspace {
@@ -13182,13 +13291,16 @@ impl AgentInstance {
 
             if let (Some(undo), Some(round)) = (executor.undo_manager.as_ref(), undo_round) {
                 if let Err(error) = undo
-                    .after_round(
+                    .after_round_for_paths(
                         &session_id,
                         &assistant_message_id,
                         Some(&run_id),
                         round,
                         tool_name == "unity_test_run",
                         &working_dir,
+                        workspace_guard
+                            .as_ref()
+                            .and_then(WorkspaceExecutionGuard::path_keys),
                     )
                     .await
                 {
@@ -18723,15 +18835,17 @@ mod tests {
     use super::{
         assess_knowledge_tool_confirmation, assess_knowledge_tool_confirmation_decision,
         build_l2_full_document_section, build_l3_rule_section, build_prompt_tree,
-        build_structure_section, compact_trigger, finalize_tool_call_record, render_tree_lines,
-        utf8_prefix_chars, AbortOnDropTask, AgentInstance, AgentKnowledgeDocumentContent,
-        AgentKnowledgeDocumentContentPatch, AgentKnowledgeListItem, AgentKnowledgeMutationResponse,
-        AgentKnowledgeReadResponse, AgentKnowledgeSearchHit, ChatMessage, ExecutedToolResult,
-        InjectedPromptItem, KnowledgeAccessMode, KnowledgeFocusDoc, LazyToolRenderer,
-        ParentToolCall, PromptKnowledgeItem, RawContextStore, ToolConfirmDecision, ToolRunOutcome,
+        build_structure_section, compact_trigger, finalize_tool_call_record,
+        model_response_needs_follow_up, render_tree_lines, utf8_prefix_chars, AbortOnDropTask,
+        AgentInstance, AgentKnowledgeDocumentContent, AgentKnowledgeDocumentContentPatch,
+        AgentKnowledgeListItem, AgentKnowledgeMutationResponse, AgentKnowledgeReadResponse,
+        AgentKnowledgeSearchHit, ChatMessage, ExecutedToolResult, InjectedPromptItem,
+        KnowledgeAccessMode, KnowledgeFocusDoc, LazyToolRenderer, ParentToolCall,
+        PromptKnowledgeItem, RawContextStore, ToolConfirmDecision, ToolRunOutcome,
         REACTIVE_COMPACT_ATTEMPT_KIND,
     };
     use crate::agent::definition::{AgentDef, AgentDefRegistry};
+    use crate::agent::workspace_execution_lock::WorkspaceExecutionLockRequest;
     use crate::commands::{
         CompactTrigger, KnowledgeToolConfirmDirectoryMode, KnowledgeToolConfirmOperation,
         StreamEvent, ToolCallOutcome,
@@ -18741,7 +18855,9 @@ mod tests {
         update_directory_config, KnowledgeDocument, KnowledgeInjectMode, KnowledgeReadResponse,
         KnowledgeReadResult, KnowledgeTargetKind, KnowledgeType,
     };
-    use crate::session::models::{ToolCallInfo, UserIntentPayload, UserIntentSkill};
+    use crate::session::models::{
+        ServerToolKind, ToolCallInfo, UserIntentPayload, UserIntentSkill,
+    };
     use crate::tool::{ToolDef, ToolRegistry, ToolResult};
     use crate::unity_docs::seed_managed_documents_for_tests;
     use serde_json::json;
@@ -18817,6 +18933,19 @@ mod tests {
     }
 
     #[test]
+    fn model_follow_up_requires_a_pure_assistant_terminal_response() {
+        assert!(!model_response_needs_follow_up(&[], None));
+        assert!(!model_response_needs_follow_up(&[], Some(true)));
+        assert!(model_response_needs_follow_up(&[], Some(false)));
+
+        let mut server_tool = test_tool_call("search-1", "web_search", json!({"query": "locus"}));
+        server_tool.server_tool = Some(ServerToolKind::WebSearch);
+        server_tool.server_tool_output = Some("result".to_string());
+
+        assert!(model_response_needs_follow_up(&[server_tool], Some(true)));
+    }
+
+    #[test]
     fn plans_parallel_edit_batches_by_normalized_file_path() {
         let root = tempdir().expect("temp dir");
         let first_path = root.path().join("first.txt");
@@ -18886,6 +19015,37 @@ mod tests {
             json!({"filePath": "new.txt", "content": "new"}),
         ));
         assert!(AgentInstance::plan_parallel_edit_batches(&mixed, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn workspace_coordination_bypasses_reads_and_classifies_writes() {
+        let root = tempdir().expect("temp dir");
+        let agent = test_agent_instance(root.path().to_string_lossy().to_string());
+
+        for tool in ["read", "grep", "list", "todowrite"] {
+            assert!(
+                agent
+                    .workspace_execution_request_for_tool(tool, &json!({}))
+                    .is_none(),
+                "{tool} must bypass workspace mutation coordination"
+            );
+        }
+
+        let write = agent
+            .workspace_execution_request_for_tool(
+                "write",
+                &json!({"filePath": root.path().join("same.txt")}),
+            )
+            .expect("write request");
+        assert!(matches!(write, WorkspaceExecutionLockRequest::PathWrite(_)));
+        assert!(matches!(
+            agent.workspace_execution_request_for_tool("unity_execute", &json!({})),
+            Some(WorkspaceExecutionLockRequest::Exclusive)
+        ));
+        assert!(matches!(
+            agent.workspace_execution_request_for_tool("bash", &json!({})),
+            Some(WorkspaceExecutionLockRequest::Exclusive)
+        ));
     }
 
     #[test]

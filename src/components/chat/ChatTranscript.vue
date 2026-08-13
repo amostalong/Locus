@@ -68,6 +68,9 @@ interface MessageGroup {
   id: string;
   role: "user" | "assistant";
   items: MessageRenderItem[];
+  /** Persisted message ids before display-only tool-round merging. */
+  sourceMessageIds: string[];
+  endMessageId: string;
 }
 
 interface MessageRenderItem {
@@ -1073,8 +1076,16 @@ function buildGroupedMessages(hiddenToolCallMatchState: ToolCallMatchState): Mes
     const lastIsHandoff = !!last?.items.some((item) => isCompactHandoffMessage(item.message));
     if (last && last.role === msg.role && !isHandoff && !lastIsHandoff) {
       last.items.push(renderItem);
+      last.sourceMessageIds.push(msg.id);
+      last.endMessageId = msg.id;
     } else {
-      groups.push({ id: msg.id, role: msg.role as "user" | "assistant", items: [renderItem] });
+      groups.push({
+        id: msg.id,
+        role: msg.role as "user" | "assistant",
+        items: [renderItem],
+        sourceMessageIds: [msg.id],
+        endMessageId: msg.id,
+      });
     }
   }
 
@@ -1187,7 +1198,16 @@ function renderItemEqual(a: MessageRenderItem, b: MessageRenderItem): boolean {
 }
 
 function messageGroupEqual(a: MessageGroup, b: MessageGroup): boolean {
-  if (a.id !== b.id || a.role !== b.role || a.items.length !== b.items.length) return false;
+  if (
+    a.id !== b.id
+    || a.role !== b.role
+    || a.endMessageId !== b.endMessageId
+    || a.items.length !== b.items.length
+    || a.sourceMessageIds.length !== b.sourceMessageIds.length
+  ) return false;
+  for (let index = 0; index < a.sourceMessageIds.length; index += 1) {
+    if (a.sourceMessageIds[index] !== b.sourceMessageIds[index]) return false;
+  }
   for (let index = 0; index < a.items.length; index += 1) {
     if (!renderItemEqual(a.items[index]!, b.items[index]!)) return false;
   }
@@ -1467,7 +1487,7 @@ const historyStaticRenderMemoKey = computed(() => [
 function historySelectionMemoKey(group: MessageGroup) {
   const selectedMessageId = props.selectedMessageId;
   if (!selectedMessageId) return "";
-  return group.items.some((item) => item.id === selectedMessageId) ? selectedMessageId : "";
+  return group.sourceMessageIds.includes(selectedMessageId) ? selectedMessageId : "";
 }
 
 function historyGroupMemoKey(group: MessageGroup, index: number) {
@@ -2677,7 +2697,7 @@ function isContextSelectedMessage(messageId: string | null | undefined) {
 }
 
 function isContextSelectedAssistantGroup(group: MessageGroup) {
-  return group.role === "assistant" && group.items.some((item) => isContextSelectedMessage(item.id));
+  return group.role === "assistant" && group.sourceMessageIds.some(isContextSelectedMessage);
 }
 
 function shouldShowSessionRoundDivider(group: Pick<MessageGroup, "role">, index: number) {
@@ -2853,7 +2873,7 @@ function openImage(src: string) {
             :data-chat-message-role="group.role"
             :data-chat-message-group-role="group.role"
             :data-chat-message-group-start-id="group.items[0]?.id"
-            :data-chat-message-group-end-id="group.items[group.items.length - 1]?.id"
+            :data-chat-message-group-end-id="group.endMessageId"
           >
           <div class="chat-transcript-message-role" :class="`is-${variant}`">
             {{ messageGroupLabel(group) }}
@@ -2990,7 +3010,7 @@ function openImage(src: string) {
                   'is-context-selected': isContextSelectedAssistantGroup(group),
                 },
               ]"
-              :data-scroll-anchor-id="group.items[group.items.length - 1]?.id"
+              :data-scroll-anchor-id="group.endMessageId"
               :data-chat-message-id="group.items[0]?.id"
               data-chat-message-role="assistant"
             >

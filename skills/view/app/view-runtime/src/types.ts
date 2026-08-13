@@ -1043,7 +1043,7 @@ export interface KnowledgeChangedEvent {
 export interface WorkspaceExecutionLockBlocker {
   sessionId: string;
   runId: string;
-  mode: "read" | "write" | string;
+  mode: "path_write" | "write" | string;
   heldMs: number;
   tools: string[];
 }
@@ -1054,7 +1054,7 @@ export interface WorkspaceExecutionLockDiagnostic {
   runId: string;
   iteration: number;
   workspace: string;
-  mode: "read" | "write" | string;
+  mode: "path_write" | "write" | string;
   waitedMs: number;
   tools: string[];
   blockers: WorkspaceExecutionLockBlocker[];
