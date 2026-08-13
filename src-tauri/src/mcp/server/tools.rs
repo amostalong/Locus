@@ -489,8 +489,8 @@ pub async fn execute_tool(
         // timeout drops this future, waiter registration and any acquired
         // guard are both released by Drop and leave an abandoned/released log.
         let (_lock_cancel_tx, lock_cancel_rx) = tokio::sync::watch::channel(false);
-        let workspace_guard = match process_workspace_execution_lock()
-            .acquire(lock_mode, owner, lock_cancel_rx)
+        let workspace_guard = match process_workspace_execution_lock(&working_dir)
+            .acquire_with_diagnostics(lock_mode, owner, lock_cancel_rx, &app)
             .await
         {
             Ok(guard) => guard,
@@ -602,6 +602,8 @@ async fn execute_workspace_tool(
                 runtime_state: Some(runtime_state),
                 cancel_rx: None,
                 progress: None,
+                output: None,
+                background: false,
             };
             let result = registry
                 .execute_with_context(name, arguments, context)

@@ -5,13 +5,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{watch, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const POSSIBLE_DEADLOCK_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const WORKSPACE_EXECUTION_LOCK_DIAGNOSTIC_EVENT: &str =
+    "workspace-execution-lock-diagnostic";
 
-static PROCESS_WORKSPACE_EXECUTION_LOCK: LazyLock<WorkspaceExecutionLock> =
-    LazyLock::new(WorkspaceExecutionLock::new);
+static PROCESS_WORKSPACE_EXECUTION_LOCKS: LazyLock<Mutex<HashMap<String, WorkspaceExecutionLock>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceExecutionLockMode {
@@ -58,6 +62,33 @@ impl WorkspaceExecutionLockOwner {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceExecutionLockBlocker {
+    pub session_id: String,
+    pub run_id: String,
+    pub mode: String,
+    pub held_ms: u64,
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceExecutionLockDiagnostic {
+    pub active: bool,
+    pub session_id: String,
+    pub run_id: String,
+    pub iteration: usize,
+    pub workspace: String,
+    pub mode: String,
+    pub waited_ms: u64,
+    pub tools: Vec<String>,
+    pub blockers: Vec<WorkspaceExecutionLockBlocker>,
+}
+
+type WorkspaceExecutionLockDiagnosticReporter =
+    Arc<dyn Fn(WorkspaceExecutionLockDiagnostic) + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceExecutionLockAcquireError {
     Cancelled,
@@ -87,6 +118,8 @@ struct WorkspaceExecutionLockInner {
     gate: Arc<RwLock<()>>,
     trace: Mutex<TraceState>,
     next_lease_id: AtomicU64,
+    wait_log_interval: Duration,
+    possible_deadlock_after: Duration,
 }
 
 struct WorkspaceExecutionWaitRegistration {
@@ -96,6 +129,8 @@ struct WorkspaceExecutionWaitRegistration {
     owner: WorkspaceExecutionLockOwner,
     requested_at: Instant,
     active: bool,
+    diagnostic_active: bool,
+    diagnostic_reporter: Option<WorkspaceExecutionLockDiagnosticReporter>,
 }
 
 #[derive(Clone)]
@@ -124,6 +159,21 @@ impl WorkspaceExecutionLock {
                 gate: Arc::new(RwLock::new(())),
                 trace: Mutex::new(TraceState::default()),
                 next_lease_id: AtomicU64::new(1),
+                wait_log_interval: WAIT_LOG_INTERVAL,
+                possible_deadlock_after: POSSIBLE_DEADLOCK_AFTER,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_timings(wait_log_interval: Duration, possible_deadlock_after: Duration) -> Self {
+        Self {
+            inner: Arc::new(WorkspaceExecutionLockInner {
+                gate: Arc::new(RwLock::new(())),
+                trace: Mutex::new(TraceState::default()),
+                next_lease_id: AtomicU64::new(1),
+                wait_log_interval,
+                possible_deadlock_after,
             }),
         }
     }
@@ -195,11 +245,105 @@ impl WorkspaceExecutionLock {
         format!("{}; {}; {}", writer, readers, waiters)
     }
 
-    pub(crate) async fn acquire(
+    fn blockers(&self, mode: WorkspaceExecutionLockMode) -> Vec<WorkspaceExecutionLockBlocker> {
+        let trace = self.trace();
+        let mut blockers = Vec::new();
+        if let Some((_, holder)) = trace.writer.as_ref() {
+            blockers.push(WorkspaceExecutionLockBlocker {
+                session_id: holder.owner.session_id.clone(),
+                run_id: holder.owner.run_id.clone(),
+                mode: WorkspaceExecutionLockMode::Write.label().to_string(),
+                held_ms: duration_millis(holder.acquired_at.elapsed()),
+                tools: holder.owner.tools.clone(),
+            });
+        }
+        if mode == WorkspaceExecutionLockMode::Write {
+            blockers.extend(
+                trace
+                    .readers
+                    .values()
+                    .map(|holder| WorkspaceExecutionLockBlocker {
+                        session_id: holder.owner.session_id.clone(),
+                        run_id: holder.owner.run_id.clone(),
+                        mode: WorkspaceExecutionLockMode::Read.label().to_string(),
+                        held_ms: duration_millis(holder.acquired_at.elapsed()),
+                        tools: holder.owner.tools.clone(),
+                    }),
+            );
+        }
+        blockers
+    }
+
+    fn diagnostic(
+        &self,
+        active: bool,
+        mode: WorkspaceExecutionLockMode,
+        owner: &WorkspaceExecutionLockOwner,
+        waited: Duration,
+    ) -> WorkspaceExecutionLockDiagnostic {
+        WorkspaceExecutionLockDiagnostic {
+            active,
+            session_id: owner.session_id.clone(),
+            run_id: owner.run_id.clone(),
+            iteration: owner.iteration,
+            workspace: owner.workspace.clone(),
+            mode: mode.label().to_string(),
+            waited_ms: duration_millis(waited),
+            tools: owner.tools.clone(),
+            blockers: self.blockers(mode),
+        }
+    }
+
+    #[cfg(test)]
+    async fn acquire(
+        &self,
+        mode: WorkspaceExecutionLockMode,
+        owner: WorkspaceExecutionLockOwner,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> Result<WorkspaceExecutionGuard, WorkspaceExecutionLockAcquireError> {
+        self.acquire_inner(mode, owner, cancel_rx, None).await
+    }
+
+    pub(crate) async fn acquire_with_diagnostics(
+        &self,
+        mode: WorkspaceExecutionLockMode,
+        owner: WorkspaceExecutionLockOwner,
+        cancel_rx: watch::Receiver<bool>,
+        app_handle: &AppHandle,
+    ) -> Result<WorkspaceExecutionGuard, WorkspaceExecutionLockAcquireError> {
+        let app_handle = app_handle.clone();
+        let reporter: WorkspaceExecutionLockDiagnosticReporter = Arc::new(move |diagnostic| {
+            if let Err(error) =
+                app_handle.emit(WORKSPACE_EXECUTION_LOCK_DIAGNOSTIC_EVENT, diagnostic)
+            {
+                eprintln!(
+                    "[WorkspaceExecutionLock] failed to emit frontend diagnostic: {}",
+                    error
+                );
+            }
+        });
+        self.acquire_inner(mode, owner, cancel_rx, Some(reporter))
+            .await
+    }
+
+    #[cfg(test)]
+    async fn acquire_with_reporter(
+        &self,
+        mode: WorkspaceExecutionLockMode,
+        owner: WorkspaceExecutionLockOwner,
+        cancel_rx: watch::Receiver<bool>,
+        reporter: WorkspaceExecutionLockDiagnosticReporter,
+    ) -> Result<WorkspaceExecutionGuard, WorkspaceExecutionLockAcquireError> {
+        self.acquire_inner(mode, owner, cancel_rx, Some(reporter))
+            .await
+    }
+
+    async fn acquire_inner(
         &self,
         mode: WorkspaceExecutionLockMode,
         owner: WorkspaceExecutionLockOwner,
         mut cancel_rx: watch::Receiver<bool>,
+        diagnostic_reporter: Option<WorkspaceExecutionLockDiagnosticReporter>,
     ) -> Result<WorkspaceExecutionGuard, WorkspaceExecutionLockAcquireError> {
         if *cancel_rx.borrow() {
             return Err(WorkspaceExecutionLockAcquireError::Cancelled);
@@ -224,6 +368,8 @@ impl WorkspaceExecutionLock {
             owner: owner.clone(),
             requested_at,
             active: true,
+            diagnostic_active: false,
+            diagnostic_reporter,
         };
         eprintln!(
             "[WorkspaceExecutionLock] requested lease={} mode={} {} holders=({})",
@@ -246,8 +392,8 @@ impl WorkspaceExecutionLock {
                 }),
             };
         let mut wait_log = tokio::time::interval_at(
-            tokio::time::Instant::now() + WAIT_LOG_INTERVAL,
-            WAIT_LOG_INTERVAL,
+            tokio::time::Instant::now() + self.inner.wait_log_interval,
+            self.inner.wait_log_interval,
         );
         wait_log.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -272,6 +418,7 @@ impl WorkspaceExecutionLock {
                         }
                     }
                     wait_registration.active = false;
+                    wait_registration.clear_diagnostic(requested_at.elapsed());
                     eprintln!(
                         "[WorkspaceExecutionLock] acquired lease={} mode={} wait_ms={} {}",
                         lease_id,
@@ -293,6 +440,7 @@ impl WorkspaceExecutionLock {
                         continue;
                     }
                     wait_registration.remove();
+                    wait_registration.clear_diagnostic(requested_at.elapsed());
                     eprintln!(
                         "[WorkspaceExecutionLock] cancelled lease={} mode={} wait_ms={} {} holders=({})",
                         lease_id,
@@ -310,14 +458,21 @@ impl WorkspaceExecutionLock {
                         lease_id,
                         mode.label(),
                         waited.as_millis(),
-                        waited >= POSSIBLE_DEADLOCK_AFTER,
+                        waited >= self.inner.possible_deadlock_after,
                         owner.summary(),
                         self.holder_summary()
                     );
+                    if waited >= self.inner.possible_deadlock_after {
+                        wait_registration.emit_diagnostic(waited);
+                    }
                 }
             }
         }
     }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 impl WorkspaceExecutionWaitRegistration {
@@ -328,6 +483,27 @@ impl WorkspaceExecutionWaitRegistration {
         self.lock.trace().waiters.remove(&self.lease_id);
         self.active = false;
     }
+
+    fn emit_diagnostic(&mut self, waited: Duration) {
+        if self.diagnostic_active {
+            return;
+        }
+        let Some(reporter) = self.diagnostic_reporter.as_ref() else {
+            return;
+        };
+        self.diagnostic_active = true;
+        reporter(self.lock.diagnostic(true, self.mode, &self.owner, waited));
+    }
+
+    fn clear_diagnostic(&mut self, waited: Duration) {
+        if !self.diagnostic_active {
+            return;
+        }
+        self.diagnostic_active = false;
+        if let Some(reporter) = self.diagnostic_reporter.as_ref() {
+            reporter(self.lock.diagnostic(false, self.mode, &self.owner, waited));
+        }
+    }
 }
 
 impl Drop for WorkspaceExecutionWaitRegistration {
@@ -337,6 +513,7 @@ impl Drop for WorkspaceExecutionWaitRegistration {
         }
         self.lock.trace().waiters.remove(&self.lease_id);
         self.active = false;
+        self.clear_diagnostic(self.requested_at.elapsed());
         eprintln!(
             "[WorkspaceExecutionLock] abandoned lease={} mode={} wait_ms={} {} holders=({})",
             self.lease_id,
@@ -385,16 +562,52 @@ impl Drop for WorkspaceExecutionGuard {
     }
 }
 
-pub(crate) fn process_workspace_execution_lock() -> WorkspaceExecutionLock {
-    PROCESS_WORKSPACE_EXECUTION_LOCK.clone()
+fn normalize_workspace_key(workspace: &str) -> String {
+    let trimmed = workspace.trim();
+    if trimmed.is_empty() {
+        return "<default-workspace>".to_string();
+    }
+
+    let path = std::path::PathBuf::from(trimmed);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(&path))
+            .unwrap_or(path)
+    };
+    let resolved = dunce::canonicalize(&absolute).unwrap_or(absolute);
+    let mut key = dunce::simplified(&resolved)
+        .to_string_lossy()
+        .replace('\\', "/");
+    while key.len() > 1 && key.ends_with('/') {
+        key.pop();
+    }
+    #[cfg(windows)]
+    key.make_ascii_lowercase();
+    key
+}
+
+pub(crate) fn process_workspace_execution_lock(workspace: &str) -> WorkspaceExecutionLock {
+    let key = normalize_workspace_key(workspace);
+    let mut locks = PROCESS_WORKSPACE_EXECUTION_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks
+        .entry(key)
+        .or_insert_with(WorkspaceExecutionLock::new)
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkspaceExecutionLock, WorkspaceExecutionLockAcquireError, WorkspaceExecutionLockMode,
+        process_workspace_execution_lock, WorkspaceExecutionLock,
+        WorkspaceExecutionLockAcquireError, WorkspaceExecutionLockDiagnostic,
+        WorkspaceExecutionLockDiagnosticReporter, WorkspaceExecutionLockMode,
         WorkspaceExecutionLockOwner,
     };
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn owner(run_id: &str) -> WorkspaceExecutionLockOwner {
@@ -405,6 +618,64 @@ mod tests {
             workspace: "test-workspace".to_string(),
             tools: vec!["test".to_string()],
         }
+    }
+
+    #[tokio::test]
+    async fn process_registry_isolates_distinct_workspaces() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let workspace_a = root.path().join("workspace-a");
+        let workspace_b = root.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).expect("workspace a");
+        std::fs::create_dir_all(&workspace_b).expect("workspace b");
+        let workspace_a = workspace_a.to_string_lossy().to_string();
+        let workspace_b = workspace_b.to_string_lossy().to_string();
+
+        let lock_a = process_workspace_execution_lock(&workspace_a);
+        let same_workspace_lock = process_workspace_execution_lock(&workspace_a);
+        let lock_b = process_workspace_execution_lock(&workspace_b);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let writer = lock_a
+            .acquire(
+                WorkspaceExecutionLockMode::Write,
+                owner("workspace-a-writer"),
+                cancel_rx.clone(),
+            )
+            .await
+            .expect("workspace a writer");
+
+        let mut same_workspace_reader = tokio::spawn({
+            let cancel_rx = cancel_rx.clone();
+            async move {
+                same_workspace_lock
+                    .acquire(
+                        WorkspaceExecutionLockMode::Read,
+                        owner("workspace-a-reader"),
+                        cancel_rx,
+                    )
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut same_workspace_reader)
+                .await
+                .is_err()
+        );
+
+        let other_workspace_reader = tokio::time::timeout(
+            Duration::from_millis(100),
+            lock_b.acquire(
+                WorkspaceExecutionLockMode::Read,
+                owner("workspace-b-reader"),
+                cancel_rx,
+            ),
+        )
+        .await
+        .expect("different workspace must not block")
+        .expect("workspace b reader");
+        drop(other_workspace_reader);
+        drop(writer);
+        same_workspace_reader.abort();
+        let _ = same_workspace_reader.await;
     }
 
     #[tokio::test]
@@ -519,5 +790,90 @@ mod tests {
 
         assert!(lock.holder_summary().contains("waiters=none"));
         drop(holder);
+    }
+
+    #[tokio::test]
+    async fn long_wait_emits_one_active_diagnostic_and_clears_after_acquire() {
+        let lock = WorkspaceExecutionLock::new_with_timings(
+            Duration::from_millis(5),
+            Duration::from_millis(15),
+        );
+        let (_holder_cancel_tx, holder_cancel) = tokio::sync::watch::channel(false);
+        let holder = lock
+            .acquire(
+                WorkspaceExecutionLockMode::Write,
+                owner("holder"),
+                holder_cancel,
+            )
+            .await
+            .expect("holder");
+
+        let reports = Arc::new(Mutex::new(Vec::<WorkspaceExecutionLockDiagnostic>::new()));
+        let report_sink = reports.clone();
+        let reporter: WorkspaceExecutionLockDiagnosticReporter = Arc::new(move |diagnostic| {
+            report_sink
+                .lock()
+                .expect("diagnostic reports")
+                .push(diagnostic);
+        });
+        let (_waiter_cancel_tx, waiter_cancel) = tokio::sync::watch::channel(false);
+        let waiting_lock = lock.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiting_lock
+                .acquire_with_reporter(
+                    WorkspaceExecutionLockMode::Write,
+                    owner("waiting"),
+                    waiter_cancel,
+                    reporter,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if reports
+                    .lock()
+                    .expect("diagnostic reports")
+                    .iter()
+                    .any(|diagnostic| diagnostic.active)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("active diagnostic");
+
+        {
+            let reports = reports.lock().expect("diagnostic reports");
+            let active = reports
+                .iter()
+                .filter(|diagnostic| diagnostic.active)
+                .collect::<Vec<_>>();
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0].session_id, "session-test");
+            assert_eq!(active[0].run_id, "waiting");
+            assert_eq!(active[0].mode, "write");
+            assert_eq!(active[0].blockers.len(), 1);
+            assert_eq!(active[0].blockers[0].run_id, "holder");
+        }
+
+        drop(holder);
+        let waiting_guard = tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+            .await
+            .expect("waiter should acquire")
+            .expect("waiter task")
+            .expect("waiter guard");
+        drop(waiting_guard);
+
+        let reports = reports.lock().expect("diagnostic reports");
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|diagnostic| !diagnostic.active)
+                .count(),
+            1
+        );
     }
 }

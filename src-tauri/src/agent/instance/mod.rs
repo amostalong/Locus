@@ -495,6 +495,36 @@ impl Drop for SubagentSlotGuard {
     }
 }
 
+/// A spawned subagent must stop with the parent tool future. Tokio detaches a
+/// task when its plain `JoinHandle` is dropped, so keep the handle behind an
+/// abort-on-drop future while the parent awaits it.
+struct AbortOnDropTask<T> {
+    handle: tokio::task::JoinHandle<T>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+}
+
+impl<T> std::future::Future for AbortOnDropTask<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.get_mut().handle).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 struct ParentStreamEvent {
     run_id: String,
     event: StreamEvent,
@@ -817,7 +847,7 @@ pub(crate) struct ExecutedToolResult {
     images: Option<Vec<ImageData>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CompletedToolResult {
     executed: ExecutedToolResult,
     stored_output: String,
@@ -3819,6 +3849,8 @@ impl AgentInstance {
             runtime_state: Some(self.tool_runtime_state.clone()),
             cancel_rx: Some(self.cancel_waiter()),
             progress: None,
+            output: None,
+            background: false,
         }
     }
 
@@ -10547,18 +10579,15 @@ impl AgentInstance {
                         .unwrap_or_else(|| tc.name.clone())
                 };
 
-                // Calls that can wait for user input, run child agents, or re-enter
-                // through an external MCP server never share a round-level workspace
-                // lock with local mutating tools. Deterministic query/bookkeeping tools
-                // may finish in a parallel pre-ask phase; the lock is released before
-                // the first user-input tool starts waiting.
+                // Calls that can wait for user input or re-enter through an external
+                // MCP server never share a round-level workspace lock with local
+                // mutating tools. Foreground subagents run in a lock-free first phase;
+                // local siblings execute after every child completes. Deterministic
+                // query/bookkeeping tools may finish in a parallel pre-ask phase.
                 let mut blocked_results: HashMap<String, ExecutedToolResult> = HashMap::new();
                 let has_ask = prepared
                     .iter()
                     .any(|(tc, _)| effective_name(tc) == "ask_user_question");
-                let has_subagent = prepared
-                    .iter()
-                    .any(|(tc, _)| effective_name(tc) == "subagent");
                 let has_external_mcp = prepared.iter().any(|(tc, _)| {
                     effective_name(tc).starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
                 });
@@ -10573,12 +10602,6 @@ impl AgentInstance {
                         "ask_user_question",
                         "user-input rounds only allow deterministic pre-ask tools",
                     ))
-                } else if has_subagent
-                    && prepared
-                        .iter()
-                        .any(|(tc, _)| effective_name(tc) != "subagent")
-                {
-                    Some(("subagent", "sub-agent calls must run without local sibling tools"))
                 } else if has_external_mcp
                     && prepared.iter().any(|(tc, _)| {
                         !effective_name(tc).starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
@@ -10599,7 +10622,6 @@ impl AgentInstance {
                                 name == "ask_user_question"
                                     || Self::is_deterministic_pre_ask_tool(&name)
                             }
-                            "subagent" => name == "subagent",
                             _ => name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX),
                         };
                         if allowed {
@@ -10623,38 +10645,135 @@ impl AgentInstance {
                     }
                 }
 
-                let is_local_active_round = prepared.iter().any(|(tc, _)| {
-                    if blocked_results.contains_key(&tc.id) {
+                let has_foreground_subagent_phase = prepared.iter().any(|(tc, args)| {
+                    !blocked_results.contains_key(&tc.id)
+                        && effective_name(tc) == "subagent"
+                        && !self.tool_call_runs_in_background(&effective_name(tc), args)
+                }) && prepared.iter().any(|(tc, _)| {
+                    !blocked_results.contains_key(&tc.id) && effective_name(tc) != "subagent"
+                });
+                let mut precompleted_results: HashMap<String, CompletedToolResult> = HashMap::new();
+                if has_foreground_subagent_phase {
+                    eprintln!(
+                        "[Agent {}] executing foreground subagent phase before local siblings session={} run={}",
+                        self.id, self.session_id, run_id
+                    );
+                    let mode_ref = mode.as_str();
+                    let run_id_ref = run_id.as_str();
+                    let assistant_msg_id_ref = assistant_msg_id.as_str();
+                    let active_skill_tool_names_ref = &active_skill_tool_names;
+                    let agent = &*self;
+                    let mut pending = futures::stream::FuturesUnordered::new();
+                    for (index, (tc, args)) in prepared.iter().enumerate() {
+                        if blocked_results.contains_key(&tc.id)
+                            || effective_name(tc) != "subagent"
+                            || self.tool_call_runs_in_background(&effective_name(tc), args)
+                        {
+                            continue;
+                        }
+                        pending.push(async move {
+                            let result = agent
+                                .execute_single_tool(
+                                    app_handle,
+                                    store,
+                                    tc,
+                                    args,
+                                    run_id_ref,
+                                    assistant_msg_id_ref,
+                                    mode_ref,
+                                    active_skill_tool_names_ref,
+                                    false,
+                                )
+                                .await;
+                            (index, result)
+                        });
+                    }
+
+                    while let Some((index, result)) = pending.next().await {
+                        let (tc, args) = &prepared[index];
+                        if !self.run_is_current_for_session(
+                            store,
+                            &run_id,
+                            "subagent_phase_result_completed",
+                            Some(&tc.id),
+                        ) {
+                            return Ok(String::new());
+                        }
+                        let resolved_tool_name = effective_name(tc);
+                        self.record_failed_tool_call(
+                            app_handle,
+                            &run_id,
+                            &assistant_msg_id,
+                            tc,
+                            &resolved_tool_name,
+                            args,
+                            &result,
+                            "foreground_subagent_phase",
+                        )
+                        .await;
+                        let stored_output = self.stream_completed_tool_result(
+                            app_handle,
+                            store,
+                            &run_id,
+                            tc,
+                            &result,
+                        );
+                        precompleted_results.insert(
+                            tc.id.clone(),
+                            CompletedToolResult {
+                                executed: result,
+                                stored_output,
+                            },
+                        );
+                    }
+                    if self.is_cancel_requested() {
+                        self.clear_pending_knowledge_proposal(app_handle).await;
+                        self.emit_cancelled(
+                            app_handle,
+                            store,
+                            &run_id,
+                            (iteration == 1 && !assistant_round_persisted)
+                                .then_some(&current_user_message),
+                        );
+                        return Ok(String::new());
+                    }
+                }
+
+                let has_pending_local_calls = prepared.iter().any(|(tc, _)| {
+                    if blocked_results.contains_key(&tc.id)
+                        || precompleted_results.contains_key(&tc.id)
+                    {
                         return false;
                     }
                     let name = effective_name(tc);
                     name != "subagent"
                         && name != "ask_user_question"
                         && !name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
-                }) && prepared
-                    .iter()
-                    .filter(|(tc, _)| !blocked_results.contains_key(&tc.id))
-                    .all(|(tc, _)| {
-                        let name = effective_name(tc);
-                        name != "subagent"
-                            && !name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
-                    });
+                });
 
-                // Confirm every local call before taking the process-wide lock.
+                // Confirm every local call before taking the workspace lock.
                 // A confirmation dialog can remain open indefinitely; holding a
                 // read/write guard while waiting would stall every other agent.
                 let mut confirmation_preapproved: HashSet<String> = HashSet::new();
-                if is_local_active_round {
+                if has_pending_local_calls {
                     for (tc, args) in &prepared {
                         if blocked_results.contains_key(&tc.id)
+                            || precompleted_results.contains_key(&tc.id)
                             || args.get("__parse_error").is_some()
                         {
                             continue;
                         }
+                        let effective_tool_name = effective_name(tc);
+                        if effective_tool_name == "subagent"
+                            || effective_tool_name == "ask_user_question"
+                            || effective_tool_name
+                                .starts_with(crate::mcp::manager::MCP_TOOL_PREFIX)
+                        {
+                            continue;
+                        }
                         if matches!(
-                            effective_name(tc).as_str(),
-                            "ask_user_question"
-                                | "tool_load"
+                            effective_tool_name.as_str(),
+                            "tool_load"
                                 | CODEX_TOOL_SEARCH_TOOL_NAME
                                 | "exit_plan_mode"
                         ) {
@@ -10685,7 +10804,10 @@ impl AgentInstance {
                     }
                 }
 
-                let is_active = |tc: &ToolCallInfo| !blocked_results.contains_key(&tc.id);
+                let is_active = |tc: &ToolCallInfo| {
+                    !blocked_results.contains_key(&tc.id)
+                        && !precompleted_results.contains_key(&tc.id)
+                };
                 let needs_undo = prepared.iter().any(|(tc, args)| {
                     is_active(tc)
                         && !self.tool_call_runs_in_background(&effective_name(tc), args)
@@ -10721,8 +10843,11 @@ impl AgentInstance {
                 let execute_sequentially = workspace_lock_mode
                     == Some(WorkspaceExecutionLockMode::Write)
                     || has_ask;
-                let blocked_tool_call_ids: HashSet<String> =
-                    blocked_results.keys().cloned().collect();
+                let blocked_tool_call_ids: HashSet<String> = blocked_results
+                    .keys()
+                    .chain(precompleted_results.keys())
+                    .cloned()
+                    .collect();
                 let parallel_edit_batches = if execute_sequentially && !has_ask {
                     Self::plan_parallel_edit_batches(&prepared, &blocked_tool_call_ids)
                 } else {
@@ -10734,7 +10859,9 @@ impl AgentInstance {
                     self.session_id,
                     run_id,
                     iteration,
-                    if parallel_edit_batches.is_some() {
+                    if has_foreground_subagent_phase {
+                        "subagent-then-local"
+                    } else if parallel_edit_batches.is_some() {
                         "parallel-edit-batches"
                     } else if execute_sequentially {
                         "sequential"
@@ -10769,8 +10896,13 @@ impl AgentInstance {
                                 .map(|(tc, _)| effective_name(tc).to_string())
                                 .collect(),
                         };
-                        match process_workspace_execution_lock()
-                            .acquire(lock_mode, owner, self.cancel_waiter())
+                        match process_workspace_execution_lock(&self.working_dir)
+                            .acquire_with_diagnostics(
+                                lock_mode,
+                                owner,
+                                self.cancel_waiter(),
+                                app_handle,
+                            )
                             .await
                         {
                             Ok(guard) => Some(guard),
@@ -10883,6 +11015,11 @@ impl AgentInstance {
                         std::iter::repeat_with(|| None)
                             .take(prepared.len())
                             .collect();
+                    for (index, (tc, _)) in prepared.iter().enumerate() {
+                        if let Some(completed) = precompleted_results.get(&tc.id) {
+                            results_by_index[index] = Some(completed.clone());
+                        }
+                    }
                     while let Some((index, result)) = pending.next().await {
                         let (tc, args) = &prepared[index];
                         if !self.run_is_current_for_session(
@@ -11028,7 +11165,15 @@ impl AgentInstance {
                         std::iter::repeat_with(|| None)
                             .take(prepared.len())
                             .collect();
+                    for (index, (tool_call, _)) in prepared.iter().enumerate() {
+                        if let Some(completed) = precompleted_results.get(&tool_call.id) {
+                            results_by_index[index] = Some(completed.clone());
+                        }
+                    }
                     for (index, (tool_call, args)) in prepared.iter().enumerate() {
+                        if results_by_index[index].is_some() {
+                            continue;
+                        }
                         let Some(result) = blocked_results.get(&tool_call.id).cloned() else {
                             continue;
                         };
@@ -11129,6 +11274,10 @@ impl AgentInstance {
                     let mut results = Vec::with_capacity(prepared.len());
                     let mut queued_asset_paths: Vec<String> = Vec::new();
                     for (tc, args) in &prepared {
+                        if let Some(completed) = precompleted_results.get(&tc.id) {
+                            results.push(completed.clone());
+                            continue;
+                        }
                         let result = if let Some(result) = blocked_results.get(&tc.id) {
                             result.clone()
                         } else {
@@ -11222,6 +11371,9 @@ impl AgentInstance {
                     let agent = &*self;
                     let mut pending = futures::stream::FuturesUnordered::new();
                     for (index, (tc, args)) in prepared.iter().enumerate() {
+                        if precompleted_results.contains_key(&tc.id) {
+                            continue;
+                        }
                         let blocked_result = blocked_results.get(&tc.id).cloned();
                         let confirmation_preapproved =
                             confirmation_preapproved.contains(&tc.id);
@@ -11251,6 +11403,11 @@ impl AgentInstance {
                         std::iter::repeat_with(|| None)
                             .take(prepared.len())
                             .collect();
+                    for (index, (tc, _)) in prepared.iter().enumerate() {
+                        if let Some(completed) = precompleted_results.get(&tc.id) {
+                            results_by_index[index] = Some(completed.clone());
+                        }
+                    }
                     while let Some((index, result)) = pending.next().await {
                         let (tc, _) = &prepared[index];
                         if !self.run_is_current_for_session(
@@ -12870,6 +13027,44 @@ impl AgentInstance {
         let mutates_workspace = self.tool_registry.mutates_workspace(&tool_name);
         let executor = self.clone_for_background_task(started.cancel_rx.clone());
 
+        let initial_manager = manager.clone();
+        let initial_task_id = task_id.clone();
+        let initial_handle = app_handle.clone();
+        let initial_store = store.clone();
+        let initial_message_id = assistant_message_id.clone();
+        let initial_tool_call_id = tool_call_id.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Some(snapshot) = initial_manager.snapshot(&initial_task_id) {
+                crate::async_tasks::emit_task_updated(
+                    &initial_handle,
+                    &initial_message_id,
+                    &initial_tool_call_id,
+                    &snapshot,
+                );
+                let outcome = match snapshot.status {
+                    crate::async_tasks::AsyncTaskStatus::Completed => {
+                        Some(crate::commands::ToolCallOutcome::Done)
+                    }
+                    crate::async_tasks::AsyncTaskStatus::Failed => {
+                        Some(crate::commands::ToolCallOutcome::Error)
+                    }
+                    crate::async_tasks::AsyncTaskStatus::Cancelled => {
+                        Some(crate::commands::ToolCallOutcome::Interrupted)
+                    }
+                    _ => None,
+                };
+                if let Some(outcome) = outcome {
+                    let _ = initial_store.update_background_tool_display(
+                        &initial_message_id,
+                        &initial_tool_call_id,
+                        snapshot.output.as_deref().unwrap_or_default(),
+                        outcome,
+                    );
+                }
+            }
+        });
+
         tauri::async_runtime::spawn(async move {
             let mut run_guard = manager.run_guard(&task_id);
             manager.mark_running(&task_id, format!("Running {}", tool_name));
@@ -12889,13 +13084,26 @@ impl AgentInstance {
                 } else {
                     WorkspaceExecutionLockMode::Read
                 };
-                match process_workspace_execution_lock()
-                    .acquire(mode, owner, cancel_rx.clone())
+                match process_workspace_execution_lock(&working_dir)
+                    .acquire_with_diagnostics(mode, owner, cancel_rx.clone(), &app_handle)
                     .await
                 {
                     Ok(guard) => Some(guard),
                     Err(_) => {
-                        manager.mark_cancelled(&task_id);
+                        if let Some(snapshot) = manager.mark_cancelled(&task_id) {
+                            crate::async_tasks::emit_task_updated(
+                                &app_handle,
+                                &assistant_message_id,
+                                &tool_call_id,
+                                &snapshot,
+                            );
+                            let _ = store.update_background_tool_display(
+                                &assistant_message_id,
+                                &tool_call_id,
+                                snapshot.output.as_deref().unwrap_or("Task cancelled."),
+                                crate::commands::ToolCallOutcome::Interrupted,
+                            );
+                        }
                         run_guard.complete();
                         return;
                     }
@@ -12920,6 +13128,21 @@ impl AgentInstance {
             let progress: crate::async_tasks::TaskProgressReporter = Arc::new(move |text| {
                 progress_manager.report_progress(&progress_task_id, text);
             });
+            let output_manager = manager.clone();
+            let output_task_id = task_id.clone();
+            let output_handle = app_handle.clone();
+            let output_message_id = assistant_message_id.clone();
+            let output_tool_call_id = tool_call_id.clone();
+            let output: crate::async_tasks::TaskOutputReporter = Arc::new(move |chunk| {
+                if let Some(snapshot) = output_manager.append_output(&output_task_id, &chunk) {
+                    crate::async_tasks::emit_task_updated(
+                        &output_handle,
+                        &output_message_id,
+                        &output_tool_call_id,
+                        &snapshot,
+                    );
+                }
+            });
             let result = if tool_name == "subagent" {
                 tokio::select! {
                     result = executor.execute_subagent(&app_handle, &store, &args, &tool_call_id, &run_id) => result,
@@ -12941,6 +13164,8 @@ impl AgentInstance {
                     .await;
                 context.cancel_rx = Some(cancel_rx.clone());
                 context.progress = Some(progress);
+                context.output = Some(output);
+                context.background = true;
                 ExecutedToolResult::from_tool_result(
                     executor
                         .tool_registry
@@ -12972,7 +13197,20 @@ impl AgentInstance {
             }
 
             if was_cancelled {
-                manager.mark_cancelled(&task_id);
+                if let Some(snapshot) = manager.mark_cancelled(&task_id) {
+                    crate::async_tasks::emit_task_updated(
+                        &app_handle,
+                        &assistant_message_id,
+                        &tool_call_id,
+                        &snapshot,
+                    );
+                    let _ = store.update_background_tool_display(
+                        &assistant_message_id,
+                        &tool_call_id,
+                        snapshot.output.as_deref().unwrap_or("Task cancelled."),
+                        crate::commands::ToolCallOutcome::Interrupted,
+                    );
+                }
                 run_guard.complete();
                 return;
             }
@@ -12990,7 +13228,29 @@ impl AgentInstance {
                 )
                 .await;
             let result = result.into_tool_result();
-            manager.finish(&task_id, &result);
+            if let Some(snapshot) = manager.finish(&task_id, &result) {
+                crate::async_tasks::emit_task_updated(
+                    &app_handle,
+                    &assistant_message_id,
+                    &tool_call_id,
+                    &snapshot,
+                );
+                if let Err(error) = store.update_background_tool_display(
+                    &assistant_message_id,
+                    &tool_call_id,
+                    snapshot.output.as_deref().unwrap_or_default(),
+                    if result.is_error {
+                        crate::commands::ToolCallOutcome::Error
+                    } else {
+                        crate::commands::ToolCallOutcome::Done
+                    },
+                ) {
+                    eprintln!(
+                        "[Agent async] failed to persist final output for tool call {}: {}",
+                        tool_call_id, error
+                    );
+                }
+            }
             run_guard.complete();
         });
 
@@ -18148,10 +18408,33 @@ impl AgentInstance {
             child.mark_plan_readonly_subagent();
         }
 
-        match child
-            .run(app_handle, store, prompt, None, None, "build", None)
+        // Poll the child's full agent loop as its own Tokio task. `run_with_run_id`
+        // is intentionally a large async state machine; directly awaiting it here
+        // stacks the parent tool loop, execute_single_tool and child LLM loop on
+        // one worker stack. Moving the already-built child transfers all large
+        // state without cloning it. Only the prompt needs one owned copy for the
+        // task's `'static` lifetime; registries and stores remain shared handles.
+        let child_app_handle = app_handle.clone();
+        let child_store = app_handle.state::<Arc<SessionStore>>().inner().clone();
+        let child_prompt = prompt.to_owned();
+        let child_task = AbortOnDropTask::new(tokio::spawn(async move {
+            child
+                .run(
+                    &child_app_handle,
+                    child_store.as_ref(),
+                    &child_prompt,
+                    None,
+                    None,
+                    "build",
+                    None,
+                )
+                .await
+        }));
+        let child_result = child_task
             .await
-        {
+            .map_err(|error| format!("Subagent task failed to join: {}", error))?;
+
+        match child_result {
             Ok(result_text) => {
                 eprintln!(
                     "[Agent {}] subagent '{}' completed, output_len={}",
@@ -18441,7 +18724,7 @@ mod tests {
         assess_knowledge_tool_confirmation, assess_knowledge_tool_confirmation_decision,
         build_l2_full_document_section, build_l3_rule_section, build_prompt_tree,
         build_structure_section, compact_trigger, finalize_tool_call_record, render_tree_lines,
-        utf8_prefix_chars, AgentInstance, AgentKnowledgeDocumentContent,
+        utf8_prefix_chars, AbortOnDropTask, AgentInstance, AgentKnowledgeDocumentContent,
         AgentKnowledgeDocumentContentPatch, AgentKnowledgeListItem, AgentKnowledgeMutationResponse,
         AgentKnowledgeReadResponse, AgentKnowledgeSearchHit, ChatMessage, ExecutedToolResult,
         InjectedPromptItem, KnowledgeAccessMode, KnowledgeFocusDoc, LazyToolRenderer,
@@ -18467,6 +18750,35 @@ mod tests {
         sync::Arc,
     };
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn abort_on_drop_task_cancels_detached_subagent_work() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = AbortOnDropTask::new(tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        }));
+
+        started_rx.await.expect("spawned task should start");
+        drop(task);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("aborted task should be dropped promptly")
+            .expect("drop signal should be delivered");
+    }
 
     #[test]
     fn utf8_prefix_chars_handles_unicode_tool_arguments() {

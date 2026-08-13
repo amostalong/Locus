@@ -1,6 +1,6 @@
 import type { AssistantRenderPart, ChatMessage, ImageAttachment, ToolCallDisplay, ToolCallInfo } from "../types";
 
-const INTERRUPTED_TOOL_RESULT = "工具执行被用户中止，未返回结果。";
+export const INTERRUPTED_TOOL_RESULT = "工具执行被用户中止，未返回结果。";
 const GENERIC_ARGUMENT_ALIAS_GROUPS: Array<readonly [string, readonly string[]]> = [
   ["filePath", ["filePath", "file_path"]],
   ["oldString", ["oldString", "old_string"]],
@@ -647,6 +647,14 @@ function inferToolCallStatus(
 ): ToolCallDisplay["status"] {
   if (toolCall.outcome) {
     return toolCall.outcome;
+  }
+  try {
+    const args = JSON.parse(toolCall.arguments) as { async?: unknown };
+    if (args.async === "async" || args.async === "notify" || args.async === "async_notify") {
+      return "running";
+    }
+  } catch {
+    // Malformed historical arguments keep the regular completed fallback.
   }
   if (output === INTERRUPTED_TOOL_RESULT) {
     return "interrupted";

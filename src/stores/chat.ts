@@ -9,6 +9,7 @@ import { getToolPermissionMode, saveToolPermissionMode } from "../services/permi
 import * as sessionService from "../services/session";
 import * as undoService from "../services/undo";
 import {
+  buildInterruptedTrailingToolResultMessages,
   buildToolResultMessages,
   isMatchingPendingUserMessage,
   isPendingUserMessageId,
@@ -20,6 +21,10 @@ import { resolveToolCallDisplayShape } from "../composables/toolCallBatches";
 import { StreamingTextChunks } from "../composables/streamingTextChunks";
 import { useThrottledStreamingText } from "../composables/streamingRenderThrottle";
 import { hydrateChatMessagesIntent, withClientMessageId } from "../composables/chatInputIntents";
+import {
+  applyAsyncTaskUpdateToMessages,
+  asyncTaskDisplayStatus,
+} from "../composables/asyncTaskUpdates";
 import { buildUserMessageDraft } from "../composables/chatMessageDraft";
 import type { SessionScrollState } from "../composables/chatScrollState";
 import { t } from "../i18n";
@@ -43,6 +48,7 @@ import type {
   AssistantRenderPart,
   PendingSessionInput,
   EffortLevel,
+  AsyncTaskUpdatedEvent,
 } from "../types";
 
 type ToolPermissionMode = "auto" | "ask";
@@ -2289,6 +2295,21 @@ export const useChatStore = defineStore("chat", () => {
     });
   }
 
+  function applyAsyncTaskUpdate(update: AsyncTaskUpdatedEvent) {
+    if (update.sessionId !== activeSessionId.value) return;
+
+    const displayStatus = asyncTaskDisplayStatus(update.status);
+
+    const activeToolCall = activeToolCalls.value.find((item) => item.id === update.toolCallId);
+    if (activeToolCall) {
+      activeToolCall.status = displayStatus;
+      activeToolCall.output = update.output;
+      if (displayStatus !== "running") activeToolCall.progress = null;
+    }
+
+    messages.value = applyAsyncTaskUpdateToMessages(messages.value, update);
+  }
+
   async function syncActiveSessionSelection(sessionId: string | null | undefined) {
     const normalizedSessionId = sessionId?.trim() || null;
     if (normalizedSessionId === activeSessionId.value) {
@@ -2730,7 +2751,16 @@ export const useChatStore = defineStore("chat", () => {
       thinkingSignature: userIntentSignature,
       intentMeta: userIntent,
     };
-    messages.value.push(pendingUserMessage);
+    const interruptedToolResultMessages = buildInterruptedTrailingToolResultMessages(messages.value);
+    if (interruptedToolResultMessages.length > 0) {
+      let next = messages.value;
+      for (const message of interruptedToolResultMessages) {
+        next = replaceMessageById(next, message);
+      }
+      messages.value = [...next, pendingUserMessage];
+    } else {
+      messages.value.push(pendingUserMessage);
+    }
     resetStreamRuntimeState();
     isStreaming.value = true;
 
@@ -2828,7 +2858,12 @@ export const useChatStore = defineStore("chat", () => {
       });
       isStreaming.value = false;
       resetStreamAnim();
-      messages.value = messages.value.filter((message) => message.id !== pendingMessageId);
+      const interruptedToolResultIds = new Set(
+        interruptedToolResultMessages.map((message) => message.id),
+      );
+      messages.value = messages.value.filter((message) => (
+        message.id !== pendingMessageId && !interruptedToolResultIds.has(message.id)
+      ));
       restoreDraftFromFailedUserMessage(pendingUserMessage, {
         sessionId: requestSessionId,
         requireEmptyComposer: true,
@@ -2863,6 +2898,7 @@ export const useChatStore = defineStore("chat", () => {
     managedStreamingSessionIds.add(sessionId);
 
     const model = modelStore.selectedModelId || null;
+    const interruptedToolResultMessages = buildInterruptedTrailingToolResultMessages(messages.value);
     logChatStreamDebug("resume interrupted request start", {
       sessionId,
       model,
@@ -2887,6 +2923,14 @@ export const useChatStore = defineStore("chat", () => {
           : null,
         knowledgeMode: knowledgeAccessState.mode,
       });
+      // Fork: no global applySessionModel here (per-session override design).
+      if (activeSessionId.value === sid && interruptedToolResultMessages.length > 0) {
+        let next = messages.value;
+        for (const message of interruptedToolResultMessages) {
+          next = replaceMessageById(next, message);
+        }
+        messages.value = next;
+      }
       setSessionResumeAvailable(sid, false);
       streamingSessionIds.value.add(sid);
       sessionRunIds.value.set(sid, runId);
@@ -3456,6 +3500,7 @@ export const useChatStore = defineStore("chat", () => {
     syncActiveSessionSelection,
     setActiveSessionSelectionPersistence,
     applyActiveSessionExecutionState,
+    applyAsyncTaskUpdate,
     newChat,
     resetWorkspaceScope,
     openThinkingPanel,
