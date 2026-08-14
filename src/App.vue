@@ -25,6 +25,7 @@ import { useChatStore } from "./stores/chat";
 import { useNotificationStore } from "./stores/notification";
 import { useAppUpdateStore } from "./stores/appUpdate";
 import { useAppBootstrap } from "./composables/useAppBootstrap";
+import { useFrontendHeartbeat } from "./composables/useFrontendHeartbeat";
 import { useUnityAssetDropTarget } from "./composables/useUnityAssetDropTarget";
 import { knowledgeGetEmbeddingStatus } from "./services/knowledge";
 import { APP_CLOSE_REQUESTED_EVENT, requestAppExit } from "./services/system";
@@ -204,6 +205,10 @@ const diffOverlay = provideDiffOverlay();
 const locusAssetInspectorPanel = useLocusAssetInspectorPanel();
 setLocusAssetInspectorPanelHostAvailable(!isStandaloneWindow);
 const { bootstrapCritical, bootstrapDeferred, preloadTabsInBackground, registerListeners, cleanup, applyWorkingDir, applyWorkspacePath, refreshAfterSettings, onOnboardingCompleted } = useAppBootstrap();
+
+// Frontend liveness heartbeat → backend watchdog (frontend_watchdog.rs).
+// Logs the last known frontend state when the WebView main thread freezes.
+useFrontendHeartbeat();
 const {
   handleUnityAssetDrag: handleMainUnityAssetDrag,
   handleUnityAssetDrop: handleMainUnityAssetDrop,

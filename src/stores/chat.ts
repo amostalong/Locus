@@ -334,6 +334,14 @@ function logChatStreamDebug(message: string, detail?: Record<string, unknown>) {
   console.info(`[chat-stream] ${message}`, detail ?? {});
 }
 
+/**
+ * Module-level stream-event trace for the frontend heartbeat watchdog.
+ * Plain mutable object (non-reactive on purpose): updated on every stream
+ * event so the backend can log "what was being processed" when the UI
+ * froze. See composables/useFrontendHeartbeat.ts.
+ */
+export const lastStreamEventTrace = { type: "", at: 0, count: 0 };
+
 export const useChatStore = defineStore("chat", () => {
   // -- State --
   const sessions = ref<SessionSummary[]>([]);
@@ -1820,6 +1828,9 @@ export const useChatStore = defineStore("chat", () => {
 
   // -- Stream event handler --
   function handleStreamEvent(event: StreamEvent): boolean {
+    lastStreamEventTrace.type = event.type;
+    lastStreamEventTrace.at = Date.now();
+    lastStreamEventTrace.count += 1;
     traceStoreOrder("streamEventReceived", () => ({
       event: traceStreamEvent(event),
       expectedRunId: sessionRunIds.value.get(event.sessionId)

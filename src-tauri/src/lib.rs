@@ -38,6 +38,7 @@ pub mod error;
 pub mod extra_workdirs;
 mod feishu_docs;
 pub mod file_log;
+mod frontend_watchdog;
 pub mod keychain;
 pub mod knowledge_index;
 pub mod knowledge_source_registry;
@@ -1149,6 +1150,10 @@ pub fn run() {
 
             tauri::async_runtime::spawn(model_catalog::background_refresh());
 
+            // Frontend liveness watchdog: logs from the backend when the
+            // WebView main thread stops sending heartbeats (frozen UI).
+            frontend_watchdog::spawn_monitor();
+
             // Connect enabled MCP servers in the background; the agent tool
             // snapshot stays empty until this (or a later mcp_reload /
             // settings write) completes, so startup is never blocked on an
@@ -1224,6 +1229,7 @@ pub fn run() {
             commands::fork_session,
             commands::fork_session_from_message,
             commands::chat,
+            frontend_watchdog::frontend_heartbeat,
             commands::queue_chat_input,
             commands::insert_pending_chat_input,
             commands::delete_pending_chat_input,
