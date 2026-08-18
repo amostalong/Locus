@@ -403,50 +403,22 @@ impl<'a> ClaudeCodeRoundHost<'a> {
         Ok(request.map(|request| (request, tools)))
     }
 
-    async fn ensure_cli_foreground_subagent_phase(&mut self) {
-        let (tool_calls, assistant_message_id) = match self.pending_round.as_ref() {
-            Some(round) if !round.subagent_phase_prepared => {
-                (round.tool_calls.clone(), round.message_id.clone())
-            }
-            _ => return,
-        };
-
-        let mut prepared = Vec::new();
-        let mut has_local_sibling = false;
-        let mut has_ask = false;
-        let mut has_external_mcp = false;
-        for tool_call in &tool_calls {
-            let mut args = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
-                .unwrap_or_else(|_| serde_json::json!({}));
-            normalize_tool_args(&mut args);
-            self.agent.inject_working_dir(&tool_call.name, &mut args);
-            let effective_name = self
-                .agent
-                .effective_tool_name_for_round(&tool_call.name, &args);
-            has_ask |= effective_name == "ask_user_question";
-            has_external_mcp |= effective_name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX);
-            has_local_sibling |= effective_name != "subagent"
-                && effective_name != "ask_user_question"
-                && !effective_name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX);
-            if effective_name == "subagent"
-                && !self
-                    .agent
-                    .tool_call_runs_in_background(&effective_name, &args)
-            {
-                prepared.push((tool_call.clone(), args));
-            }
-        }
-
-        if let Some(round) = self.pending_round.as_mut() {
-            round.subagent_phase_prepared = true;
-        }
-        if prepared.is_empty() || !has_local_sibling || has_ask || has_external_mcp {
+    async fn precomplete_cli_tool_calls(
+        &mut self,
+        prepared: Vec<(ToolCallInfo, serde_json::Value)>,
+        assistant_message_id: &str,
+        phase: &str,
+    ) {
+        if prepared.is_empty() {
             return;
         }
-
         eprintln!(
-            "[Agent {}] Claude Code executing foreground subagent phase before local siblings session={} run={}",
-            self.agent.id, self.agent.session_id, self.run_id
+            "[Agent {}] Claude Code executing {} session={} run={} calls={}",
+            self.agent.id,
+            phase,
+            self.agent.session_id,
+            self.run_id,
+            prepared.len()
         );
         let mut pending = futures::stream::FuturesUnordered::new();
         for (tool_call, args) in prepared {
@@ -456,7 +428,6 @@ impl<'a> ClaudeCodeRoundHost<'a> {
             let run_id = self.run_id;
             let mode = self.mode;
             let active_skill_tool_names = self.active_skill_tool_names;
-            let assistant_message_id = assistant_message_id.as_str();
             pending.push(async move {
                 let result = agent
                     .execute_single_tool(
@@ -481,6 +452,78 @@ impl<'a> ClaudeCodeRoundHost<'a> {
         }
         if let Some(round) = self.pending_round.as_mut() {
             round.precompleted_subagent_results.extend(completed);
+        }
+    }
+
+    async fn ensure_cli_foreground_subagent_phase(&mut self) {
+        let (tool_calls, assistant_message_id) = match self.pending_round.as_ref() {
+            Some(round) if !round.subagent_phase_prepared => {
+                (round.tool_calls.clone(), round.message_id.clone())
+            }
+            _ => return,
+        };
+
+        let mut writable_subagents = Vec::new();
+        let mut readonly_subagents = Vec::new();
+        let mut readonly_local_siblings = Vec::new();
+        let mut has_local_sibling = false;
+        let mut has_ask = false;
+        let mut has_external_mcp = false;
+        for tool_call in &tool_calls {
+            let mut args = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            normalize_tool_args(&mut args);
+            self.agent.inject_working_dir(&tool_call.name, &mut args);
+            let effective_name = self
+                .agent
+                .effective_tool_name_for_round(&tool_call.name, &args);
+            has_ask |= effective_name == "ask_user_question";
+            has_external_mcp |= effective_name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX);
+            has_local_sibling |= effective_name != "subagent"
+                && effective_name != "ask_user_question"
+                && !effective_name.starts_with(crate::mcp::manager::MCP_TOOL_PREFIX);
+            if effective_name == "subagent"
+                && !self
+                    .agent
+                    .tool_call_runs_in_background(&effective_name, &args)
+            {
+                if self
+                    .agent
+                    .subagent_call_is_workspace_readonly(&tool_call.name, &args)
+                {
+                    readonly_subagents.push((tool_call.clone(), args));
+                } else {
+                    writable_subagents.push((tool_call.clone(), args));
+                }
+            } else if AgentInstance::is_deterministic_pre_ask_tool(&effective_name) {
+                readonly_local_siblings.push((tool_call.clone(), args));
+            }
+        }
+
+        if let Some(round) = self.pending_round.as_mut() {
+            round.subagent_phase_prepared = true;
+        }
+        if has_ask || has_external_mcp {
+            return;
+        }
+
+        if has_local_sibling {
+            self.precomplete_cli_tool_calls(
+                writable_subagents,
+                &assistant_message_id,
+                "writable foreground subagent phase before local siblings",
+            )
+            .await;
+        }
+
+        if !readonly_subagents.is_empty() && (has_local_sibling || readonly_subagents.len() > 1) {
+            readonly_subagents.extend(readonly_local_siblings);
+            self.precomplete_cli_tool_calls(
+                readonly_subagents,
+                &assistant_message_id,
+                "read-only parallel phase",
+            )
+            .await;
         }
     }
 
@@ -614,7 +657,7 @@ impl<'a> ClaudeCodeRoundHost<'a> {
 
     async fn prepare_cli_unity_tool(&mut self, tool_call: &ToolCallInfo, args: &serde_json::Value) {
         if let Some(round) = self.pending_round.as_mut() {
-            if tool_call.name == "unity_execute" || tool_call.name == "unity_run_states" {
+            if AgentInstance::is_unity_execute_undo_call(&tool_call.name, args) {
                 round.has_unity_execute = true;
             }
         }
@@ -1055,7 +1098,13 @@ impl<'a> ClaudeCodeHost for ClaudeCodeRoundHost<'a> {
                 Ok(_) => None,
             });
 
-            if result_override.is_none() && workspace_policy.as_ref().is_ok_and(Option::is_some) {
+            // Bash permission semantics are call-specific. An external-workdir
+            // write skips the primary-workspace lock while remaining a write
+            // call; a declared read-only command may still need confirmation
+            // when dangerous-command or knowledge governance detects risk.
+            let needs_confirmation_preflight =
+                workspace_policy.as_ref().is_ok_and(Option::is_some) || tool_call.name == "bash";
+            if result_override.is_none() && needs_confirmation_preflight {
                 if self.pending_round.is_some() {
                     self.ensure_cli_round_confirmations_prepared().await;
                     if let Some(round) = self.pending_round.as_ref() {
@@ -1463,13 +1512,14 @@ impl AgentInstance {
                 + turn.cache_read_tokens
                 + turn.cache_write_tokens;
             let context_limit = super::model_context_limit(&self.effective_model);
-            match store.record_model_usage(
+            match store.record_model_usage_with_cache_check(
                 &self.session_id,
                 &self.effective_model,
                 "Claude Code CLI",
                 "completion",
                 turn.input_tokens as u64,
                 turn.output_tokens as u64,
+                0,
                 turn.cache_read_tokens as u64,
                 turn.cache_write_tokens as u64,
                 turn.cost_usd,
@@ -1477,7 +1527,17 @@ impl AgentInstance {
                 Some(context_tokens),
                 Some(context_limit),
             ) {
-                Ok(totals) => {
+                Ok((totals, cache_check)) => {
+                    let cache_invalidated =
+                        cache_check.as_ref().is_some_and(|check| check.invalidated);
+                    let cache_baseline_tokens = cache_check
+                        .as_ref()
+                        .map(|check| check.baseline_tokens)
+                        .unwrap_or(0);
+                    let cache_invalidation_reason = cache_check
+                        .as_ref()
+                        .filter(|check| check.invalidated)
+                        .map(|check| check.reason.clone());
                     emit_stream(
                         app_handle,
                         run_id,
@@ -1487,10 +1547,15 @@ impl AgentInstance {
                             output_tokens: turn.output_tokens,
                             cache_read_tokens: turn.cache_read_tokens,
                             cache_write_tokens: turn.cache_write_tokens,
+                            cache_invalidated,
+                            cache_baseline_tokens,
+                            cache_invalidation_reason,
                             total_input_tokens: totals.total_input_tokens,
                             total_output_tokens: totals.total_output_tokens,
                             total_cache_read_tokens: totals.total_cache_read_tokens,
                             total_cache_write_tokens: totals.total_cache_write_tokens,
+                            timed_output_tokens: totals.timed_output_tokens,
+                            model_active_duration_ms: totals.model_active_duration_ms,
                             total_cost_usd: totals.total_cost_usd,
                             priced_rounds: totals.priced_rounds,
                             context_tokens,

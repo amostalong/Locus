@@ -1344,7 +1344,10 @@ where
         })
         .collect();
 
-    let finish_reason = if !final_tool_calls.is_empty() {
+    let finish_reason = if final_tool_calls
+        .iter()
+        .any(|tool_call| !tool_call.is_server_tool())
+    {
         "tool_calls".to_string()
     } else {
         stop_reason
@@ -2214,7 +2217,6 @@ fn oauth_public_tool_name(internal_name: &str) -> String {
         "unity_run_states" => "UnityRunStates".to_string(),
         "unity_recompile" => "UnityRecompile".to_string(),
         "unity_ref_search" => "UnityRefSearch".to_string(),
-        "unity_yaml_list" => "UnityYamlList".to_string(),
         "unity_yaml_search" => "UnityYamlSearch".to_string(),
         "unity_yaml_read" => "UnityYamlRead".to_string(),
         "web_fetch" => "WebFetch".to_string(),
@@ -2969,11 +2971,20 @@ mod tests {
                     "type": "object",
                     "properties": {
                         "filePath": { "type": "string" },
-                        "oldString": { "type": "string" },
-                        "newString": { "type": "string" },
-                        "replaceAll": { "type": "boolean" }
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "oldString": { "type": "string" },
+                                    "newString": { "type": "string" },
+                                    "replaceAll": { "type": "boolean" }
+                                },
+                                "required": ["oldString", "newString"]
+                            }
+                        }
                     },
-                    "required": ["filePath"]
+                    "required": ["filePath", "edits"]
                 }
             }
         })];
@@ -2982,45 +2993,56 @@ mod tests {
 
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], json!("Edit"));
-        assert_eq!(tools[0]["input_schema"]["required"], json!(["file_path"]));
+        assert_eq!(
+            tools[0]["input_schema"]["required"],
+            json!(["file_path", "edits"])
+        );
         assert!(tools[0]["input_schema"]["properties"]
             .get("file_path")
             .is_some());
-        assert!(tools[0]["input_schema"]["properties"]
-            .get("old_string")
-            .is_some());
+        assert!(
+            tools[0]["input_schema"]["properties"]["edits"]["items"]["properties"]
+                .get("old_string")
+                .is_some()
+        );
 
         let public_input = aliases.public_input_for(
             "edit",
             json!({
                 "filePath": "a.txt",
-                "oldString": "foo",
-                "newString": "bar",
-                "replaceAll": true
+                "edits": [{
+                    "oldString": "foo",
+                    "newString": "bar",
+                    "replaceAll": true
+                }]
             }),
         );
         assert_eq!(
             public_input,
             json!({
                 "file_path": "a.txt",
-                "old_string": "foo",
-                "new_string": "bar",
-                "replace_all": true
+                "edits": [{
+                    "old_string": "foo",
+                    "new_string": "bar",
+                    "replace_all": true
+                }]
             })
         );
 
         let (internal_name, internal_args) = aliases.internalize_tool_call(
             "Edit",
-            r#"{"file_path":"a.txt","old_string":"foo","new_string":"bar","replace_all":true}"#,
+            r#"{"file_path":"a.txt","edits":[{"old_string":"foo","new_string":"bar","replace_all":true}]}"#,
         );
         assert_eq!(internal_name, "edit");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&internal_args).unwrap(),
             json!({
                 "filePath": "a.txt",
-                "oldString": "foo",
-                "newString": "bar",
-                "replaceAll": true
+                "edits": [{
+                    "oldString": "foo",
+                    "newString": "bar",
+                    "replaceAll": true
+                }]
             })
         );
     }

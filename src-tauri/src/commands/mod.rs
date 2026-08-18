@@ -268,10 +268,20 @@ pub enum StreamEvent {
         output_tokens: u32,
         cache_read_tokens: u32,
         cache_write_tokens: u32,
+        #[serde(default)]
+        cache_invalidated: bool,
+        #[serde(default)]
+        cache_baseline_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_invalidation_reason: Option<String>,
         total_input_tokens: u64,
         total_output_tokens: u64,
         total_cache_read_tokens: u64,
         total_cache_write_tokens: u64,
+        #[serde(default)]
+        timed_output_tokens: u64,
+        #[serde(default)]
+        model_active_duration_ms: u64,
         total_cost_usd: f64,
         priced_rounds: u64,
         context_tokens: u32,
@@ -389,6 +399,19 @@ pub enum KnowledgeToolConfirmOperation {
 pub struct BasicToolConfirmDisplay {
     pub tool_name: String,
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_review: Option<AutoReviewSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoReviewSummary {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<String>,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,10 +468,66 @@ pub struct TokenUsage {
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
     pub total_cache_write_tokens: u64,
+    #[serde(default)]
+    pub timed_output_tokens: u64,
+    #[serde(default)]
+    pub model_active_duration_ms: u64,
     pub total_cost_usd: f64,
     pub priced_rounds: u64,
     pub context_tokens: u32,
     pub context_limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextBreakdown {
+    pub system_prompt_tokens: u32,
+    pub environment_tokens: u32,
+    pub rules_tokens: u32,
+    pub knowledge_tokens: u32,
+    pub runtime_injection_tokens: u32,
+    pub conversation_tokens: u32,
+    pub tool_definition_tokens: u32,
+    pub active_tool_result_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextToolUsage {
+    pub name: String,
+    pub call_count: u32,
+    pub result_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCacheInvalidation {
+    pub message_id: String,
+    pub message: String,
+    pub model_id: String,
+    pub baseline_tokens: u64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub excess_input_tokens: u64,
+    pub reason: String,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextUsageReport {
+    pub session_id: String,
+    pub session_title: String,
+    pub agent_id: String,
+    pub model_id: String,
+    pub context_tokens: u32,
+    pub context_limit: u32,
+    pub raw_estimated_context_tokens: u32,
+    pub reported_context_tokens: u32,
+    pub breakdown: SessionContextBreakdown,
+    pub tools: Vec<SessionContextToolUsage>,
+    pub cache_invalidations: Vec<SessionCacheInvalidation>,
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

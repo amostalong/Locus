@@ -46,6 +46,8 @@ export interface DisplaySettings {
   showPluginsTab: boolean;
   /** Show Agent tab in the top navigation */
   showAgentTab: boolean;
+  /** Show the Agent column in chat model selectors */
+  showAgentSelector: boolean;
   /** Auto-open TODO panel when todos arrive */
   todoAutoOpen: boolean;
   /** Auto-open file changes panel when changes arrive */
@@ -96,6 +98,8 @@ export interface DisplaySettings {
   notifyOnChatError: boolean;
   /** Notify when tool approval is required */
   notifyOnToolConfirm: boolean;
+  /** Show an in-app warning when a request was expected to reuse the prompt cache but did not */
+  cacheInvalidationWarningsEnabled: boolean;
   /** Enable sound alerts for key chat events */
   soundAlertsEnabled: boolean;
   /** Sound profile used for sound alerts */
@@ -138,6 +142,7 @@ const defaults: DisplaySettings = {
   showViewsTab: true,
   showPluginsTab: true,
   showAgentTab: true,
+  showAgentSelector: false,
   todoAutoOpen: true,
   changesAutoOpen: true,
   changesAutoClose: true,
@@ -170,6 +175,7 @@ const defaults: DisplaySettings = {
   notifyOnAskUser: true,
   notifyOnChatError: true,
   notifyOnToolConfirm: true,
+  cacheInvalidationWarningsEnabled: false,
   soundAlertsEnabled: false,
   soundAlertMode: "bright",
   soundAlertSource: "builtin",

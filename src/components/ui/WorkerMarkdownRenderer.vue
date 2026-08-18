@@ -120,7 +120,7 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 .worker-markdown-renderer :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono-inline);
   font-size: 0.9em;
   padding: 0.1em 0.35em;
   background: var(--accent-soft, rgba(127,127,127,0.12));

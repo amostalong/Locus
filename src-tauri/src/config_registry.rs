@@ -377,15 +377,16 @@ fn collect_api(out: &mut Vec<ConfigEntry>) {
     });
 
     out.push(ConfigEntry {
-        key: "api.codex_extended_context".into(),
+        key: "api.codex_context_window".into(),
         category: "api".into(),
-        label: "Codex Extended Context".into(),
-        description: "Use the larger GPT-5.6 context window advertised by Codex and raise the automatic compaction threshold accordingly."
+        label: "Codex Context Window".into(),
+        description: "Raw GPT-5.6 context window used by Locus; defaults to 272K and supports values up to 1M."
             .into(),
-        storage: "persistent_config_dir/codex_model_config.json → extendedContext".into(),
+        storage: "persistent_config_dir/codex_model_config.json → contextWindow".into(),
         current_value: codex_model_config
             .as_ref()
-            .is_some_and(|config| config.extended_context)
+            .map(|config| config.resolved_context_window())
+            .unwrap_or(crate::commands::DEFAULT_CODEX_CONTEXT_WINDOW)
             .to_string(),
     });
 
@@ -577,9 +578,8 @@ fn collect_permissions(app_handle: &tauri::AppHandle, out: &mut Vec<ConfigEntry>
         ("code_hover", "C# hover info (Roslyn)"),
         ("unity_code_usages", "Script usages in Unity assets"),
         ("unity_asset_search", "Unity asset search"),
-        ("unity_yaml_list", "List Unity YAML hierarchy"),
-        ("unity_yaml_search", "Search Unity YAML hierarchy"),
-        ("unity_yaml_read", "Read Unity YAML detail"),
+        ("unity_yaml_search", "Search Unity Property Tree"),
+        ("unity_yaml_read", "Progressively read Unity Property Tree"),
         ("knowledge_query", "Unified knowledge document search"),
     ];
 

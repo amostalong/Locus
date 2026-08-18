@@ -12,7 +12,7 @@ import {
   showInFolder,
 } from "../services/unity";
 // undoPreview removed — undo UI moved to ChatChangesPanel
-import type { ChatComposerSendPayload, ChatMessage, AgentInfo, TokenUsage, ModelOption, PendingQuestion, PendingToolConfirm, EffortLevel, SessionSummary, AssetDbScanEvent, ScanStats, ImageAttachment, AssetRefAttachment, SkillManifest, UserIntentMeta, SessionContextExportRequest, CodexTransportMode, AssistantRenderPart, UnityConnectionStatus, KnowledgeDocumentType } from "../types";
+import type { ChatComposerSendPayload, ChatMessage, AgentInfo, TokenUsage, ModelOption, PendingQuestion, PendingToolConfirm, EffortLevel, SessionSummary, AssetDbScanEvent, ScanStats, ImageAttachment, AssetRefAttachment, ManagedLocalFileAttachment, SkillManifest, UserIntentMeta, SessionContextExportRequest, CodexTransportMode, AssistantRenderPart, UnityConnectionStatus, KnowledgeDocumentType } from "../types";
 import type { ChangedFile, ToolCallDisplay } from "../types";
 import ModelEffortSelector from "./ModelEffortSelector.vue";
 import SessionPanel from "./chat/SessionPanel.vue";
@@ -22,6 +22,7 @@ import ChatTurnNavigationRail from "./chat/ChatTurnNavigationRail.vue";
 import ChatStatusIndicators from "./chat/ChatStatusIndicators.vue";
 import RichChatInput from "./chat/RichChatInput.vue";
 import TokenUsageBar from "./chat/TokenUsageBar.vue";
+import SessionContextUsageWindow from "./SessionContextUsageWindow.vue";
 import AskUserCard from "./chat/AskUserCard.vue";
 import ToolConfirmCard from "./chat/ToolConfirmCard.vue";
 import ToolConfirmBatchCard from "./chat/ToolConfirmBatchCard.vue";
@@ -43,6 +44,7 @@ import { useChatChangesStore } from "../stores/chatChanges";
 import { useChatStore } from "../stores/chat";
 import { useUiStore } from "../stores/ui";
 import { useNotificationStore } from "../stores/notification";
+import { useEditorStore } from "../stores/editor";
 import {
   captureScrollAnchor,
   captureLiveScrollAnchor,
@@ -107,6 +109,7 @@ const chatChangesStore = useChatChangesStore();
 const chatStore = useChatStore();
 const uiStore = useUiStore();
 const notificationStore = useNotificationStore();
+const editorStore = useEditorStore();
 const { state: shortcutState } = useKeyboardShortcuts();
 const { state: chatInputSettings } = useChatInputSettings();
 const { state: displaySettings } = useDisplaySettings();
@@ -223,6 +226,7 @@ const props = defineProps<{
   fastModeEnabled: boolean;
   fastModeAvailable: boolean;
   tokenUsage: TokenUsage;
+  codexConnected?: boolean;
   pendingQuestion: PendingQuestion | null;
   pendingQuestionCount?: number;
   pendingToolConfirms: PendingToolConfirm[];
@@ -240,6 +244,7 @@ const props = defineProps<{
   lastScanStats?: ScanStats | null;
   isUnityProject?: boolean;
   skills?: SkillManifest[];
+  managedLocalFiles?: ManagedLocalFileAttachment[];
   streamingSessionIds?: Set<string>;
   undoableMessageIds?: Set<string>;
   layoutMode?: ChatLayoutMode;
@@ -274,6 +279,7 @@ const emit = defineEmits<{
   selectFastMode: [enabled: boolean];
   exportSessionContext: [request: SessionContextExportRequest];
   reviewSessionContext: [request: SessionContextExportRequest];
+  removeManagedComposerFile: [fileId: string];
   answerQuestion: [answer: string];
   answerToolConfirm: [questionId: string, answer: string];
   answerAllToolConfirms: [questionIds: string[], answer: string];
@@ -290,6 +296,7 @@ const emit = defineEmits<{
 }>();
 
 const lightboxSrc = ref("");
+const contextStatsOpen = ref(false);
 function openLightbox(src: string) {
   lightboxSrc.value = src;
 }
@@ -405,6 +412,20 @@ const assetRefContextCanOpenLocusInspector = computed(() => {
     return shouldUseUnitySceneObjectRef(target.scenePath, target.objectPath);
   }
   return target.kind === "asset";
+});
+
+// Editor View is the in-app Monaco-backed editor added in this fork. It can
+// only open text-editable files, so we mirror `canOpenInEditor` here for the
+// context menu gate.
+const assetRefContextCanOpenInEditorView = computed(() => {
+  const target = assetRefCtxMenu.value?.target;
+  if (!target) return false;
+  const candidate = (() => {
+    if (target.kind === "asset") return target.assetPath;
+    if (target.kind === "file" && target.entryKind === "file") return target.filePath;
+    return null;
+  })();
+  return candidate !== null && canOpenInEditor(candidate);
 });
 
 const assetRefContextSupportsUnity = computed(() => {
@@ -844,10 +865,41 @@ function openAssetRefInUnityInspector(target: AssetRefClickTarget) {
   });
 }
 
+/**
+ * Open an asset ref in the in-app Editor View (Monaco-backed editor added in
+ * this fork). Falls back to legacy behavior (open externally / select in
+ * Unity) for targets that can't be loaded into Monaco — scene objects,
+ * folders, and binary/serialized Unity assets.
+ */
+async function openAssetRefInEditorView(target: AssetRefClickTarget) {
+  const filePath = target.kind === "asset" ? target.assetPath : null;
+  // Scene objects, folders, and binary/serialized files can't be opened in
+  // Monaco; mirror legacy behavior for those.
+  if (!filePath || target.kind === "sceneObject"
+    || (target.kind === "asset" && target.entryKind === "folder")
+    || !canOpenInEditor(filePath)) {
+    legacyAssetRefClick(target);
+    return;
+  }
+  try {
+    await editorStore.openFile(filePath);
+    uiStore.setTab("editor");
+  } catch (error) {
+    console.warn("editorStore.openFile failed for", filePath, error);
+    // Last resort: try the OS-default editor so the user still gets to see
+    // the file rather than a silent no-op.
+    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
+  }
+}
+
 function runAssetRefClickAction(target: AssetRefClickTarget) {
   const action = isUnityEmbeddedWindow()
     ? displaySettings.unityEmbedAssetRefClickAction
     : displaySettings.assetRefClickAction;
+  if (action === "editor") {
+    void openAssetRefInEditorView(target);
+    return;
+  }
   if (action === "unityInspector") {
     openAssetRefInUnityInspector(target);
     return;
@@ -928,6 +980,24 @@ async function doAssetRefOpenInEditor() {
   } catch (error) {
     console.warn("openFileExternal failed:", error);
     notifyAssetRefContextMenuError(error, "assetRefOpenInEditor", "Failed to open file");
+  }
+}
+
+// Context-menu variant of openAssetRefInEditorView — opens the in-app Editor
+// View directly instead of routing through `runAssetRefClickAction`. We pull
+// the path off the context-menu target (which carries both `assetPath` for
+// Unity assets and `filePath` for plain file refs) and reuse the same gate.
+async function doAssetRefOpenInEditorView() {
+  const target = assetRefCtxMenu.value?.target;
+  if (!target || !assetRefContextCanOpenInEditorView.value) return;
+  closeAssetRefContextMenu();
+  const filePath = target.kind === "asset" ? target.assetPath : target.filePath;
+  try {
+    await editorStore.openFile(filePath);
+    uiStore.setTab("editor");
+  } catch (error) {
+    console.warn("editorStore.openFile failed for", filePath, error);
+    openFileExternal(filePath).catch((e: unknown) => console.warn("openFileExternal failed:", e));
   }
 }
 
@@ -1860,7 +1930,7 @@ function handleToolViewportAnchorStart(anchor: HTMLElement) {
 
   scrollToBottomScheduler.cancel();
   preserveScrollAnchorScheduler.cancel();
-  streamEndScrollScheduler.cancel();
+  if (!pendingStreamEndViewport) streamEndScrollScheduler.cancel();
   clearToolViewportAnchorFrame();
   activeToolViewportAnchor = captureLiveScrollAnchor(el, anchor);
   traceViewportAnchorSample({
@@ -1993,8 +2063,32 @@ function preserveScrollAnchor() {
   preserveScrollAnchorScheduler.schedule();
 }
 
+interface StreamEndViewportSnapshot {
+  sessionId: string | null;
+  followBottom: boolean;
+  state: SessionScrollState;
+  settleAfter: number;
+}
+
+let pendingStreamEndViewport: StreamEndViewportSnapshot | null = null;
+
+function applyPendingStreamEndViewport() {
+  const snapshot = pendingStreamEndViewport;
+  if (!snapshot || snapshot.sessionId !== props.activeSessionId) return;
+  if (toolHandoffViewportQuiet.value || isSessionRestoreViewportGuardActive()) return;
+
+  if (snapshot.followBottom) {
+    scrollToBottomNow(true);
+  } else {
+    restoreMessagesScrollState(snapshot.state, snapshot.sessionId);
+  }
+  if (Date.now() >= snapshot.settleAfter) {
+    pendingStreamEndViewport = null;
+  }
+}
+
 const streamEndScrollScheduler = createSettledScrollScheduler(
-  () => scrollToBottom(true),
+  () => nextTick(applyPendingStreamEndViewport),
   STREAM_END_SCROLL_SETTLE_MS,
 );
 
@@ -2011,11 +2105,15 @@ watch(toolHandoffViewportQuiet, (quiet, previousQuiet) => {
   if (quiet) {
     scrollToBottomScheduler.cancel();
     preserveScrollAnchorScheduler.cancel();
-    streamEndScrollScheduler.cancel();
+    if (!pendingStreamEndViewport) streamEndScrollScheduler.cancel();
     return;
   }
   if (previousQuiet) {
-    reconcileViewport();
+    if (pendingStreamEndViewport) {
+      streamEndScrollScheduler.schedule();
+    } else {
+      reconcileViewport();
+    }
   }
 });
 
@@ -2063,18 +2161,35 @@ function reconcileViewport(forceBottom = false) {
   });
 }
 
+function reconcileStreamingLayoutNow() {
+  if (toolHandoffViewportQuiet.value || isSessionRestoreViewportGuardActive()) return;
+  if (restoreToolViewportAnchor()) return;
+
+  const el = getMessagesElement();
+  if (!el) return;
+  const remembered = props.activeSessionId
+    ? chatStore.getSessionScrollState(props.activeSessionId)
+    : null;
+  if (!shouldAutoScrollToBottom({ metrics: readMessageMetrics(el), remembered })) return;
+
+  scrollToBottomScheduler.cancel();
+  scrollToBottomNow();
+
+}
+
 function settleStreamEndScroll() {
-  if (toolHandoffViewportQuiet.value) return;
   const el = getMessagesElement();
   if (!el) return;
 
   const metrics = readMessageMetrics(el);
   const remembered = props.activeSessionId ? chatStore.getSessionScrollState(props.activeSessionId) : null;
-  if (!shouldAutoScrollToBottom({ metrics, remembered })) {
-    preserveScrollAnchor();
-    return;
-  }
-
+  const followBottom = shouldAutoScrollToBottom({ metrics, remembered });
+  pendingStreamEndViewport = {
+    sessionId: props.activeSessionId,
+    followBottom,
+    state: followBottom ? { mode: "bottom" } : captureCurrentSessionScrollState(el),
+    settleAfter: Date.now() + STREAM_END_SCROLL_SETTLE_MS,
+  };
   streamEndScrollScheduler.schedule();
 }
 
@@ -2230,6 +2345,7 @@ function preserveMessagesViewportForUserScroll() {
   cancelSessionRestoreLayoutStabilization();
   scrollToBottomScheduler.cancel();
   preserveScrollAnchorScheduler.cancel();
+  pendingStreamEndViewport = null;
   streamEndScrollScheduler.cancel();
   rememberScrollForSession();
 }
@@ -2410,6 +2526,7 @@ watch(
     }
     clearToolViewportAnchor();
     scrollToBottomScheduler.cancel();
+    pendingStreamEndViewport = null;
     streamEndScrollScheduler.cancel();
     preserveScrollAnchorScheduler.cancel();
     cancelSessionRestoreFrame();
@@ -2484,6 +2601,7 @@ watch(
       quiet: toolHandoffViewportQuiet.value,
     });
     if (nextStreaming) {
+      pendingStreamEndViewport = null;
       streamEndScrollScheduler.cancel();
       return;
     }
@@ -2810,6 +2928,7 @@ onUnmounted(() => {
   clearInputControlsSwitchTimer();
   scrollToBottomScheduler.cancel();
   preserveScrollAnchorScheduler.cancel();
+  pendingStreamEndViewport = null;
   streamEndScrollScheduler.cancel();
   cancelSessionRestoreFrame();
   cancelSessionRestoreLayoutStabilization();
@@ -2999,6 +3118,7 @@ onUnmounted(() => {
           @tool-handoff-quiet-change="handleToolHandoffQuietChange"
           @tool-viewport-anchor-start="handleToolViewportAnchorStart"
           @tool-viewport-anchor-end="handleToolViewportAnchorEnd"
+          @stream-layout-change="reconcileStreamingLayoutNow"
         >
         </ChatTranscript>
         <ChatTurnNavigationRail
@@ -3181,6 +3301,7 @@ onUnmounted(() => {
           v-model="inputText"
           :selected-agent-id="selectedAgentId"
           :skills="skills"
+          :managed-local-files="managedLocalFiles"
           :placeholder="chatInputPlaceholder"
           :is-streaming="isStreaming"
           :cancelling="isCancelling"
@@ -3197,6 +3318,7 @@ onUnmounted(() => {
           @undo="openUndoChooser"
           @export-context="emit('exportSessionContext', { sessionId: activeSessionId || '' })"
           @review-context="emit('reviewSessionContext', { sessionId: activeSessionId || '' })"
+          @remove-managed-local-file="emit('removeManagedComposerFile', $event)"
           @clear="handleNewChatRequest"
           @cancel="emit('cancel')"
           @resume="emit('resume')"
@@ -3204,6 +3326,9 @@ onUnmounted(() => {
           <template v-if="!inputControlsCollapsed" #footer-start>
             <ModelEffortSelector
               align="start"
+              :agents="displaySettings.showAgentSelector ? agents : undefined"
+              :selected-agent-id="selectedAgentId"
+              :agent-locked="agentLocked"
               :models="models"
               :selected-id="selectedModelId"
               :effort="effort"
@@ -3212,18 +3337,33 @@ onUnmounted(() => {
               :fast-mode-enabled="fastModeEnabled"
               :fast-mode-available="fastModeAvailable"
               :disabled="isStreaming"
+              @select-agent="emit('selectAgent', $event)"
               @select-model="emit('selectModel', $event)"
               @select-effort="emit('selectEffort', $event)"
               @select-fast-mode="emit('selectFastMode', $event)"
             />
             <TokenUsageBar
               :token-usage="tokenUsage"
+              :active-session-id="activeSessionId"
+              :codex-connected="codexConnected"
+              @open-context-stats="contextStatsOpen = true"
             />
           </template>
         </RichChatInput>
       </div>
     </div>
     </div><!-- /chat-view -->
+
+    <Teleport to="body">
+      <SessionContextUsageWindow
+        v-if="contextStatsOpen && activeSessionId"
+        :session-id="activeSessionId"
+        :model-id="selectedModelId"
+        :knowledge-mode="knowledgeAccessMode"
+        :token-usage="tokenUsage"
+        @close="contextStatsOpen = false"
+      />
+    </Teleport>
 
     <Teleport to="body">
       <Transition name="undo-chooser-fade">
@@ -3386,6 +3526,14 @@ onUnmounted(() => {
           >
             <LucideIcon :icon="ExternalLink" :size="13" />
             {{ t("common.openInEditor") }}
+          </button>
+          <button
+            v-if="assetRefContextCanOpenInEditorView"
+            type="button"
+            class="asset-ref-ctx-item"
+            @click="doAssetRefOpenInEditorView"
+          >
+            {{ t("common.openInEditorView") }}
           </button>
           <button type="button" class="asset-ref-ctx-item" @click="doAssetRefShowInFolder">
             <LucideIcon :icon="FolderOpen" :size="13" />

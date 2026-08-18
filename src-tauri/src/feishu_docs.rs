@@ -8,8 +8,8 @@ use std::time::Duration;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::Utc;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
+use rand::distr::Alphanumeric;
+use rand::RngExt;
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -930,8 +930,8 @@ fn apply_oauth_context_to_status(
 }
 
 fn generate_pkce_verifier() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
+    rand::rng()
+        .sample_iter(Alphanumeric)
         .take(64)
         .map(char::from)
         .collect::<String>()
@@ -3538,6 +3538,7 @@ async fn run_feishu_reference_import(
             summary_enabled: false,
             command_enabled: false,
             read_only: true,
+            ai_edit_mode: crate::knowledge_store::KnowledgeAiEditMode::Disabled,
             ai_maintained: false,
             storage_source: knowledge_store::KnowledgeStorageSource::Project,
             inherit_ai_config: false,

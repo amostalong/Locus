@@ -6,10 +6,10 @@ function read(path: string): string {
 }
 
 describe("structured session context export", () => {
-  it("uses schema v29 with explicit context and fork/tool-round repair migrations", () => {
+  it("uses schema v34 with explicit context, cache, and repair migrations", () => {
     const store = read("src-tauri/src/session/store.rs");
 
-    expect(store).toContain("const SCHEMA_VERSION: i32 = 29;");
+    expect(store).toContain("const SCHEMA_VERSION: i32 = 34;");
     expect(store).toContain('Self::migrate(conn, 26, "persist session context attempts"');
     expect(store).toContain('27,\n                "persist structured conversation checkpoints"');
     expect(store).toContain("migrate_conversation_checkpoints");
@@ -19,6 +19,15 @@ describe("structured session context export", () => {
     expect(store).toContain('29,\n                "repair terminal tool rounds missing persisted outputs"');
     expect(store).toContain("migrate_terminal_tool_round_outputs");
     expect(store).toContain("v28_migration_repairs_terminal_tool_round_and_keeps_context_exportable");
+    expect(store).toContain('Self::migrate(conn, 32, "persist prompt cache checks"');
+    expect(store).toContain('33,\n                "use server usage baselines for prompt cache checks"');
+    expect(store).toContain('34,\n                "detect prompt cache invalidation from server input growth"');
+    expect(store).toContain("baseline_tokens INTEGER NOT NULL");
+    expect(store).toContain("input_tokens INTEGER NOT NULL");
+    expect(store).toContain("excess_input_tokens INTEGER NOT NULL");
+    expect(store).toContain("reason TEXT NOT NULL");
+    expect(store).toContain("v33_cache_checks_migrate_to_server_input_growth_and_keep_sessions_exportable");
+    expect(store).toContain("CREATE TABLE IF NOT EXISTS session_prompt_cache_checks");
     expect(store).toContain("conversation_checkpoint: Option<compact::ConversationCheckpoint>");
     expect(store).toContain("CREATE TABLE IF NOT EXISTS session_context_attempts");
     expect(store).toContain("request_gzip BLOB NOT NULL");
@@ -35,7 +44,8 @@ describe("structured session context export", () => {
     const lib = read("src-tauri/src/lib.rs");
 
     expect(exporter).toContain('const EXPORT_FORMAT: &str = "locus.context_review";');
-    expect(exporter).toContain("const EXPORT_FORMAT_VERSION: u32 = 2;");
+    expect(exporter).toContain("const EXPORT_FORMAT_VERSION: u32 = 5;");
+    expect(exporter).toContain("cache_invalidations: Value");
     expect(exporter).toContain("serde_yaml::to_string");
     expect(exporter).toContain("content_hash");
     expect(exporter).toContain("session_tree_ids");
@@ -74,7 +84,10 @@ describe("structured session context export", () => {
     expect(skill).toContain("Tool-result audit");
     expect(workspace).toContain("function reviewContextSkillIntent(): UserIntentMeta");
     expect(workspace).toContain('dirName: "review-context"');
-    expect(workspace).toContain("{ userIntent: reviewContextSkillIntent() }");
+    expect(workspace).toContain("uiStore.stageChatDraftPrefill(contextReviewDraft()");
+    expect(workspace).toContain("skills: intent.skills");
+    expect(zh["chat.contextReviewPrompt"]).toBe("请review这个context");
+    expect(en["chat.contextReviewPrompt"]).toBe("Please review this context");
     expect(zh["chat.contextReviewPrompt"]).not.toContain("完整分析轨迹");
     expect(en["chat.contextReviewPrompt"]).not.toContain("trajectory review");
   });
@@ -113,6 +126,10 @@ describe("structured session context export", () => {
     const input = read("src/components/chat/RichChatInput.vue");
     const workspace = read("src/components/ChatWorkspaceView.vue");
     const panel = read("src/components/chat/SessionPanel.vue");
+    const reviewWorkflow = workspace.slice(
+      workspace.indexOf("async function reviewSessionContext"),
+      workspace.indexOf("onMounted("),
+    );
 
     expect(service).toContain('ipcInvoke<ContextExportResult>("export_session_context"');
     expect(registry).toContain('name: "/export-context"');
@@ -122,6 +139,16 @@ describe("structured session context export", () => {
     expect(workspace).toContain("await createSession({");
     expect(workspace).toContain("await chatStore.selectSession(reviewSessionId");
     expect(workspace).toContain('"chat.contextReviewPrompt"');
+    expect(reviewWorkflow).toContain("chatStore.newChat({ persistSelection: props.persistSessionSelection })");
+    expect(reviewWorkflow).toContain("uiStore.stageChatDraftPrefill(contextReviewDraft()");
+    expect(reviewWorkflow).toContain('status: "loading"');
+    expect(reviewWorkflow).toContain('status: "ready"');
+    expect(reviewWorkflow).not.toContain("chatStore.sendMessage(");
+    expect(reviewWorkflow.indexOf("chatStore.selectSession(reviewSessionId"))
+      .toBeLessThan(reviewWorkflow.indexOf("await exportContext(sid, null)"));
+    expect(input).toContain("managedLocalFiles");
+    expect(input).toContain("hasBlockingManagedLocalFile");
+    expect(input).toContain('t("chat.fileRefs.exporting")');
     expect(panel).toContain("chat.exportContext");
     expect(panel).toContain("chat.reviewContext");
     expect(workspace).not.toContain("includeSystemPrompt");

@@ -19,7 +19,9 @@ use super::models::{
     SessionViewSnapshot, TodoItem, TodoSnapshot, ToolCallInfo,
 };
 use super::runtime::SessionRuntimeRegistry;
-use crate::commands::{ModelUsageGroup, ModelUsageMetrics, ModelUsageReport, TokenUsage};
+use crate::commands::{
+    ModelUsageGroup, ModelUsageMetrics, ModelUsageReport, SessionCacheInvalidation, TokenUsage,
+};
 use crate::compact;
 
 #[derive(Clone)]
@@ -30,6 +32,34 @@ pub struct SessionStore {
     event_writer: Arc<SessionEventWriter>,
     runtime: Arc<SessionRuntimeRegistry>,
     export_snapshot_created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionPromptPrefixCache {
+    pub provider_key: String,
+    pub base_prompt: String,
+    pub rules_prompt: String,
+    pub knowledge_prompt: String,
+    pub env_prompt: String,
+    pub synthesized_at: i64,
+    pub last_remote_response_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptCacheCheckOutcome {
+    pub baseline_tokens: u64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub excess_input_tokens: u64,
+    pub invalidated: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerPromptUsageBaseline {
+    model_id: String,
+    provider: String,
+    effective_context_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -123,6 +153,13 @@ const RUN_STATUS_CANCELLED: &str = "cancelled";
 const RUN_STATUS_ERROR: &str = "error";
 use crate::compact::{CONTEXT_HANDOFF_MARKER, CONVERSATION_CHECKPOINT_MARKER};
 const CONTEXT_COMPACTED_DISPLAY_MARKER: &str = "## Context Handoff\n\nContext compacted.";
+const DISPLAY_USER_MESSAGE_FILTER_SQL: &str = "NOT (
+    TRIM(content) = ''
+    AND COALESCE(images, '') = ''
+    AND COALESCE(asset_refs, '') = ''
+    AND LTRIM(COALESCE(prompt_suffix, '')) LIKE '<system-reminder>%'
+)
+AND LTRIM(content) NOT LIKE '<conversation-checkpoint>%'";
 
 impl SessionEventWriter {
     const FLUSH_INTERVAL: Duration = Duration::from_millis(25);
@@ -681,6 +718,13 @@ fn remove_internal_system_reminders_from_display(messages: &mut Vec<ChatMessage>
     messages.retain(|message| !is_internal_system_reminder_message(message));
 }
 
+fn normalize_messages_for_display(raw_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut messages = crate::session::history::normalize_tool_round_history(raw_messages);
+    remove_internal_system_reminders_from_display(&mut messages);
+    SessionStore::mark_missing_persisted_outputs_for_display(&mut messages);
+    messages
+}
+
 fn redact_context_handoff_for_display(message: &mut ChatMessage) {
     if !is_context_handoff_message(message) {
         return;
@@ -845,7 +889,7 @@ impl SessionStore {
     ///
     /// Do not rely on ad-hoc `ALTER TABLE ... .ok()` fallbacks or silent
     /// schema drift. Session data must migrate deterministically.
-    const SCHEMA_VERSION: i32 = 29;
+    const SCHEMA_VERSION: i32 = 34;
 
     pub const fn schema_version() -> i32 {
         Self::SCHEMA_VERSION
@@ -1249,7 +1293,67 @@ impl SessionStore {
             )?;
         }
 
-        debug_assert_eq!(Self::SCHEMA_VERSION, 29, "add a new migration block above");
+        if current < 30 {
+            Self::migrate(conn, 30, "persist session prompt-prefix cache", |conn| {
+                Self::create_prompt_prefix_cache_schema(conn)
+            })?;
+        }
+
+        if current < 31 {
+            Self::migrate(conn, 31, "persist model output timing", |conn| {
+                if !Self::table_has_column(conn, "token_usage", "timed_output_tokens")? {
+                    conn.execute_batch(
+                        "ALTER TABLE token_usage ADD COLUMN timed_output_tokens INTEGER NOT NULL DEFAULT 0;",
+                    )?;
+                }
+                if !Self::table_has_column(conn, "token_usage", "model_active_duration_ms")? {
+                    conn.execute_batch(
+                        "ALTER TABLE token_usage ADD COLUMN model_active_duration_ms INTEGER NOT NULL DEFAULT 0;",
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+
+        if current < 32 {
+            Self::migrate(conn, 32, "persist prompt cache checks", |conn| {
+                Self::create_prompt_cache_check_schema(conn)
+            })?;
+        }
+
+        if current < 33 {
+            Self::migrate(
+                conn,
+                33,
+                "use server usage baselines for prompt cache checks",
+                |conn| {
+                    // v32 rows compare Cache Read with a local token estimate.
+                    // They cannot be converted to the server-only baseline, so
+                    // reset this derived diagnostic table and start the new
+                    // series from provider-reported usage events.
+                    conn.execute_batch("DROP TABLE IF EXISTS session_prompt_cache_checks;")?;
+                    Self::create_prompt_cache_check_schema(conn)
+                },
+            )?;
+        }
+
+        if current < 34 {
+            Self::migrate(
+                conn,
+                34,
+                "detect prompt cache invalidation from server input growth",
+                |conn| {
+                    // v33 rows used Cache Read below the previous effective
+                    // context as the invalidation predicate. Those derived rows
+                    // cannot be reclassified reliably after the fact, so start
+                    // a new diagnostic series with the server Input predicate.
+                    conn.execute_batch("DROP TABLE IF EXISTS session_prompt_cache_checks;")?;
+                    Self::create_prompt_cache_check_schema(conn)
+                },
+            )?;
+        }
+
+        debug_assert_eq!(Self::SCHEMA_VERSION, 34, "add a new migration block above");
         Ok(())
     }
 
@@ -1550,6 +1654,8 @@ impl SessionStore {
                 total_output_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                timed_output_tokens INTEGER NOT NULL DEFAULT 0,
+                model_active_duration_ms INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd REAL NOT NULL DEFAULT 0,
                 priced_rounds INTEGER NOT NULL DEFAULT 0,
                 last_context_tokens INTEGER NOT NULL DEFAULT 0,
@@ -1569,6 +1675,45 @@ impl SessionStore {
         .and_then(|_| Self::create_session_sync_schema(conn))
         .and_then(|_| Self::create_context_attempt_schema(conn))
         .and_then(|_| Self::create_model_usage_schema(conn))
+        .and_then(|_| Self::create_prompt_prefix_cache_schema(conn))
+        .and_then(|_| Self::create_prompt_cache_check_schema(conn))
+    }
+
+    fn create_prompt_prefix_cache_schema(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_prompt_prefix_cache (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                provider_key TEXT NOT NULL,
+                base_prompt TEXT NOT NULL,
+                rules_prompt TEXT NOT NULL,
+                knowledge_prompt TEXT NOT NULL,
+                env_prompt TEXT NOT NULL,
+                synthesized_at INTEGER NOT NULL,
+                last_remote_response_at INTEGER
+            );",
+        )
+    }
+
+    fn create_prompt_cache_check_schema(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_prompt_cache_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL,
+                message TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                baseline_tokens INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL,
+                excess_input_tokens INTEGER NOT NULL,
+                invalidated INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(session_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_prompt_cache_checks_session
+                ON session_prompt_cache_checks(session_id, created_at DESC, id DESC);",
+        )
     }
 
     fn create_context_attempt_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -2416,6 +2561,8 @@ impl SessionStore {
                         total_output_tokens,
                         total_cache_read_tokens,
                         total_cache_write_tokens,
+                        timed_output_tokens,
+                        model_active_duration_ms,
                         total_cost_usd,
                         priced_rounds,
                         last_context_tokens,
@@ -2426,6 +2573,8 @@ impl SessionStore {
                         total_output_tokens,
                         total_cache_read_tokens,
                         total_cache_write_tokens,
+                        timed_output_tokens,
+                        model_active_duration_ms,
                         total_cost_usd,
                         priced_rounds,
                         last_context_tokens,
@@ -2435,6 +2584,22 @@ impl SessionStore {
                     params![new_id, source_id],
                 )
                 .map_err(|e| format!("Failed to copy token usage into fork: {}", e))?;
+
+                conn.execute(
+                    "INSERT INTO session_prompt_cache_checks (
+                        session_id, message_id, message, model_id, baseline_tokens,
+                        input_tokens, cache_read_tokens, excess_input_tokens,
+                        invalidated, reason, created_at
+                     )
+                     SELECT ?1, message_id, message, model_id, baseline_tokens,
+                        input_tokens, cache_read_tokens, excess_input_tokens,
+                        invalidated, reason, created_at
+                     FROM session_prompt_cache_checks
+                     WHERE session_id = ?2
+                     ORDER BY id ASC",
+                    params![new_id, source_id],
+                )
+                .map_err(|e| format!("Failed to copy prompt cache checks into fork: {}", e))?;
 
                 conn.execute(
                     "INSERT INTO todos (session_id, position, content, status, priority)
@@ -2509,10 +2674,11 @@ impl SessionStore {
             Option<String>,
             Option<String>,
         );
-        type SnapshotUsageRow = (i64, i64, i64, i64, f64, i64, i64, i64);
+        type SnapshotUsageRow = (i64, i64, i64, i64, i64, i64, f64, i64, i64, i64);
+        type SnapshotCacheCheckRow = (String, String, String, i64, i64, i64, i64, i64, String, i64);
         type SnapshotTodoRow = (i64, String, String, String);
 
-        let (session, messages, usage, todos) = {
+        let (session, messages, usage, cache_checks, todos) = {
             let conn = snapshot.conn.lock().map_err(|e| e.to_string())?;
             let session = conn
                 .query_row(
@@ -2570,7 +2736,7 @@ impl SessionStore {
 
             let usage = conn
                 .query_row(
-                    "SELECT total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens, total_cost_usd, priced_rounds, last_context_tokens, last_context_limit
+                    "SELECT total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens, timed_output_tokens, model_active_duration_ms, total_cost_usd, priced_rounds, last_context_tokens, last_context_limit
                      FROM token_usage WHERE session_id = ?1",
                     params![source_id],
                     |row| {
@@ -2583,11 +2749,43 @@ impl SessionStore {
                             row.get(5)?,
                             row.get(6)?,
                             row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(|e| format!("Failed to read fork snapshot usage: {}", e))?;
+
+            let mut cache_check_stmt = conn
+                .prepare(
+                    "SELECT message_id, message, model_id, baseline_tokens,
+                            input_tokens, cache_read_tokens, excess_input_tokens,
+                            invalidated, reason, created_at
+                     FROM session_prompt_cache_checks
+                     WHERE session_id = ?1
+                     ORDER BY id ASC",
+                )
+                .map_err(|e| format!("Failed to prepare fork snapshot cache checks: {}", e))?;
+            let cache_checks = cache_check_stmt
+                .query_map(params![source_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                })
+                .map_err(|e| format!("Failed to query fork snapshot cache checks: {}", e))?
+                .collect::<Result<Vec<SnapshotCacheCheckRow>, _>>()
+                .map_err(|e| format!("Failed to read fork snapshot cache check: {}", e))?;
+            drop(cache_check_stmt);
 
             let mut todo_stmt = conn
                 .prepare(
@@ -2602,7 +2800,7 @@ impl SessionStore {
                 .map_err(|e| format!("Failed to query fork snapshot todos: {}", e))?
                 .collect::<Result<Vec<SnapshotTodoRow>, _>>()
                 .map_err(|e| format!("Failed to read fork snapshot todo: {}", e))?;
-            (session, messages, usage, todos)
+            (session, messages, usage, cache_checks, todos)
         };
 
         let session: SnapshotSessionRow = session;
@@ -2713,15 +2911,39 @@ impl SessionStore {
                 conn.execute(
                     "INSERT INTO token_usage (
                         session_id, total_input_tokens, total_output_tokens,
-                        total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-                        priced_rounds, last_context_tokens, last_context_limit
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        total_cache_read_tokens, total_cache_write_tokens, timed_output_tokens,
+                        model_active_duration_ms, total_cost_usd, priced_rounds,
+                        last_context_tokens, last_context_limit
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         new_id, usage.0, usage.1, usage.2, usage.3, usage.4, usage.5, usage.6,
-                        usage.7,
+                        usage.7, usage.8, usage.9,
                     ],
                 )
                 .map_err(|e| format!("Failed to copy snapshot token usage into fork: {}", e))?;
+            }
+            for cache_check in cache_checks {
+                conn.execute(
+                    "INSERT INTO session_prompt_cache_checks (
+                        session_id, message_id, message, model_id, baseline_tokens,
+                        input_tokens, cache_read_tokens, excess_input_tokens,
+                        invalidated, reason, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        new_id,
+                        cache_check.0,
+                        cache_check.1,
+                        cache_check.2,
+                        cache_check.3,
+                        cache_check.4,
+                        cache_check.5,
+                        cache_check.6,
+                        cache_check.7,
+                        cache_check.8,
+                        cache_check.9,
+                    ],
+                )
+                .map_err(|e| format!("Failed to copy snapshot cache check: {}", e))?;
             }
             for todo in todos {
                 conn.execute(
@@ -3630,9 +3852,7 @@ impl SessionStore {
         // single SQLite connection first so unrelated lightweight reads do not
         // wait behind that CPU work.
         drop(conn);
-        let mut messages = crate::session::history::normalize_tool_round_history(&raw_messages);
-        remove_internal_system_reminders_from_display(&mut messages);
-        Self::mark_missing_persisted_outputs_for_display(&mut messages);
+        let messages = normalize_messages_for_display(&raw_messages);
 
         Ok(SessionDetail {
             id: id.to_string(),
@@ -3696,10 +3916,7 @@ impl SessionStore {
         let user_message_ids = Self::get_session_user_message_ids_with_conn(&conn, id)?;
         drop(conn);
 
-        let mut messages =
-            crate::session::history::normalize_tool_round_history(&raw_page.messages);
-        remove_internal_system_reminders_from_display(&mut messages);
-        Self::mark_missing_persisted_outputs_for_display(&mut messages);
+        let mut messages = normalize_messages_for_display(&raw_page.messages);
         Self::defer_tool_result_images_for_display(&mut messages);
 
         Ok(SessionViewSnapshot {
@@ -3733,20 +3950,40 @@ impl SessionStore {
         message_id: &str,
     ) -> Result<SessionTurnPreview, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let (message_row_id, prompt) = conn
-            .query_row(
-                "SELECT rowid, content
-                 FROM messages
-                 WHERE session_id = ?1 AND id = ?2 AND role = 'user'",
-                params![session_id, message_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
+        let target_query = format!(
+            "SELECT rowid, content, images
+             FROM messages
+             WHERE session_id = ?1
+               AND id = ?2
+               AND role = 'user'
+               AND {DISPLAY_USER_MESSAGE_FILTER_SQL}"
+        );
+        let (message_row_id, prompt, images_json) = conn
+            .query_row(&target_query, params![session_id, message_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
             .map_err(|e| format!("User message not found: {}", e))?;
+        let images = images_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("Failed to parse user turn preview images: {}", e))?
+            .unwrap_or_default();
+        let next_user_query = format!(
+            "SELECT MIN(rowid)
+             FROM messages
+             WHERE session_id = ?1
+               AND role = 'user'
+               AND rowid > ?2
+               AND {DISPLAY_USER_MESSAGE_FILTER_SQL}"
+        );
         let next_user_row_id = conn
             .query_row(
-                "SELECT MIN(rowid)
-                 FROM messages
-                 WHERE session_id = ?1 AND role = 'user' AND rowid > ?2",
+                &next_user_query,
                 params![session_id, message_row_id],
                 |row| row.get::<_, Option<i64>>(0),
             )
@@ -3773,6 +4010,7 @@ impl SessionStore {
             message_id: message_id.to_string(),
             prompt,
             response,
+            images,
         })
     }
 
@@ -3787,10 +4025,7 @@ impl SessionStore {
             Self::get_message_page_with_conn(&conn, id, Some(before_row_id), message_limit)?;
         drop(conn);
 
-        let mut messages =
-            crate::session::history::normalize_tool_round_history(&raw_page.messages);
-        remove_internal_system_reminders_from_display(&mut messages);
-        Self::mark_missing_persisted_outputs_for_display(&mut messages);
+        let mut messages = normalize_messages_for_display(&raw_page.messages);
         Self::defer_tool_result_images_for_display(&mut messages);
         Ok(SessionMessagePage {
             messages,
@@ -5233,6 +5468,16 @@ impl SessionStore {
         self.get_messages_with_conn_filtered(&conn, session_id, false)
     }
 
+    /// Returns full session history normalized for transcript display.
+    /// Internal user-role reminders remain available to prompt reconstruction
+    /// while staying out of every UI refresh path, including compact events.
+    pub fn get_messages_for_display(&self, session_id: &str) -> Result<Vec<ChatMessage>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let raw_messages = self.get_messages_with_conn_filtered(&conn, session_id, false)?;
+        drop(conn);
+        Ok(normalize_messages_for_display(&raw_messages))
+    }
+
     pub fn get_messages_for_prompt(&self, session_id: &str) -> Result<Vec<ChatMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         self.get_messages_with_conn_filtered(&conn, session_id, true)
@@ -5553,6 +5798,258 @@ impl SessionStore {
         Ok(())
     }
 
+    pub(crate) fn fresh_prompt_prefix_cache(
+        &self,
+        session_id: &str,
+        provider_key: &str,
+        ttl_seconds: u32,
+        now: i64,
+    ) -> Result<Option<SessionPromptPrefixCache>, String> {
+        if ttl_seconds == 0 {
+            return Ok(None);
+        }
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let cache = conn
+            .query_row(
+                "SELECT provider_key, base_prompt, rules_prompt, knowledge_prompt, env_prompt,
+                        synthesized_at, last_remote_response_at
+                 FROM session_prompt_prefix_cache
+                 WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(SessionPromptPrefixCache {
+                        provider_key: row.get(0)?,
+                        base_prompt: row.get(1)?,
+                        rules_prompt: row.get(2)?,
+                        knowledge_prompt: row.get(3)?,
+                        env_prompt: row.get(4)?,
+                        synthesized_at: row.get(5)?,
+                        last_remote_response_at: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("Failed to load prompt-prefix cache: {}", e))?;
+
+        let Some(cache) = cache.filter(|cache| cache.provider_key == provider_key) else {
+            return Ok(None);
+        };
+        let freshness_anchor = cache
+            .last_remote_response_at
+            .unwrap_or(cache.synthesized_at);
+        let age_seconds = now.saturating_sub(freshness_anchor);
+        if age_seconds > i64::from(ttl_seconds) {
+            return Ok(None);
+        }
+        Ok(Some(cache))
+    }
+
+    pub(crate) fn replace_prompt_prefix_cache(
+        &self,
+        session_id: &str,
+        cache: &SessionPromptPrefixCache,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO session_prompt_prefix_cache (
+                session_id, provider_key, base_prompt, rules_prompt, knowledge_prompt,
+                env_prompt, synthesized_at, last_remote_response_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id) DO UPDATE SET
+                provider_key = excluded.provider_key,
+                base_prompt = excluded.base_prompt,
+                rules_prompt = excluded.rules_prompt,
+                knowledge_prompt = excluded.knowledge_prompt,
+                env_prompt = excluded.env_prompt,
+                synthesized_at = excluded.synthesized_at,
+                last_remote_response_at = excluded.last_remote_response_at",
+            params![
+                session_id,
+                cache.provider_key,
+                cache.base_prompt,
+                cache.rules_prompt,
+                cache.knowledge_prompt,
+                cache.env_prompt,
+                cache.synthesized_at,
+                cache.last_remote_response_at,
+            ],
+        )
+        .map_err(|e| format!("Failed to persist prompt-prefix cache: {}", e))?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_prompt_prefix_remote_response(
+        &self,
+        session_id: &str,
+        provider_key: &str,
+        responded_at: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE session_prompt_prefix_cache
+             SET last_remote_response_at = ?1
+             WHERE session_id = ?2 AND provider_key = ?3",
+            params![responded_at, session_id, provider_key],
+        )
+        .map_err(|e| format!("Failed to refresh prompt-prefix cache timestamp: {}", e))?;
+        Ok(())
+    }
+
+    fn latest_completion_server_baseline_with_conn(
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Option<ServerPromptUsageBaseline>, String> {
+        conn.query_row(
+            "SELECT model_id, provider,
+                    input_tokens + cache_read_tokens + cache_write_tokens
+             FROM model_usage_events
+             WHERE session_id = ?1 AND request_kind = 'completion'
+             ORDER BY id DESC
+             LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok(ServerPromptUsageBaseline {
+                    model_id: row.get(0)?,
+                    provider: row.get(1)?,
+                    effective_context_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to load previous server prompt usage: {}", e))
+    }
+
+    fn record_prompt_cache_check_with_conn(
+        conn: &Connection,
+        session_id: &str,
+        model_id: &str,
+        provider: &str,
+        previous: Option<&ServerPromptUsageBaseline>,
+        input_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> Result<Option<PromptCacheCheckOutcome>, String> {
+        let message = conn
+            .query_row(
+                "SELECT id, content
+                 FROM messages
+                 WHERE session_id = ?1
+                   AND role = 'user'
+                   AND tool_call_id IS NULL
+                   AND include_in_prompt = 1
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to find cache-check message: {}", e))?;
+        let Some((message_id, message)) = message else {
+            return Ok(None);
+        };
+
+        let already_checked = conn
+            .query_row(
+                "SELECT 1
+                 FROM session_prompt_cache_checks
+                 WHERE session_id = ?1 AND message_id = ?2",
+                params![session_id, message_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to query prompt cache check: {}", e))?
+            .is_some();
+        if already_checked {
+            return Ok(None);
+        }
+
+        let baseline_tokens = previous
+            .map(|value| value.effective_context_tokens)
+            .unwrap_or(0);
+        let effective_context_tokens = input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_write_tokens);
+        let context_growth_tokens = effective_context_tokens.saturating_sub(baseline_tokens);
+        let excess_input_tokens = input_tokens.saturating_sub(context_growth_tokens);
+        let input_exceeds_context_threshold =
+            u128::from(excess_input_tokens) * 5 > u128::from(baseline_tokens) * 4;
+        let (invalidated, reason) = match previous {
+            None => (false, "no_baseline"),
+            Some(previous) if previous.model_id != model_id => (true, "model_changed"),
+            Some(previous) if previous.provider != provider => (true, "provider_changed"),
+            Some(_) if baseline_tokens == 0 => (false, "no_baseline"),
+            Some(_) if input_exceeds_context_threshold => {
+                (true, "input_growth_exceeds_context_threshold")
+            }
+            Some(_) => (false, "cache_reused"),
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO session_prompt_cache_checks (
+                session_id, message_id, message, model_id, baseline_tokens,
+                input_tokens, cache_read_tokens, excess_input_tokens,
+                invalidated, reason, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                session_id,
+                message_id,
+                message,
+                model_id,
+                baseline_tokens as i64,
+                input_tokens as i64,
+                cache_read_tokens as i64,
+                excess_input_tokens as i64,
+                invalidated as i64,
+                reason,
+                Self::now_ts(),
+            ],
+        )
+        .map_err(|e| format!("Failed to record prompt cache check: {}", e))?;
+        Ok(Some(PromptCacheCheckOutcome {
+            baseline_tokens,
+            input_tokens,
+            cache_read_tokens,
+            excess_input_tokens,
+            invalidated,
+            reason: reason.to_string(),
+        }))
+    }
+
+    pub fn list_cache_invalidations(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionCacheInvalidation>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id, message, model_id, baseline_tokens,
+                        input_tokens, cache_read_tokens, excess_input_tokens,
+                        reason, created_at
+                 FROM session_prompt_cache_checks
+                 WHERE session_id = ?1 AND invalidated = 1
+                 ORDER BY created_at DESC, id DESC",
+            )
+            .map_err(|e| format!("Failed to prepare cache invalidation query: {}", e))?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(SessionCacheInvalidation {
+                    message_id: row.get(0)?,
+                    message: row.get(1)?,
+                    model_id: row.get(2)?,
+                    baseline_tokens: row.get::<_, i64>(3)? as u64,
+                    input_tokens: row.get::<_, i64>(4)? as u64,
+                    cache_read_tokens: row.get::<_, i64>(5)? as u64,
+                    excess_input_tokens: row.get::<_, i64>(6)? as u64,
+                    reason: row.get(7)?,
+                    occurred_at: row.get(8)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query cache invalidations: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read cache invalidation row: {}", e))?;
+        Ok(rows)
+    }
+
     pub fn record_token_usage(
         &self,
         session_id: &str,
@@ -5573,10 +6070,34 @@ impl SessionStore {
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
+            0,
+            0,
             cost_usd,
             priced_rounds,
             context_tokens,
             context_limit,
+        )
+    }
+
+    pub fn merge_token_usage(
+        &self,
+        session_id: &str,
+        usage: &TokenUsage,
+    ) -> Result<TokenUsage, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::record_token_usage_with_conn(
+            &conn,
+            session_id,
+            usage.total_input_tokens,
+            usage.total_output_tokens,
+            usage.total_cache_read_tokens,
+            usage.total_cache_write_tokens,
+            usage.timed_output_tokens,
+            usage.model_active_duration_ms,
+            usage.total_cost_usd,
+            usage.priced_rounds,
+            None,
+            None,
         )
     }
 
@@ -5589,6 +6110,7 @@ impl SessionStore {
         request_kind: &str,
         input_tokens: u64,
         output_tokens: u64,
+        model_active_duration_ms: u64,
         cache_read_tokens: u64,
         cache_write_tokens: u64,
         cost_usd: f64,
@@ -5596,6 +6118,41 @@ impl SessionStore {
         context_tokens: Option<u32>,
         context_limit: Option<u32>,
     ) -> Result<TokenUsage, String> {
+        self.record_model_usage_with_cache_check(
+            session_id,
+            model_id,
+            provider,
+            request_kind,
+            input_tokens,
+            output_tokens,
+            model_active_duration_ms,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+            priced_rounds,
+            context_tokens,
+            context_limit,
+        )
+        .map(|(usage, _)| usage)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_model_usage_with_cache_check(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        provider: &str,
+        request_kind: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        model_active_duration_ms: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost_usd: f64,
+        priced_rounds: u64,
+        context_tokens: Option<u32>,
+        context_limit: Option<u32>,
+    ) -> Result<(TokenUsage, Option<PromptCacheCheckOutcome>), String> {
         let model_id = model_id.trim();
         let provider = provider.trim();
         let request_kind = request_kind.trim();
@@ -5607,6 +6164,17 @@ impl SessionStore {
         let tx = conn
             .transaction()
             .map_err(|e| format!("Failed to begin model usage transaction: {}", e))?;
+        let previous_completion = if request_kind == "completion" {
+            Self::latest_completion_server_baseline_with_conn(&tx, session_id)?
+        } else {
+            None
+        };
+        let (timed_output_tokens, model_active_duration_ms) =
+            if output_tokens > 0 && model_active_duration_ms > 0 {
+                (output_tokens, model_active_duration_ms)
+            } else {
+                (0, 0)
+            };
         let usage = Self::record_token_usage_with_conn(
             &tx,
             session_id,
@@ -5614,6 +6182,8 @@ impl SessionStore {
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
+            timed_output_tokens,
+            model_active_duration_ms,
             cost_usd,
             priced_rounds,
             context_tokens,
@@ -5646,9 +6216,23 @@ impl SessionStore {
             ],
         )
         .map_err(|e| format!("Failed to record model usage event: {}", e))?;
+        let cache_check = if request_kind == "completion" {
+            Self::record_prompt_cache_check_with_conn(
+                &tx,
+                session_id,
+                model_id,
+                provider,
+                previous_completion.as_ref(),
+                input_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            )?
+        } else {
+            None
+        };
         tx.commit()
             .map_err(|e| format!("Failed to commit model usage transaction: {}", e))?;
-        Ok(usage)
+        Ok((usage, cache_check))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5710,6 +6294,8 @@ impl SessionStore {
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_write_tokens: u64,
+        timed_output_tokens: u64,
+        model_active_duration_ms: u64,
         cost_usd: f64,
         priced_rounds: u64,
         context_tokens: Option<u32>,
@@ -5722,27 +6308,33 @@ impl SessionStore {
                 total_output_tokens,
                 total_cache_read_tokens,
                 total_cache_write_tokens,
+                timed_output_tokens,
+                model_active_duration_ms,
                 total_cost_usd,
                 priced_rounds,
                 last_context_tokens,
                 last_context_limit
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, 0), COALESCE(?9, 0))
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 0), COALESCE(?11, 0))
              ON CONFLICT(session_id) DO UPDATE SET
                 total_input_tokens = total_input_tokens + ?2,
                 total_output_tokens = total_output_tokens + ?3,
                 total_cache_read_tokens = total_cache_read_tokens + ?4,
                 total_cache_write_tokens = total_cache_write_tokens + ?5,
-                total_cost_usd = total_cost_usd + ?6,
-                priced_rounds = priced_rounds + ?7,
-                last_context_tokens = CASE WHEN ?8 IS NULL THEN last_context_tokens ELSE ?8 END,
-                last_context_limit = CASE WHEN ?9 IS NULL THEN last_context_limit ELSE ?9 END",
+                timed_output_tokens = timed_output_tokens + ?6,
+                model_active_duration_ms = model_active_duration_ms + ?7,
+                total_cost_usd = total_cost_usd + ?8,
+                priced_rounds = priced_rounds + ?9,
+                last_context_tokens = CASE WHEN ?10 IS NULL THEN last_context_tokens ELSE ?10 END,
+                last_context_limit = CASE WHEN ?11 IS NULL THEN last_context_limit ELSE ?11 END",
             params![
                 session_id,
                 input_tokens as i64,
                 output_tokens as i64,
                 cache_read_tokens as i64,
                 cache_write_tokens as i64,
+                timed_output_tokens as i64,
+                model_active_duration_ms as i64,
                 cost_usd,
                 priced_rounds as i64,
                 context_tokens.map(|value| value as i64),
@@ -5756,6 +6348,8 @@ impl SessionStore {
             total_out,
             total_cr,
             total_cw,
+            timed_output_tokens,
+            model_active_duration_ms,
             total_cost_usd,
             priced_rounds,
             last_context_tokens,
@@ -5767,6 +6361,8 @@ impl SessionStore {
                     total_output_tokens,
                     total_cache_read_tokens,
                     total_cache_write_tokens,
+                    timed_output_tokens,
+                    model_active_duration_ms,
                     total_cost_usd,
                     priced_rounds,
                     last_context_tokens,
@@ -5779,10 +6375,12 @@ impl SessionStore {
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
-                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(4)?,
                         row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
+                        row.get::<_, f64>(6)?,
                         row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
                     ))
                 },
             )
@@ -5793,6 +6391,8 @@ impl SessionStore {
             total_output_tokens: total_out as u64,
             total_cache_read_tokens: total_cr as u64,
             total_cache_write_tokens: total_cw as u64,
+            timed_output_tokens: timed_output_tokens as u64,
+            model_active_duration_ms: model_active_duration_ms as u64,
             total_cost_usd,
             priced_rounds: priced_rounds as u64,
             context_tokens: last_context_tokens as u32,
@@ -5900,6 +6500,8 @@ impl SessionStore {
                 total_output_tokens,
                 total_cache_read_tokens,
                 total_cache_write_tokens,
+                timed_output_tokens,
+                model_active_duration_ms,
                 total_cost_usd,
                 priced_rounds,
                 last_context_tokens,
@@ -5912,10 +6514,12 @@ impl SessionStore {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, f64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             },
         );
@@ -5926,6 +6530,8 @@ impl SessionStore {
                 total_out,
                 total_cr,
                 total_cw,
+                timed_output_tokens,
+                model_active_duration_ms,
                 total_cost_usd,
                 priced_rounds,
                 last_context_tokens,
@@ -5935,6 +6541,8 @@ impl SessionStore {
                 total_output_tokens: total_out as u64,
                 total_cache_read_tokens: total_cr as u64,
                 total_cache_write_tokens: total_cw as u64,
+                timed_output_tokens: timed_output_tokens as u64,
+                model_active_duration_ms: model_active_duration_ms as u64,
                 total_cost_usd,
                 priced_rounds: priced_rounds as u64,
                 context_tokens: last_context_tokens as u32,
@@ -5945,6 +6553,8 @@ impl SessionStore {
                 total_output_tokens: 0,
                 total_cache_read_tokens: 0,
                 total_cache_write_tokens: 0,
+                timed_output_tokens: 0,
+                model_active_duration_ms: 0,
                 total_cost_usd: 0.0,
                 priced_rounds: 0,
                 context_tokens: 0,
@@ -6446,20 +7056,16 @@ impl SessionStore {
         conn: &Connection,
         session_id: &str,
     ) -> Result<Vec<String>, String> {
+        let query = format!(
+            "SELECT id
+             FROM messages
+             WHERE session_id = ?1
+               AND role = 'user'
+               AND {DISPLAY_USER_MESSAGE_FILTER_SQL}
+             ORDER BY rowid ASC"
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT id
-                 FROM messages
-                 WHERE session_id = ?1
-                   AND role = 'user'
-                   AND NOT (
-                       TRIM(content) = ''
-                       AND COALESCE(images, '') = ''
-                       AND COALESCE(asset_refs, '') = ''
-                       AND LTRIM(COALESCE(prompt_suffix, '')) LIKE '<system-reminder>%'
-                   )
-                 ORDER BY rowid ASC",
-            )
+            .prepare(&query)
             .map_err(|e| format!("Failed to prepare user turn index: {}", e))?;
         let rows = stmt
             .query_map(params![session_id], |row| row.get::<_, String>(0))
@@ -6738,9 +7344,9 @@ impl SessionStore {
 mod tests {
     use super::{
         build_large_tool_result_message, estimate_preview, PersistedToolResult, SessionEventAppend,
-        SessionStore, CHILD_SESSION_FORK_ERROR, CONTEXT_COMPACTED_DISPLAY_MARKER,
-        DEFERRED_TOOL_IMAGE_DATA_PREFIX, RUN_STATUS_CANCELLED, RUN_STATUS_CANCELLING,
-        RUN_STATUS_DONE, RUN_STATUS_ERROR,
+        SessionPromptPrefixCache, SessionStore, CHILD_SESSION_FORK_ERROR,
+        CONTEXT_COMPACTED_DISPLAY_MARKER, DEFERRED_TOOL_IMAGE_DATA_PREFIX, RUN_STATUS_CANCELLED,
+        RUN_STATUS_CANCELLING, RUN_STATUS_DONE, RUN_STATUS_ERROR,
     };
     use crate::compact;
     use crate::session::models::{
@@ -6964,12 +7570,101 @@ mod tests {
         assert!(
             SessionStore::table_has_column(&conn, "token_usage", "last_context_limit").unwrap()
         );
+        assert!(
+            SessionStore::table_has_column(&conn, "token_usage", "timed_output_tokens").unwrap()
+        );
+        assert!(
+            SessionStore::table_has_column(&conn, "token_usage", "model_active_duration_ms")
+                .unwrap()
+        );
         assert!(table_exists(&conn, "session_runs"));
         assert!(table_exists(&conn, "session_events"));
         assert!(table_exists(&conn, "model_usage_events"));
         assert!(table_exists(&conn, "response_request_payloads"));
         assert!(table_exists(&conn, "session_context_attempts"));
         assert!(table_exists(&conn, "session_context_capture_gaps"));
+        assert!(table_exists(&conn, "session_prompt_cache_checks"));
+    }
+
+    #[test]
+    fn v31_database_migrates_prompt_cache_checks_and_keeps_old_sessions_readable() {
+        let dir = tempdir().expect("create temp dir");
+        let db_path = dir.path().join("locus.db");
+        {
+            let _store = SessionStore::new(dir.path()).expect("initialize latest store");
+        }
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            "DROP TABLE session_prompt_cache_checks;
+             PRAGMA user_version = 31;",
+        )
+        .expect("simulate v31 schema");
+        drop(conn);
+
+        let store = SessionStore::new(dir.path()).expect("migrate v31 store");
+        assert!(store
+            .list_cache_invalidations("missing-session")
+            .expect("read migrated cache invalidations")
+            .is_empty());
+        drop(store);
+
+        let conn = Connection::open(&db_path).expect("open migrated db");
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema version");
+        assert_eq!(version, SessionStore::SCHEMA_VERSION);
+        assert!(table_exists(&conn, "session_prompt_cache_checks"));
+    }
+
+    #[test]
+    fn v30_database_migrates_output_timing_and_exports_missing_samples_as_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let db_path = dir.path().join("locus.db");
+        let conn = Connection::open(&db_path).expect("create v30 db");
+        SessionStore::create_latest_schema(&conn).expect("create schema");
+        conn.execute_batch(
+            "ALTER TABLE token_usage DROP COLUMN timed_output_tokens;
+             ALTER TABLE token_usage DROP COLUMN model_active_duration_ms;
+             INSERT INTO sessions (id, title, session_type, created_at, updated_at)
+             VALUES ('session-v30', 'Migrated output timing', 'chat', 100, 100);
+             INSERT INTO token_usage (
+                session_id, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens,
+                total_cost_usd, priced_rounds, last_context_tokens, last_context_limit
+             ) VALUES ('session-v30', 100, 20, 5, 0, 0, 0, 125, 4096);
+             PRAGMA user_version = 30;",
+        )
+        .expect("create v30 session schema");
+        drop(conn);
+
+        let store = SessionStore::new(dir.path()).expect("migrate v30 store");
+        let usage = store
+            .get_token_usage("session-v30")
+            .expect("read migrated usage");
+        assert_eq!(usage.total_output_tokens, 20);
+        assert_eq!(usage.timed_output_tokens, 0);
+        assert_eq!(usage.model_active_duration_ms, 0);
+
+        let output = dir.path().join("migrated-context.yaml");
+        crate::session::context_export::export_session_context_yaml(
+            &store,
+            "session-v30",
+            "",
+            None,
+            None,
+            &output,
+        )
+        .expect("export migrated context");
+        let raw = std::fs::read_to_string(output).expect("read migrated export");
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).expect("parse migrated export");
+        assert_eq!(
+            yaml["sessions"][0]["token_usage"]["timedOutputTokens"].as_str(),
+            Some("empty")
+        );
+        assert_eq!(
+            yaml["sessions"][0]["token_usage"]["modelActiveDurationMs"].as_str(),
+            Some("empty")
+        );
     }
 
     #[test]
@@ -7409,9 +8104,37 @@ mod tests {
         let session_id = store
             .create_session("turn index", None, None, "chat", None)
             .expect("create session");
+        let preview_image = ImageData {
+            data: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+        };
         let first_user_id = store
-            .add_message(&session_id, MessageRole::User, "first prompt")
+            .add_message_with_images(
+                &session_id,
+                MessageRole::User,
+                "first prompt",
+                Some(std::slice::from_ref(&preview_image)),
+            )
             .expect("add first user");
+        let internal_reminder_id = store
+            .add_message_with_images_asset_refs_and_signature(
+                &session_id,
+                MessageRole::User,
+                "",
+                None,
+                None,
+                None,
+                None,
+                Some("<system-reminder>internal</system-reminder>"),
+            )
+            .expect("add internal reminder");
+        let checkpoint_id = store
+            .add_message(
+                &session_id,
+                MessageRole::User,
+                &compact::build_conversation_checkpoint_content("summary", "recent"),
+            )
+            .expect("add compact checkpoint");
         store
             .add_message(&session_id, MessageRole::Assistant, "first response")
             .expect("add first assistant");
@@ -7441,6 +8164,23 @@ mod tests {
         assert_eq!(preview.message_id, first_user_id);
         assert_eq!(preview.prompt, "first prompt");
         assert_eq!(preview.response, "first response");
+        assert_eq!(preview.images, vec![preview_image]);
+
+        let raw_messages = store.get_messages(&session_id).expect("load raw messages");
+        assert!(raw_messages
+            .iter()
+            .any(|message| message.id == internal_reminder_id));
+        let display_messages = store
+            .get_messages_for_display(&session_id)
+            .expect("load display messages");
+        assert!(display_messages
+            .iter()
+            .all(|message| message.id != internal_reminder_id));
+        let display_checkpoint = display_messages
+            .iter()
+            .find(|message| message.id == checkpoint_id)
+            .expect("keep compact divider in display history");
+        assert_eq!(display_checkpoint.content, CONTEXT_COMPACTED_DISPLAY_MARKER);
     }
 
     #[test]
@@ -7730,6 +8470,291 @@ mod tests {
     }
 
     #[test]
+    fn completion_usage_records_server_input_invalidation_once_per_user_message() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Cache checks", None, None, "chat", Some("simple"))
+            .expect("create session");
+        store
+            .add_message(&session_id, MessageRole::User, "cold start")
+            .expect("add first user message");
+        store
+            .record_model_usage(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                100,
+                10,
+                100,
+                0,
+                0,
+                0.0,
+                0,
+                Some(110),
+                Some(4096),
+            )
+            .expect("record cold completion usage");
+
+        let missed_message_id = store
+            .add_message(&session_id, MessageRole::User, "cache miss")
+            .expect("add missed user message");
+        store
+            .record_model_usage_with_cache_check(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                90,
+                2,
+                10,
+                0,
+                0,
+                0.0,
+                0,
+                Some(52),
+                Some(4096),
+            )
+            .expect("record cache miss");
+        // A second completion in the same user turn must not replace the
+        // first server-based cache check.
+        store
+            .record_model_usage(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                1,
+                1,
+                10,
+                200,
+                0,
+                0.0,
+                0,
+                Some(202),
+                Some(4096),
+            )
+            .expect("record later completion in same turn");
+
+        let invalidations = store
+            .list_cache_invalidations(&session_id)
+            .expect("list invalidations");
+        assert_eq!(invalidations.len(), 1);
+        assert_eq!(invalidations[0].message_id, missed_message_id);
+        assert_eq!(invalidations[0].message, "cache miss");
+        assert_eq!(invalidations[0].model_id, "openai/gpt-test");
+        assert_eq!(invalidations[0].baseline_tokens, 100);
+        assert_eq!(invalidations[0].input_tokens, 90);
+        assert_eq!(invalidations[0].cache_read_tokens, 0);
+        assert_eq!(invalidations[0].excess_input_tokens, 90);
+        assert_eq!(
+            invalidations[0].reason,
+            "input_growth_exceeds_context_threshold"
+        );
+    }
+
+    #[test]
+    fn server_input_growth_avoids_cache_boundary_false_positives() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Cache boundary", None, None, "chat", Some("simple"))
+            .expect("create session");
+        store
+            .add_message(&session_id, MessageRole::User, "baseline")
+            .expect("add baseline message");
+        store
+            .record_model_usage(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                2_729,
+                10,
+                100,
+                273_792,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record baseline usage");
+
+        store
+            .add_message(&session_id, MessageRole::User, "cache boundary tail")
+            .expect("add next message");
+        let (_, check) = store
+            .record_model_usage_with_cache_check(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                1_900,
+                10,
+                100,
+                275_840,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record boundary-tail usage");
+        let check = check.expect("cache check");
+        assert!(!check.invalidated);
+        assert_eq!(check.baseline_tokens, 276_521);
+        assert_eq!(check.input_tokens, 1_900);
+        assert_eq!(check.excess_input_tokens, 681);
+        assert_eq!(check.reason, "cache_reused");
+        assert!(store
+            .list_cache_invalidations(&session_id)
+            .expect("list invalidations")
+            .is_empty());
+    }
+
+    #[test]
+    fn server_input_invalidation_threshold_is_strictly_greater_than_eighty_percent() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Cache threshold", None, None, "chat", Some("simple"))
+            .expect("create session");
+        store
+            .add_message(&session_id, MessageRole::User, "baseline")
+            .expect("add baseline message");
+        store
+            .record_model_usage(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                100,
+                1,
+                10,
+                0,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record baseline usage");
+
+        store
+            .add_message(&session_id, MessageRole::User, "exact threshold")
+            .expect("add threshold message");
+        let (_, exact_check) = store
+            .record_model_usage_with_cache_check(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                80,
+                1,
+                10,
+                20,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record exact-threshold usage");
+        assert!(!exact_check.expect("exact threshold check").invalidated);
+
+        store
+            .add_message(&session_id, MessageRole::User, "above threshold")
+            .expect("add above-threshold message");
+        let (_, above_check) = store
+            .record_model_usage_with_cache_check(
+                &session_id,
+                "openai/gpt-test",
+                "OpenAI Codex",
+                "completion",
+                81,
+                1,
+                10,
+                19,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record above-threshold usage");
+        let above_check = above_check.expect("above threshold check");
+        assert!(above_check.invalidated);
+        assert_eq!(above_check.excess_input_tokens, 81);
+        assert_eq!(above_check.reason, "input_growth_exceeds_context_threshold");
+    }
+
+    #[test]
+    fn model_change_always_records_cache_invalidation_from_server_baseline() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Model switch", None, None, "chat", Some("simple"))
+            .expect("create session");
+        store
+            .add_message(&session_id, MessageRole::User, "first model")
+            .expect("add first user message");
+        store
+            .record_model_usage(
+                &session_id,
+                "openai/gpt-a",
+                "OpenAI Codex",
+                "completion",
+                120,
+                10,
+                100,
+                0,
+                0,
+                0.0,
+                0,
+                Some(130),
+                Some(4096),
+            )
+            .expect("record first model usage");
+
+        let switched_message_id = store
+            .add_message(&session_id, MessageRole::User, "switch model")
+            .expect("add switched user message");
+        let (_, check) = store
+            .record_model_usage_with_cache_check(
+                &session_id,
+                "openai/gpt-b",
+                "OpenAI Codex",
+                "completion",
+                5,
+                2,
+                20,
+                120,
+                0,
+                0.0,
+                0,
+                Some(127),
+                Some(4096),
+            )
+            .expect("record switched model usage");
+        let check = check.expect("model switch cache check");
+        assert!(check.invalidated);
+        assert_eq!(check.baseline_tokens, 120);
+        assert_eq!(check.input_tokens, 5);
+        assert_eq!(check.cache_read_tokens, 120);
+        assert_eq!(check.excess_input_tokens, 0);
+        assert_eq!(check.reason, "model_changed");
+
+        let invalidations = store
+            .list_cache_invalidations(&session_id)
+            .expect("list model switch invalidations");
+        assert_eq!(invalidations.len(), 1);
+        assert_eq!(invalidations[0].message_id, switched_message_id);
+        assert_eq!(invalidations[0].reason, "model_changed");
+    }
+
+    #[test]
     fn model_usage_report_counts_calls_without_counting_parent_rollups() {
         let dir = tempdir().expect("create temp dir");
         let store = SessionStore::new(dir.path()).expect("initialize store");
@@ -7748,6 +8773,7 @@ mod tests {
                 "completion",
                 100,
                 20,
+                1_000,
                 10,
                 0,
                 0.0,
@@ -7764,6 +8790,7 @@ mod tests {
                 "completion",
                 50,
                 10,
+                500,
                 5,
                 2,
                 0.25,
@@ -7773,17 +8800,7 @@ mod tests {
             )
             .expect("record child call");
         store
-            .record_token_usage(
-                &parent_id,
-                child_usage.total_input_tokens,
-                child_usage.total_output_tokens,
-                child_usage.total_cache_read_tokens,
-                child_usage.total_cache_write_tokens,
-                child_usage.total_cost_usd,
-                child_usage.priced_rounds,
-                None,
-                None,
-            )
+            .merge_token_usage(&parent_id, &child_usage)
             .expect("merge child usage into parent");
         store
             .record_model_usage_event(
@@ -7815,6 +8832,62 @@ mod tests {
             .expect("read parent usage");
         assert_eq!(parent_usage.total_input_tokens, 150);
         assert_eq!(parent_usage.total_output_tokens, 30);
+        assert_eq!(parent_usage.timed_output_tokens, 30);
+        assert_eq!(parent_usage.model_active_duration_ms, 1_500);
+    }
+
+    #[test]
+    fn model_usage_report_groups_auto_review_calls_under_reviewer_model() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Auto review", None, None, "chat", None)
+            .expect("create session");
+
+        store
+            .record_model_usage(
+                &session_id,
+                "codex-auto-review",
+                "OpenAI Codex",
+                "auto_review",
+                80,
+                12,
+                600,
+                4,
+                0,
+                0.0,
+                0,
+                None,
+                None,
+            )
+            .expect("record successful review");
+        store
+            .record_model_usage_event(
+                &session_id,
+                "codex-auto-review",
+                "OpenAI Codex",
+                "auto_review",
+                0,
+                0,
+                0,
+                0,
+                0.0,
+            )
+            .expect("record failed review attempt");
+
+        let report = store
+            .get_model_usage_report(Some(30))
+            .expect("read usage report");
+        let reviewer = report
+            .by_model
+            .iter()
+            .find(|group| group.model_id == "codex-auto-review")
+            .expect("reviewer model group");
+        assert_eq!(reviewer.provider, "OpenAI Codex");
+        assert_eq!(reviewer.usage.request_count, 2);
+        assert_eq!(reviewer.usage.input_tokens, 80);
+        assert_eq!(reviewer.usage.output_tokens, 12);
+        assert_eq!(reviewer.usage.cache_read_tokens, 4);
     }
 
     #[test]
@@ -10694,5 +11767,215 @@ mod tests {
         assert!(store
             .latest_run_is_interrupted(&partial_session)
             .expect("read interrupted run state"));
+    }
+
+    #[test]
+    fn prompt_prefix_cache_expires_from_last_remote_response() {
+        let dir = tempdir().expect("create temp dir");
+        let store = SessionStore::new(dir.path()).expect("initialize store");
+        let session_id = store
+            .create_session("Prefix cache", None, None, "chat", None)
+            .expect("create session");
+        let cache = SessionPromptPrefixCache {
+            provider_key: "provider-a".to_string(),
+            base_prompt: "base".to_string(),
+            rules_prompt: "rules".to_string(),
+            knowledge_prompt: "knowledge".to_string(),
+            env_prompt: "env".to_string(),
+            synthesized_at: 100,
+            last_remote_response_at: None,
+        };
+        store
+            .replace_prompt_prefix_cache(&session_id, &cache)
+            .expect("persist prefix cache");
+
+        assert_eq!(
+            store
+                .fresh_prompt_prefix_cache(&session_id, "provider-a", 300, 400)
+                .expect("load cache at ttl boundary"),
+            Some(cache.clone())
+        );
+        assert_eq!(
+            store
+                .fresh_prompt_prefix_cache(&session_id, "provider-a", 300, 401)
+                .expect("load expired cache"),
+            None
+        );
+
+        store
+            .mark_prompt_prefix_remote_response(&session_id, "provider-a", 500)
+            .expect("refresh response timestamp");
+        let refreshed = store
+            .fresh_prompt_prefix_cache(&session_id, "provider-a", 300, 800)
+            .expect("load response-refreshed cache")
+            .expect("cache remains fresh");
+        assert_eq!(refreshed.last_remote_response_at, Some(500));
+        assert_eq!(
+            store
+                .fresh_prompt_prefix_cache(&session_id, "provider-a", 300, 801)
+                .expect("load response-expired cache"),
+            None
+        );
+        assert_eq!(
+            store
+                .fresh_prompt_prefix_cache(&session_id, "provider-b", 300, 500)
+                .expect("load provider-mismatched cache"),
+            None
+        );
+        assert_eq!(
+            store
+                .fresh_prompt_prefix_cache(&session_id, "provider-a", 0, 500)
+                .expect("load disabled cache"),
+            None
+        );
+    }
+
+    #[test]
+    fn v33_cache_checks_migrate_to_server_input_growth_and_keep_sessions_exportable() {
+        let dir = tempdir().expect("create temp dir");
+        let session_id = {
+            let store = SessionStore::new(dir.path()).expect("initialize latest store");
+            let session_id = store
+                .create_session("Migrated cache checks", None, None, "chat", None)
+                .expect("create session");
+            let message_id = store
+                .add_message(&session_id, MessageRole::User, "legacy cache check")
+                .expect("add legacy message");
+            {
+                let conn = store.conn.lock().expect("lock store");
+                conn.execute_batch(
+                    "DROP TABLE session_prompt_cache_checks;
+                     CREATE TABLE session_prompt_cache_checks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                        message_id TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        baseline_tokens INTEGER NOT NULL,
+                        cache_read_tokens INTEGER NOT NULL,
+                        invalidated INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        UNIQUE(session_id, message_id)
+                     );
+                     CREATE INDEX idx_session_prompt_cache_checks_session
+                        ON session_prompt_cache_checks(session_id, created_at DESC, id DESC);
+                     PRAGMA user_version = 33;",
+                )
+                .expect("simulate v33 cache-check schema");
+                conn.execute(
+                    "INSERT INTO session_prompt_cache_checks (
+                        session_id, message_id, message, model_id, baseline_tokens,
+                        cache_read_tokens, invalidated, reason, created_at
+                     ) VALUES (?1, ?2, 'legacy cache check', 'openai/gpt-old',
+                        100, 0, 1, 'cache_read_below_baseline', 1)",
+                    params![session_id, message_id],
+                )
+                .expect("insert v33 cache check");
+            }
+            session_id
+        };
+
+        let store = SessionStore::new(dir.path()).expect("migrate v33 store");
+        let detail = store
+            .load_session(&session_id)
+            .expect("load migrated session");
+        assert_eq!(detail.messages[0].content, "legacy cache check");
+        assert!(store
+            .list_cache_invalidations(&session_id)
+            .expect("list migrated cache checks")
+            .is_empty());
+
+        let snapshot = store
+            .create_export_snapshot()
+            .expect("create migrated export snapshot");
+        let exported = snapshot
+            .load_session(&session_id)
+            .expect("load migrated export session");
+        assert_eq!(exported.messages[0].content, "legacy cache check");
+
+        let export_path = dir.path().join("migrated-cache-checks.yaml");
+        crate::session::context_export::export_session_context_yaml(
+            &store,
+            &session_id,
+            "",
+            None,
+            None,
+            &export_path,
+        )
+        .expect("export migrated session");
+        let exported_yaml = std::fs::read_to_string(export_path).expect("read migrated export");
+        assert!(exported_yaml.contains("legacy cache check"));
+
+        let conn = Connection::open(dir.path().join("locus.db")).expect("reopen migrated db");
+        assert!(SessionStore::table_has_column(
+            &conn,
+            "session_prompt_cache_checks",
+            "baseline_tokens",
+        )
+        .expect("check baseline column"));
+        assert!(
+            SessionStore::table_has_column(&conn, "session_prompt_cache_checks", "reason",)
+                .expect("check reason column")
+        );
+        assert!(SessionStore::table_has_column(
+            &conn,
+            "session_prompt_cache_checks",
+            "input_tokens",
+        )
+        .expect("check input column"));
+        assert!(SessionStore::table_has_column(
+            &conn,
+            "session_prompt_cache_checks",
+            "excess_input_tokens",
+        )
+        .expect("check excess input column"));
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read migrated schema version");
+        assert_eq!(version, SessionStore::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v29_database_migrates_prompt_prefix_cache_and_keeps_sessions_exportable() {
+        let dir = tempdir().expect("create temp dir");
+        let session_id = {
+            let store = SessionStore::new(dir.path()).expect("initialize latest store");
+            let session_id = store
+                .create_session("Migrated prefix cache", None, None, "chat", None)
+                .expect("create session");
+            store
+                .add_message(&session_id, MessageRole::User, "legacy message")
+                .expect("add legacy message");
+            {
+                let conn = store.conn.lock().expect("lock store");
+                conn.execute_batch(
+                    "DROP TABLE session_prompt_prefix_cache;
+                     PRAGMA user_version = 29;",
+                )
+                .expect("simulate v29 schema");
+            }
+            session_id
+        };
+
+        let store = SessionStore::new(dir.path()).expect("migrate v29 store");
+        let detail = store
+            .load_session(&session_id)
+            .expect("load migrated session");
+        assert_eq!(detail.messages[0].content, "legacy message");
+        let snapshot = store
+            .create_export_snapshot()
+            .expect("create migrated export snapshot");
+        let exported = snapshot
+            .load_session(&session_id)
+            .expect("load migrated export session");
+        assert_eq!(exported.messages[0].content, "legacy message");
+
+        let conn = Connection::open(dir.path().join("locus.db")).expect("reopen migrated db");
+        assert!(table_exists(&conn, "session_prompt_prefix_cache"));
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read migrated schema version");
+        assert_eq!(version, SessionStore::SCHEMA_VERSION);
     }
 }

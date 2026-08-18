@@ -77,6 +77,7 @@ import type {
 } from "../types";
 import {
   DEFAULT_CATALOG_CONTEXT_LENGTH,
+  DEFAULT_PROVIDER_PREFIX_CACHE_TTL_SECONDS,
   DEFAULT_REASONING_EFFORTS,
   defaultReasoningParamFormat,
   modelRowIdFromApiModel,
@@ -84,6 +85,7 @@ import {
 } from "../services/modelCatalog";
 import { t } from "../i18n";
 import { filterVisibleProviders } from "../config/providerVisibility";
+import { normalizeCodexContextWindow } from "../config/codexContext";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { setThemePreference } from "./useTheme";
 
@@ -205,10 +207,18 @@ export function useSettingsState(emit: SettingsEmit) {
   function normalizeCodexModelConfig(
     config?: Partial<CodexModelConfig> | null,
   ): CodexModelConfig {
+    const prefixCacheTtlSeconds = Number(config?.prefixCacheTtlSeconds);
     return {
       transport: config?.transport === "http" ? "http" : "websocket",
-      extendedContext: config?.extendedContext === true,
+      contextWindow: normalizeCodexContextWindow(
+        config?.contextWindow,
+        config?.extendedContext === true,
+      ),
       generateSessionTitles: config?.generateSessionTitles === true,
+      autoReview: config?.autoReview === true,
+      prefixCacheTtlSeconds: Number.isFinite(prefixCacheTtlSeconds)
+        ? Math.max(0, Math.round(prefixCacheTtlSeconds))
+        : 30 * 60,
     };
   }
 
@@ -904,22 +914,22 @@ export function useSettingsState(emit: SettingsEmit) {
     }
   }
 
-  async function setCodexExtendedContext(enabled: boolean) {
+  async function setCodexContextWindow(value: number) {
     const next = normalizeCodexModelConfig({
       ...codexModelConfig.value,
-      extendedContext: enabled,
+      contextWindow: value,
     });
-    if (codexModelConfig.value.extendedContext === next.extendedContext) return;
+    if (codexModelConfig.value.contextWindow === next.contextWindow) return;
     const previous = codexModelConfig.value;
     codexModelConfig.value = next;
     try {
       await serviceSaveCodexModelConfig(next);
       emit("codexTransportChanged", next);
-      successMsg.value = t("settings.codex.extendedContextSaved");
+      successMsg.value = t("settings.codex.contextWindowSaved");
       setTimeout(() => { successMsg.value = ""; }, 2000);
     } catch (e) {
       const err = normalizeAppError(e);
-      useNotificationStore().addNotice("error", t("settings.codex.extendedContextSaveFailed", err.message), {
+      useNotificationStore().addNotice("error", t("settings.codex.contextWindowSaveFailed", err.message), {
         code: err.code,
         operation: "saveCodexModelConfig",
       });
@@ -943,6 +953,52 @@ export function useSettingsState(emit: SettingsEmit) {
     } catch (e) {
       const err = normalizeAppError(e);
       useNotificationStore().addNotice("error", t("settings.codex.sessionTitleSaveFailed", err.message), {
+        code: err.code,
+        operation: "saveCodexModelConfig",
+      });
+      codexModelConfig.value = previous;
+    }
+  }
+
+  async function setCodexAutoReview(enabled: boolean) {
+    const next = normalizeCodexModelConfig({
+      ...codexModelConfig.value,
+      autoReview: enabled,
+    });
+    if (codexModelConfig.value.autoReview === next.autoReview) return;
+    const previous = codexModelConfig.value;
+    codexModelConfig.value = next;
+    try {
+      await serviceSaveCodexModelConfig(next);
+      emit("codexTransportChanged", next);
+      successMsg.value = t("settings.codex.autoReviewSaved");
+      setTimeout(() => { successMsg.value = ""; }, 2000);
+    } catch (e) {
+      const err = normalizeAppError(e);
+      useNotificationStore().addNotice("error", t("settings.codex.autoReviewSaveFailed", err.message), {
+        code: err.code,
+        operation: "saveCodexModelConfig",
+      });
+      codexModelConfig.value = previous;
+    }
+  }
+
+  async function setCodexPrefixCacheTtlSeconds(value: number) {
+    const next = normalizeCodexModelConfig({
+      ...codexModelConfig.value,
+      prefixCacheTtlSeconds: value,
+    });
+    if (codexModelConfig.value.prefixCacheTtlSeconds === next.prefixCacheTtlSeconds) return;
+    const previous = codexModelConfig.value;
+    codexModelConfig.value = next;
+    try {
+      await serviceSaveCodexModelConfig(next);
+      emit("codexTransportChanged", next);
+      successMsg.value = t("settings.codex.prefixCacheTtlSaved");
+      setTimeout(() => { successMsg.value = ""; }, 2000);
+    } catch (e) {
+      const err = normalizeAppError(e);
+      useNotificationStore().addNotice("error", t("settings.codex.prefixCacheTtlSaveFailed", err.message), {
         code: err.code,
         operation: "saveCodexModelConfig",
       });
@@ -1182,7 +1238,6 @@ export function useSettingsState(emit: SettingsEmit) {
     { name: "code_hover",           label: "code_hover",           desc: t("tool.desc.code_hover"),           defaultMode: "auto" as const },
     { name: "unity_code_usages",    label: "unity_code_usages",    desc: t("tool.desc.unity_code_usages"),    defaultMode: "auto" as const },
     { name: "unity_asset_search", label: "unity_asset_search", desc: t("tool.desc.unity_asset_search"), defaultMode: "auto" as const },
-    { name: "unity_yaml_list",    label: "unity_yaml_list",    desc: t("tool.desc.unity_yaml_list"),    defaultMode: "auto" as const },
     { name: "unity_yaml_search",  label: "unity_yaml_search",  desc: t("tool.desc.unity_yaml_search"),  defaultMode: "auto" as const },
     { name: "unity_yaml_read",    label: "unity_yaml_read",    desc: t("tool.desc.unity_yaml_read"),    defaultMode: "auto" as const },
     { name: "knowledge_query",    label: "knowledge_query",    desc: t("tool.desc.knowledge_query"),    defaultMode: "auto" as const },
@@ -1191,6 +1246,12 @@ export function useSettingsState(emit: SettingsEmit) {
   ]);
 
   const approvalBehaviorList = computed(() => [
+    {
+      name: "behavior.local_dangerous_commands",
+      label: t("settings.perms.behavior.localDangerousCommands"),
+      desc: t("settings.perms.behavior.localDangerousCommandsDesc"),
+      defaultMode: "ask" as const,
+    },
     {
       name: "behavior.unity_editor_status_change",
       label: t("settings.perms.behavior.unityEditorStatusChange"),
@@ -1370,8 +1431,12 @@ export function useSettingsState(emit: SettingsEmit) {
   }
 
   function normalizeCustomProvider(provider: CustomProvider): CustomProvider {
+    const prefixCacheTtlSeconds = Number(provider.prefixCacheTtlSeconds);
     return {
       ...provider,
+      prefixCacheTtlSeconds: Number.isFinite(prefixCacheTtlSeconds)
+        ? Math.max(0, Math.round(prefixCacheTtlSeconds))
+        : DEFAULT_PROVIDER_PREFIX_CACHE_TTL_SECONDS,
       models: (provider.models ?? []).map((model) =>
         normalizeProviderModel(model, provider.apiFormat),
       ),
@@ -1387,6 +1452,7 @@ export function useSettingsState(emit: SettingsEmit) {
       apiFormat: ep.apiFormat,
       apiKey: ep.apiKey,
       catalogId: null,
+      prefixCacheTtlSeconds: DEFAULT_PROVIDER_PREFIX_CACHE_TTL_SECONDS,
       models: [{
         id: modelRowIdFromApiModel(ep.apiModel),
         apiModel: ep.apiModel,
@@ -1733,8 +1799,10 @@ export function useSettingsState(emit: SettingsEmit) {
     retryCodexValidation,
     copyCode,
     setCodexTransportMode,
-    setCodexExtendedContext,
+    setCodexContextWindow,
     setCodexSessionTitleGeneration,
+    setCodexAutoReview,
+    setCodexPrefixCacheTtlSeconds,
 
     requestCodexLogin,
 

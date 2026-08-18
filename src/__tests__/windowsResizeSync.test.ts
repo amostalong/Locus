@@ -100,4 +100,26 @@ describe("native Windows resize sync", () => {
     expect(sync).toContain("state.last_width == width");
     expect(sync).not.toContain("std::thread::sleep");
   });
+
+  it("keeps the Windows runtime above the resize-border DC leak fix", () => {
+    const lock = read("src-tauri/Cargo.lock");
+    const runtimePackage = lock.match(
+      /\[\[package\]\]\s+name = "tauri-runtime-wry"\s+version = "(\d+)\.(\d+)\.(\d+)"/,
+    );
+
+    expect(runtimePackage).not.toBeNull();
+    const [, major, minor, patch] = runtimePackage!.map(Number);
+    const includesDcReleaseFix =
+      major > 2 || (major === 2 && (minor > 11 || (minor === 11 && patch >= 4)));
+    expect(includesDcReleaseFix).toBe(true);
+  });
+
+  it("links the Tauri Common Controls manifest into Rust unit-test binaries", () => {
+    const buildScript = read("src-tauri/build.rs");
+
+    expect(buildScript).toContain('std::env::var_os("OUT_DIR")');
+    expect(buildScript).toContain('.join("resource.lib")');
+    expect(buildScript).toContain('println!("cargo:rustc-link-arg={}", resource_lib.display())');
+    expect(buildScript).toContain("STATUS_ENTRYPOINT_NOT_FOUND");
+  });
 });

@@ -109,8 +109,21 @@ describe("parseAgentToolDefinition", () => {
     expect(definition.description).toContain("physical line range");
     expect(definition.description).toContain("Use `read`");
     expect(definition.description).toContain("titles are omitted");
+    expect(definition.description).toContain("<path> :: <summary>");
+    expect(definition.description).toContain("single-line");
+    expect(definition.description).toContain("| lines <start>-<end>");
+    expect(definition.description).toContain("ranking metadata is also omitted");
     expect(definition.parameters.properties.includeSummary.default).toBe(false);
+    expect(definition.parameters.properties.includeSummary.description).toContain(
+      "each document on one line",
+    );
+    expect(definition.parameters.properties.includeSummary.description).toContain(
+      "Summary whitespace is collapsed",
+    );
     expect(definition.parameters.properties.includeHitContext.default).toBe(true);
+    expect(definition.parameters.properties.includeHitContext.description).toContain(
+      "internal metadata is omitted",
+    );
     expect(definition.parameters.properties.hitContextMaxChars).toMatchObject({
       default: 220,
       minimum: 80,
@@ -137,9 +150,13 @@ describe("parseAgentToolDefinition", () => {
     expect(definition.description).toContain("unsupported file types return an error");
   });
 
-  it("keeps edit limited to one public file edit", () => {
+  it("exposes one atomic same-file edit batch with original-snapshot semantics", () => {
     const raw = readFileSync(resolve(cwd, "tools/edit.json"), "utf8");
     const definition = JSON.parse(raw);
+    const devToolUsageRule = readFileSync(
+      resolve(cwd, "agent/dev/rule/tool_usage_strategy.md"),
+      "utf8",
+    );
     const tool = parseAgentToolDefinition({
       name: "edit",
       ...definition,
@@ -147,15 +164,24 @@ describe("parseAgentToolDefinition", () => {
 
     expect(tool).not.toBeNull();
     expect(definition.parameters.additionalProperties).toBe(false);
-    expect(tool?.topLevelRequired).toEqual(["filePath", "oldString", "newString"]);
+    expect(tool?.topLevelRequired).toEqual(["filePath", "edits"]);
     expect(tool?.parameterRows.map((row) => row.path)).toEqual([
       "filePath",
-      "oldString",
-      "newString",
-      "replaceAll",
+      "edits",
+      "edits[]",
+      "edits[].oldString",
+      "edits[].newString",
+      "edits[].replaceAll",
     ]);
-    expect(tool?.parameterRows.some((row) => row.path === "edits")).toBe(false);
-    expect(tool?.parameterRows.find((row) => row.path === "replaceAll")?.defaultValue).toBe("false");
+    expect(definition.parameters.properties.edits.minItems).toBe(1);
+    expect(definition.parameters.properties.edits.items.additionalProperties).toBe(false);
+    expect(tool?.parameterRows.find((row) => row.path === "edits[].replaceAll")?.defaultValue).toBe("false");
+    expect(definition.description).toContain("matched against the original file content");
+    expect(definition.description).toContain("Array order does not make edits sequential");
+    expect(definition.description).toContain("entire call fails without changing the file");
+    expect(devToolUsageRule).toContain("call's `edits` array");
+    expect(devToolUsageRule).toContain("matched against the same original file");
+    expect(devToolUsageRule).toContain("Array order does not create dependencies");
   });
 
   it("documents automatic knowledge frontmatter in write", () => {

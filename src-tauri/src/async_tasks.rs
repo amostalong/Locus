@@ -99,7 +99,7 @@ pub fn augment_tool_schema(tool_name: &str, tool: &mut serde_json::Value) {
         serde_json::json!({
             "type": "string",
             "enum": ["sync", "async", "notify"],
-            "description": "Execution mode. 'sync' waits and returns the result; 'async' runs without an execution deadline and returns a task id immediately; 'notify' also resumes or reminds this session when the task finishes. Default 'sync'.",
+            "description": "Execution mode. 'sync' waits and returns the result; 'async' runs without an execution deadline and returns a task id immediately; 'notify' automatically resumes or reminds this session with the final result when the task finishes, so do not poll get_task_status. Failures detected during startup are returned directly and do not require get_task_status. Default 'sync'.",
             "default": "sync"
         }),
     );
@@ -239,6 +239,7 @@ fn format_task_snapshot(snapshot: &AsyncTaskSnapshot, include_output: bool) -> S
 struct AsyncTaskEntry {
     snapshot: AsyncTaskSnapshot,
     cancel_tx: watch::Sender<bool>,
+    working_dir: Option<String>,
 }
 
 #[derive(Clone)]
@@ -288,6 +289,16 @@ impl AsyncTaskManager {
     }
 
     pub fn create_task(&self, session_id: &str, tool_name: &str, notify: bool) -> AsyncTaskStart {
+        self.create_task_in_workspace(session_id, tool_name, notify, None)
+    }
+
+    pub fn create_task_in_workspace(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        notify: bool,
+        working_dir: Option<&str>,
+    ) -> AsyncTaskStart {
         let task_id = format!("task_{}", uuid::Uuid::new_v4().simple());
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let now = now_millis();
@@ -306,6 +317,7 @@ impl AsyncTaskManager {
                 notify,
             },
             cancel_tx,
+            working_dir: working_dir.map(str::to_string),
         };
         let mut tasks = self
             .tasks
@@ -351,7 +363,17 @@ impl AsyncTaskManager {
     }
 
     pub fn finish(&self, task_id: &str, result: &ToolResult) -> Option<AsyncTaskSnapshot> {
-        let snapshot = {
+        let snapshot = self.finish_without_notification(task_id, result)?;
+        self.enqueue_completion_notification(&snapshot);
+        Some(snapshot)
+    }
+
+    pub(crate) fn finish_without_notification(
+        &self,
+        task_id: &str,
+        result: &ToolResult,
+    ) -> Option<AsyncTaskSnapshot> {
+        {
             let mut tasks = self
                 .tasks
                 .lock()
@@ -374,20 +396,15 @@ impl AsyncTaskManager {
             entry.snapshot.is_error = Some(result.is_error);
             entry.snapshot.finished_at = Some(now_millis());
             entry.snapshot.updated_at = now_millis();
-            let snapshot = entry.snapshot.clone();
-            if snapshot.notify {
-                self.enqueue_notification(
-                    &snapshot.session_id,
-                    Self::completion_reminder(&snapshot),
-                );
-            }
-            snapshot
-        };
-        Some(snapshot)
+            Some(entry.snapshot.clone())
+        }
     }
 
-    pub fn mark_cancelled(&self, task_id: &str) -> Option<AsyncTaskSnapshot> {
-        let snapshot = {
+    pub(crate) fn mark_cancelled_without_notification(
+        &self,
+        task_id: &str,
+    ) -> Option<AsyncTaskSnapshot> {
+        {
             let mut tasks = self
                 .tasks
                 .lock()
@@ -404,16 +421,8 @@ impl AsyncTaskManager {
             entry.snapshot.is_error = Some(true);
             entry.snapshot.finished_at = Some(now_millis());
             entry.snapshot.updated_at = now_millis();
-            let snapshot = entry.snapshot.clone();
-            if snapshot.notify {
-                self.enqueue_notification(
-                    &snapshot.session_id,
-                    Self::completion_reminder(&snapshot),
-                );
-            }
-            snapshot
-        };
-        Some(snapshot)
+            Some(entry.snapshot.clone())
+        }
     }
 
     pub fn snapshot(&self, task_id: &str) -> Option<AsyncTaskSnapshot> {
@@ -442,11 +451,70 @@ impl AsyncTaskManager {
         Ok(entry.snapshot.clone())
     }
 
+    fn cancel_matching(
+        &self,
+        predicate: impl Fn(&AsyncTaskEntry) -> bool,
+    ) -> Vec<AsyncTaskSnapshot> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cancelled = Vec::new();
+        for entry in tasks.values_mut() {
+            if entry.snapshot.status.is_terminal() || !predicate(entry) {
+                continue;
+            }
+            entry.snapshot.status = AsyncTaskStatus::Cancelling;
+            entry.snapshot.progress = Some("Cancellation requested".to_string());
+            entry.snapshot.updated_at = now_millis();
+            entry.cancel_tx.send_replace(true);
+            cancelled.push(entry.snapshot.clone());
+        }
+        cancelled
+    }
+
+    pub fn cancel_session(&self, session_id: &str) -> Vec<AsyncTaskSnapshot> {
+        self.cancel_matching(|entry| entry.snapshot.session_id == session_id)
+    }
+
+    pub fn cancel_workspace(&self, working_dir: &str) -> Vec<AsyncTaskSnapshot> {
+        let target = working_dir_key(working_dir);
+        self.cancel_matching(|entry| {
+            entry
+                .working_dir
+                .as_deref()
+                .is_some_and(|value| working_dir_key(value) == target)
+        })
+    }
+
+    pub fn cancel_all(&self) -> Vec<AsyncTaskSnapshot> {
+        self.cancel_matching(|_| true)
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter(|entry| !entry.snapshot.status.is_terminal())
+            .count()
+    }
+
     pub fn start_result(&self, task_id: &str) -> ToolResult {
+        let notify = self
+            .snapshot(task_id)
+            .is_some_and(|snapshot| snapshot.notify);
+        let guidance = if notify {
+            "Completion and the final result will be delivered automatically in a system reminder. Do not call get_task_status for this task; use cancel_task to stop it."
+        } else {
+            "Use get_task_status with this id for progress and the final result; use cancel_task to stop it."
+        };
         ToolResult {
             output: format!(
-                "Async task: id={} status=queued\nUse get_task_status with this id for progress and the final result; use cancel_task to stop it.",
-                crate::tool::output::flat_text(task_id)
+                "Async task: id={} status=queued notify={}\n{}",
+                crate::tool::output::flat_text(task_id),
+                notify,
+                guidance
             ),
             is_error: false,
         }
@@ -487,6 +555,12 @@ impl AsyncTaskManager {
             .push_back(reminder);
     }
 
+    pub(crate) fn enqueue_completion_notification(&self, snapshot: &AsyncTaskSnapshot) {
+        if snapshot.notify {
+            self.enqueue_notification(&snapshot.session_id, Self::completion_reminder(snapshot));
+        }
+    }
+
     pub fn take_notifications(&self, session_id: &str) -> Vec<String> {
         self.notifications
             .lock()
@@ -522,7 +596,7 @@ impl AsyncTaskManager {
         let output = snapshot.output.as_deref().unwrap_or_default();
         let preview = truncate_chars(output, MAX_NOTIFICATION_PREVIEW_CHARS);
         format!(
-            "{SYSTEM_REMINDER_OPEN}\nAsync task {} ({}) finished with status {:?}. Use get_task_status with this task id for the complete result. Continue the current work using the result.\n\nResult preview:\n{}\n{SYSTEM_REMINDER_CLOSE}",
+            "{SYSTEM_REMINDER_OPEN}\nAsync task {} ({}) finished with status {:?}. Its original tool call now contains the final result. Do not call get_task_status for this task. Continue the current work using the result.\n\nResult preview:\n{}\n{SYSTEM_REMINDER_CLOSE}",
             snapshot.task_id, snapshot.tool_name, snapshot.status, preview
         )
     }
@@ -606,6 +680,19 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+fn working_dir_key(path: &str) -> String {
+    let normalized = path
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    if cfg!(target_os = "windows") {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +761,46 @@ mod tests {
     }
 
     #[test]
+    fn session_cancellation_reaches_every_background_task_in_that_session() {
+        let manager = AsyncTaskManager::default();
+        let mut first =
+            manager.create_task_in_workspace("session-a", "bash", false, Some("C:/workspace-a"));
+        let mut second =
+            manager.create_task_in_workspace("session-a", "bash", true, Some("C:/workspace-a"));
+        let mut unrelated =
+            manager.create_task_in_workspace("session-b", "bash", false, Some("C:/workspace-b"));
+
+        let cancelled = manager.cancel_session("session-a");
+
+        assert_eq!(cancelled.len(), 2);
+        assert!(*first.cancel_rx.borrow_and_update());
+        assert!(*second.cancel_rx.borrow_and_update());
+        assert!(!*unrelated.cancel_rx.borrow_and_update());
+        assert_eq!(manager.active_count(), 3);
+    }
+
+    #[test]
+    fn workspace_cancellation_matches_normalized_paths() {
+        let manager = AsyncTaskManager::default();
+        let mut task = manager.create_task_in_workspace(
+            "session-a",
+            "bash",
+            false,
+            Some("C:\\Workspace\\Project\\"),
+        );
+
+        let cancelled = manager.cancel_workspace("c:/workspace/project");
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(cancelled.len(), 1);
+            assert!(*task.cancel_rx.borrow_and_update());
+        } else {
+            assert!(cancelled.is_empty());
+            assert!(!*task.cancel_rx.borrow_and_update());
+        }
+    }
+
+    #[test]
     fn dropped_run_guard_converts_a_panic_or_abort_into_a_failed_task() {
         let manager = Arc::new(AsyncTaskManager::default());
         let started = manager.create_task("session", "bash", true);
@@ -693,7 +820,7 @@ mod tests {
         assert_eq!(
             manager.start_result(&started.task_id).output,
             format!(
-                "Async task: id=\"{}\" status=queued\nUse get_task_status with this id for progress and the final result; use cancel_task to stop it.",
+                "Async task: id=\"{}\" status=queued notify=false\nUse get_task_status with this id for progress and the final result; use cancel_task to stop it.",
                 started.task_id
             )
         );
@@ -730,5 +857,47 @@ mod tests {
         let running = manager.status_result(&started.task_id).output;
         assert!(running.contains(" status=running "));
         assert!(running.ends_with("\nresult:\nfirst\nsecond\n"));
+    }
+
+    #[test]
+    fn notify_tasks_discourage_polling_and_deliver_a_completion_reminder() {
+        let manager = AsyncTaskManager::default();
+        let started = manager.create_task("session", "bash", true);
+
+        let queued = manager.start_result(&started.task_id).output;
+        assert!(queued.contains("status=queued notify=true"));
+        assert!(queued.contains("Do not call get_task_status for this task"));
+
+        manager.finish(
+            &started.task_id,
+            &ToolResult {
+                output: "Exit code: 0\ndone".to_string(),
+                is_error: false,
+            },
+        );
+        let reminders = manager.take_notifications("session");
+        assert_eq!(reminders.len(), 1);
+        assert!(reminders[0].contains("finished with status Completed"));
+        assert!(reminders[0].contains("original tool call now contains the final result"));
+        assert!(reminders[0].contains("Do not call get_task_status for this task"));
+    }
+
+    #[test]
+    fn deferred_completion_notification_waits_for_tool_result_persistence() {
+        let manager = AsyncTaskManager::default();
+        let started = manager.create_task("session", "bash", true);
+        let snapshot = manager
+            .finish_without_notification(
+                &started.task_id,
+                &ToolResult {
+                    output: "done".to_string(),
+                    is_error: false,
+                },
+            )
+            .expect("finished task");
+
+        assert!(manager.take_notifications("session").is_empty());
+        manager.enqueue_completion_notification(&snapshot);
+        assert_eq!(manager.take_notifications("session").len(), 1);
     }
 }

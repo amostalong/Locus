@@ -508,6 +508,67 @@ describe("toolCallBatches", () => {
     expect(merged.map((toolCall) => toolCall.id)).toEqual(["history-1", "active-2"]);
   });
 
+  it("keeps repeated calls with the same arguments when their render orders differ", () => {
+    const merged = mergeToolCallDisplaysWithoutDuplicates(
+      [
+        {
+          id: "history-1",
+          name: "unity_recompile",
+          arguments: "{\"editor_status\":\"editing\"}",
+          status: "done",
+          order: 12,
+        },
+        {
+          id: "history-2",
+          name: "unity_recompile",
+          arguments: "{\"editorStatus\":\"editing\"}",
+          status: "done",
+          order: 20,
+        },
+      ],
+      [
+        {
+          id: "active-3",
+          name: "unity_recompile",
+          arguments: "{\"editor_status\":\"editing\"}",
+          status: "running",
+          order: 35,
+        },
+      ],
+    );
+
+    expect(merged.map((toolCall) => toolCall.id)).toEqual([
+      "history-1",
+      "history-2",
+      "active-3",
+    ]);
+  });
+
+  it("deduplicates semantic history/transient copies that share a render order", () => {
+    const merged = mergeToolCallDisplaysWithoutDuplicates(
+      [
+        {
+          id: "history-copy",
+          name: "read",
+          arguments: "{\"filePath\":\"Assets/Test.cs\"}",
+          status: "done",
+          order: 9,
+        },
+      ],
+      [
+        {
+          id: "transient-copy",
+          name: "read",
+          arguments: "{\"path\":\"Assets/Test.cs\"}",
+          status: "running",
+          order: 9,
+        },
+      ],
+    );
+
+    expect(merged.map((toolCall) => toolCall.id)).toEqual(["history-copy"]);
+  });
+
   it("deduplicates read tool calls when path aliases differ across transient and history copies", () => {
     const filtered = filterToolCallsByMatchState(
       [
@@ -536,7 +597,7 @@ describe("toolCallBatches", () => {
         {
           id: "history-1",
           name: "edit",
-          arguments: "{\"file_path\":\"Assets/Test.cs\",\"old_string\":\"a\",\"new_string\":\"b\",\"replace_all\":true}",
+          arguments: "{\"file_path\":\"Assets/Test.cs\",\"edits\":[{\"old_string\":\"a\",\"new_string\":\"b\",\"replace_all\":true}]}",
           status: "done",
         },
       ],
@@ -544,7 +605,7 @@ describe("toolCallBatches", () => {
         {
           id: "active-1",
           name: "edit",
-          arguments: "{\"filePath\":\"Assets/Test.cs\",\"oldString\":\"a\",\"newString\":\"b\",\"replaceAll\":true}",
+          arguments: "{\"filePath\":\"Assets/Test.cs\",\"edits\":[{\"oldString\":\"a\",\"newString\":\"b\",\"replaceAll\":true}]}",
           status: "done",
         },
       ],

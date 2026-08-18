@@ -8,6 +8,7 @@ import type {
   ModelOption,
   ModelDefaults,
   WorkspaceModelOverride,
+AgentModelPreference,
   CustomProvider,
   CustomProviderModel,
   EffortLevel,
@@ -15,11 +16,16 @@ import type {
   CodexTransportMode,
 } from "../types";
 import { filterVisibleModels } from "../config/providerVisibility";
+import {
+  CODEX_DEFAULT_CONTEXT_WINDOW,
+  codexEffectiveContextWindow,
+  normalizeCodexContextWindow,
+} from "../config/codexContext";
 import { modelSupportsFastMode } from "../utils/modelDisplay";
+import { getCachedDebugMode, getDebugMode, subscribeDebugMode } from "../services/permissions";
+import { t } from "../i18n";
 
 const CLAUDE_CONTEXT_1M = 1_000_000;
-const CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW = 258_400;
-const CODEX_EXTENDED_EFFECTIVE_CONTEXT_WINDOW = 353_400;
 const CLAUDE_STANDARD_EFFORTS: EffortLevel[] = ["none", "low", "medium", "high", "max"];
 const CLAUDE_XHIGH_EFFORTS: EffortLevel[] = ["none", "low", "medium", "high", "xhigh", "max"];
 
@@ -259,14 +265,9 @@ function isGpt56CodexModel(modelId: string): boolean {
   return normalized === "gpt-5.6" || normalized.startsWith("gpt-5.6-");
 }
 
-function applyCodexContextMode(model: ModelOption, extendedContext: boolean): ModelOption {
+function applyCodexContextWindow(model: ModelOption, configuredContextWindow: number): ModelOption {
   if (!isGpt56CodexModel(model.id)) return model;
-  const contextWindow = extendedContext
-    ? CODEX_EXTENDED_EFFECTIVE_CONTEXT_WINDOW
-    : Math.min(
-        model.contextWindow ?? CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
-        CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
-      );
+  const contextWindow = codexEffectiveContextWindow(configuredContextWindow);
   return contextWindow === model.contextWindow ? model : { ...model, contextWindow };
 }
 
@@ -333,13 +334,16 @@ export const useModelStore = defineStore("model", () => {
   const customProviders = ref<CustomProvider[]>([]);
   const codexRemoteModels = ref<ModelOption[]>([]);
   const codexTransport = ref<CodexTransportMode>("websocket");
-  const codexExtendedContext = ref(false);
+  const codexContextWindow = ref(CODEX_DEFAULT_CONTEXT_WINDOW);
   const codexFastMode = ref(false);
   const selectedModelId = ref("");
   const lastModelId = ref("");
   const effort = ref<EffortLevel>("high");
   const defaultEffort = ref<EffortLevel>("high");
   const hasUserDefaultEffort = ref(false);
+  const activeAgentId = ref("");
+  const agentModelPreferences = ref<Record<string, AgentModelPreference>>({});
+  const debugModeEnabled = ref(getCachedDebugMode() ?? false);
   const modelDefaults = ref<ModelDefaults>({ mainModel: "", planModel: "", subagentModels: {} });
   const workspaceOverride = ref<WorkspaceModelOverride | null>(null);
   // -- Per-session model override --
@@ -356,6 +360,11 @@ export const useModelStore = defineStore("model", () => {
   // sessions fall back to the global `effort` ref.
   const sessionEffortOverrides = ref<Map<string, EffortLevel>>(new Map());
   let effortPersistenceReady = false;
+  let agentPreferenceSaveQueue = Promise.resolve();
+
+  subscribeDebugMode((enabled) => {
+    debugModeEnabled.value = enabled;
+  });
 
   // -- Getters --
 
@@ -373,7 +382,7 @@ export const useModelStore = defineStore("model", () => {
 
   const codexModels = computed<ModelOption[]>(() => {
     const models = codexRemoteModels.value.length > 0 ? codexRemoteModels.value : codexFallbackModels;
-    return models.map((model) => applyCodexContextMode(model, codexExtendedContext.value));
+    return models.map((model) => applyCodexContextWindow(model, codexContextWindow.value));
   });
 
   const allModels = computed<ModelOption[]>(() => {
@@ -394,7 +403,29 @@ export const useModelStore = defineStore("model", () => {
     );
     // Claude Code CLI models are opt-in: they only join the list after the
     // user explicitly enables them in model configuration.
-    const models = [...builtinModels, ...codexModels.value, ...customs].filter(
+    const mocks: ModelOption[] = debugModeEnabled.value
+      ? [
+          {
+            id: "mock/stream",
+            name: t("model.mock.stream"),
+            provider: "mock",
+            contextWindow: 128_000,
+          },
+          {
+            id: "mock/tool",
+            name: t("model.mock.tool"),
+            provider: "mock",
+            contextWindow: 128_000,
+          },
+          {
+            id: "mock/error",
+            name: t("model.mock.error"),
+            provider: "mock",
+            contextWindow: 128_000,
+          },
+        ]
+      : [];
+    const models = [...builtinModels, ...codexModels.value, ...customs, ...mocks].filter(
       (m) => m.provider !== "claude_code" || modelDefaults.value.claudeCodeEnabled === true,
     );
     return filterVisibleModels(models);
@@ -407,6 +438,7 @@ export const useModelStore = defineStore("model", () => {
     if (authStore.claudeCodeAvailable) providers.add("claude_code");
     if (authStore.codexAuthenticated) providers.add("openai_codex");
     providers.add("custom");
+    if (debugModeEnabled.value) providers.add("mock");
     return allModels.value.filter((m) => providers.has(m.provider));
   });
 
@@ -639,6 +671,14 @@ export const useModelStore = defineStore("model", () => {
     } catch { /* ignore */ }
   }
 
+  async function loadDebugMode() {
+    try {
+      debugModeEnabled.value = await getDebugMode();
+    } catch {
+      debugModeEnabled.value = false;
+    }
+  }
+
   async function loadLastModel() {
     try {
       const saved = await modelService.getLastModel();
@@ -659,6 +699,14 @@ export const useModelStore = defineStore("model", () => {
     effortPersistenceReady = true;
   }
 
+  async function loadAgentModelPreferences() {
+    try {
+      agentModelPreferences.value = await modelService.getAgentModelPreferences();
+    } catch {
+      agentModelPreferences.value = {};
+    }
+  }
+
   async function loadCodexFastMode() {
     try {
       codexFastMode.value = await modelService.getCodexFastMode();
@@ -677,10 +725,13 @@ export const useModelStore = defineStore("model", () => {
     try {
       const config = await modelService.getCodexModelConfig();
       codexTransport.value = normalizeCodexTransport(config);
-      codexExtendedContext.value = config?.extendedContext === true;
+      codexContextWindow.value = normalizeCodexContextWindow(
+        config?.contextWindow,
+        config?.extendedContext === true,
+      );
     } catch {
       codexTransport.value = "websocket";
-      codexExtendedContext.value = false;
+      codexContextWindow.value = CODEX_DEFAULT_CONTEXT_WINDOW;
     }
   }
 
@@ -717,9 +768,57 @@ export const useModelStore = defineStore("model", () => {
     modelService.saveLastModel(id).catch((e: unknown) => console.warn("[model] save_last_model:", e));
   }
 
+  function persistActiveAgentPreference() {
+    const agentId = activeAgentId.value.trim();
+    const modelId = selectedModelId.value.trim();
+    if (!agentId || !modelId) return;
+    const selectedEffort = clampEffortForSelectedModel(effort.value);
+    const preference: AgentModelPreference = {
+      modelId,
+      effort: selectedEffort,
+    };
+    agentModelPreferences.value = {
+      ...agentModelPreferences.value,
+      [agentId]: preference,
+    };
+    agentPreferenceSaveQueue = agentPreferenceSaveQueue
+      .catch(() => undefined)
+      .then(() => modelService.saveAgentModelPreference(
+        agentId,
+        preference.modelId,
+        preference.effort,
+      ))
+      .catch((error: unknown) => console.warn("[model] save_agent_model_preference:", error));
+  }
+
+  function activateAgentPreference(
+    agentId: string,
+    fallbackEffort: EffortLevel,
+    applySelection = true,
+  ) {
+    activeAgentId.value = agentId.trim();
+    if (!applySelection || !activeAgentId.value) return;
+    const preference = agentModelPreferences.value[activeAgentId.value];
+    if (
+      preference?.modelId
+      && availableModels.value.some((model) => model.id === preference.modelId)
+    ) {
+      selectedModelId.value = preference.modelId;
+    }
+    const requestedEffort = preference && isEffortLevel(preference.effort)
+      ? preference.effort
+      : fallbackEffort;
+    const normalizedEffort = clampEffortForSelectedModel(requestedEffort);
+    if (preference) hasUserDefaultEffort.value = true;
+    defaultEffort.value = normalizedEffort;
+    effort.value = normalizedEffort;
+  }
+
   function selectModel(id: string) {
     selectedModelId.value = id;
     rememberLastModel(id);
+    effort.value = clampEffortForSelectedModel(effort.value);
+    persistActiveAgentPreference();
   }
 
   /**
@@ -866,6 +965,7 @@ export const useModelStore = defineStore("model", () => {
     hasUserDefaultEffort.value = true;
     defaultEffort.value = level;
     effort.value = clampEffortForSelectedModel(level);
+    persistActiveAgentPreference();
   }
 
   function selectCodexFastMode(enabled: boolean) {
@@ -917,20 +1017,26 @@ export const useModelStore = defineStore("model", () => {
 
   function applyCodexModelConfig(config?: Partial<CodexModelConfig> | null) {
     codexTransport.value = normalizeCodexTransport(config);
-    codexExtendedContext.value = config?.extendedContext === true;
+    codexContextWindow.value = normalizeCodexContextWindow(
+      config?.contextWindow,
+      config?.extendedContext === true,
+    );
   }
 
   return {
     customProviders,
     codexRemoteModels,
     codexTransport,
-    codexExtendedContext,
+    codexContextWindow,
     codexFastMode,
     selectedModelId,
     lastModelId,
     effort,
     defaultEffort,
     hasUserDefaultEffort,
+    activeAgentId,
+    agentModelPreferences,
+    debugModeEnabled,
     modelDefaults,
     workspaceOverride,
     effectiveModelDefaults,
@@ -949,8 +1055,10 @@ export const useModelStore = defineStore("model", () => {
     availableEfforts,
     effortSupported,
     loadModelDefaults,
+    loadDebugMode,
     loadLastModel,
     loadLastEffort,
+    loadAgentModelPreferences,
     loadCodexFastMode,
     loadCustomProviders,
     loadCodexModelConfig,
@@ -958,6 +1066,7 @@ export const useModelStore = defineStore("model", () => {
     resolveSelectedModel,
     selectModel,
     setActiveSessionId,
+activateAgentPreference,
     applySessionModel,
     hydrateSessionOverrides,
     selectSessionModel,

@@ -31,6 +31,8 @@ function makeState(overrides?: Partial<StreamState>): StreamState {
       totalOutputTokens: 0,
       totalCacheReadTokens: 0,
       totalCacheWriteTokens: 0,
+      timedOutputTokens: 0,
+      modelActiveDurationMs: 0,
       totalCostUsd: 0,
       pricedRounds: 0,
       contextTokens: 0,
@@ -210,6 +212,41 @@ describe("reduceStreamEvent", () => {
       expect(mutations.filter((m) => m.type === "upsertLiveRenderPart")).toHaveLength(0);
       expect(mutations.filter((m) => m.type === "deactivateLiveThinkingParts")).toHaveLength(0);
       expect(mutations).toContainEqual({ type: "appendLiveRenderPartContent", partId: "test-run:text", text: "lo" });
+    });
+
+    it("ignores a delayed text delta whose render part is already materialized in history", () => {
+      const partId = "test-run:text:iteration:1:attempt:1:text";
+      const state = makeState({
+        isStreaming: true,
+        messages: [
+          {
+            id: "assistant-round-1",
+            role: "assistant",
+            content: "persisted answer",
+            createdAt: 1,
+            renderParts: [
+              {
+                kind: "text",
+                id: partId,
+                order: { runId: "test-run", seq: 1 },
+                content: "persisted answer",
+              },
+            ],
+          },
+        ],
+      });
+      const event: StreamEvent = {
+        runId: "test-run",
+        type: "textDelta",
+        sessionId: "s1",
+        text: "persisted answer",
+        partId,
+        renderSeq: 1,
+      };
+
+      const mutations = reduceStreamEvent(state, event);
+
+      expect(mutations).toEqual([]);
     });
 
     it("keeps the live parts array untouched for steady-state thinking growth", () => {
@@ -1055,6 +1092,8 @@ describe("reduceStreamEvent", () => {
         totalOutputTokens: 100,
         totalCacheReadTokens: 20,
         totalCacheWriteTokens: 10,
+        timedOutputTokens: 100,
+        modelActiveDurationMs: 2_000,
         totalCostUsd: 0.05,
         pricedRounds: 3,
         contextTokens: 5000,
@@ -1066,6 +1105,8 @@ describe("reduceStreamEvent", () => {
       expect(usageMut).toBeDefined();
       if (usageMut?.type === "updateUsage") {
         expect(usageMut.usage.totalInputTokens).toBe(200);
+        expect(usageMut.usage.timedOutputTokens).toBe(100);
+        expect(usageMut.usage.modelActiveDurationMs).toBe(2_000);
         expect(usageMut.usage.totalCostUsd).toBe(0.05);
         expect(usageMut.usage.contextTokens).toBe(5000);
       }
@@ -1073,7 +1114,7 @@ describe("reduceStreamEvent", () => {
 
     it("preserves existing contextTokens when event has 0", () => {
       const state = makeState({
-        tokenUsage: { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, totalCostUsd: 0, pricedRounds: 0, contextTokens: 3000, contextLimit: 100000 },
+        tokenUsage: { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, timedOutputTokens: 0, modelActiveDurationMs: 0, totalCostUsd: 0, pricedRounds: 0, contextTokens: 3000, contextLimit: 100000 },
       });
       const event: StreamEvent = { runId: "test-run",
         type: "usageUpdate",
@@ -1086,6 +1127,8 @@ describe("reduceStreamEvent", () => {
         totalOutputTokens: 50,
         totalCacheReadTokens: 0,
         totalCacheWriteTokens: 0,
+        timedOutputTokens: 50,
+        modelActiveDurationMs: 1_000,
         totalCostUsd: 0.01,
         pricedRounds: 1,
         contextTokens: 0,
@@ -1109,6 +1152,8 @@ describe("reduceStreamEvent", () => {
           totalOutputTokens: 50,
           totalCacheReadTokens: 10,
           totalCacheWriteTokens: 5,
+          timedOutputTokens: 40,
+          modelActiveDurationMs: 800,
           totalCostUsd: 0.01,
           pricedRounds: 1,
           contextTokens: 0,
@@ -1143,6 +1188,8 @@ describe("reduceStreamEvent", () => {
           totalOutputTokens: 50,
           totalCacheReadTokens: 10,
           totalCacheWriteTokens: 5,
+          timedOutputTokens: 40,
+          modelActiveDurationMs: 800,
           totalCostUsd: 0.01,
           pricedRounds: 1,
           contextTokens: 8000,
@@ -1197,6 +1244,8 @@ describe("reduceStreamEvent", () => {
           totalOutputTokens: 50,
           totalCacheReadTokens: 10,
           totalCacheWriteTokens: 5,
+          timedOutputTokens: 40,
+          modelActiveDurationMs: 800,
           totalCostUsd: 0.01,
           pricedRounds: 1,
           contextTokens: 8000,

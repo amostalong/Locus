@@ -1,6 +1,10 @@
+// @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createPinia } from "pinia";
+import { createApp, nextTick } from "vue";
 import { describe, expect, it } from "vitest";
+import ToolCallBlock from "../components/ToolCallBlock.vue";
 
 const root = process.cwd();
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -31,14 +35,14 @@ describe("Unity Test Framework tools", () => {
     expect(api).toContain("LocusUnityTestService.Start");
     expect(api).not.toContain("System.Reflection");
 
-    expect(service).toContain("internal static Task<UnityTestListDto> ListAsync");
+    expect(service).toContain("internal static async Task<UnityTestListDto> ListAsync");
     expect(service).toContain("internal static UnityTestRunSnapshotDto Start");
     expect(service).toContain("internal static UnityTestRunSnapshotDto Status");
     expect(service).toContain("internal static UnityTestRunSnapshotDto Cancel");
     expect(executeDefinition.description).toContain("UnityTestApi.ListAsync");
     expect(executeDefinition.description).toContain("UnityTestApi.Start");
     expect(executeDefinition.description).toContain("Status(runId)");
-    expect(executeDefinition.description).toContain("official TestRunner directly");
+    expect(executeDefinition.description).toContain("com.unity.test-framework");
     expect(read("agent/dev/rule/tool_usage_strategy.md")).toContain(
       "UnityTestApi.ListAsync",
     );
@@ -91,6 +95,77 @@ describe("Unity Test Framework tools", () => {
     expect(runDefinition.description).toContain("call unity_recompile before running");
   });
 
+  it("makes filters optional and accepts both Unity Test modes in one request", () => {
+    const listDefinition = JSON.parse(read("tools/unity_test_list.json"));
+    const runDefinition = JSON.parse(read("tools/unity_test_run.json"));
+    const service = read("locus_unity/Editor/Testing/LocusUnityTestService.cs");
+    const api = read("locus_unity/Editor/Testing/UnityTestApi.cs");
+
+    for (const definition of [listDefinition, runDefinition]) {
+      expect(definition.parameters.required).toEqual([]);
+      expect(definition.parameters.properties.mode.enum).toEqual([
+        "edit",
+        "play",
+        "edit|play",
+      ]);
+      expect(definition.parameters.properties.mode.default).toBe("edit|play");
+      expect(definition.description).toContain("do not send empty arrays");
+    }
+    expect(service).toContain("value.Split('|')");
+    expect(service).toContain("TestMode.EditMode | TestMode.PlayMode");
+    expect(service).toContain('return "edit|play";');
+    expect(api).toContain("[Flags]");
+    expect(api).toContain("EditAndPlay = Edit | Play");
+    expect(api).toContain("UnityTestMode Mode = UnityTestMode.EditAndPlay");
+  });
+
+  it("preserves the Unity suite path for tree output", () => {
+    const service = read("locus_unity/Editor/Testing/LocusUnityTestService.cs");
+    const formatter = read("src-tauri/src/tool/builtins/unity.rs");
+
+    expect(service).toContain("public string[] path;");
+    expect(service).toContain("await CollectModeAsync(");
+    expect(service).toMatch(/TestMode\.EditMode,\s+"edit"/);
+    expect(service).toMatch(/TestMode\.PlayMode,\s+"play"/);
+    expect(service).toContain("mode = modeName");
+    expect(service).not.toContain("ModeName(node.TestMode)");
+    expect(service).toContain("path = testPath.ToArray()");
+    expect(formatter).toContain("render_unity_test_tree");
+    expect(formatter).toContain('let branch = if is_last { "└─ " } else { "├─ " };');
+    expect(formatter).toContain('format!("{} :: {metadata}", test.label)');
+  });
+
+  it("hides empty optional filters from Unity Test tool details", async () => {
+    const host = document.createElement("div");
+    const app = createApp(ToolCallBlock, {
+      toolCall: {
+        id: "unity-test-list",
+        name: "unity_test_list",
+        arguments: JSON.stringify({
+          mode: "edit|play",
+          assemblies: [],
+          tests: [],
+          groups: [],
+          categories: [],
+          max_results: 500,
+        }),
+        status: "done",
+        output: "Unity tests: mode=\"edit|play\" matched=0 shown=0 truncated=false\n└─ <empty>",
+      },
+    });
+    app.use(createPinia());
+    app.mount(host);
+    host.querySelector<HTMLButtonElement>(".tool-call-header")?.click();
+    await nextTick();
+
+    const keys = [...host.querySelectorAll<HTMLElement>(".tool-arg-key")]
+      .map((element) => element.textContent);
+    expect(keys).toEqual(["mode", "max results"]);
+    expect(host.querySelector(".tool-call-pre")?.textContent).toContain("└─ <empty>");
+
+    app.unmount();
+  });
+
   it("exposes a workspace setting with package-aware status", () => {
     const settings = read("src/components/settings/UnityConnectionSettings.vue");
     const service = read("src/services/unity.ts");
@@ -108,5 +183,8 @@ describe("Unity Test Framework tools", () => {
     expect(driver).toContain("run_unity_test_suite");
     expect(driver).toContain("unity_bridge::unity_test_list");
     expect(driver).toContain("unity_bridge::unity_test_run");
+    expect(driver).toContain('let list_request = json!({ "max_results": 50 });');
+    expect(driver).toContain('json!({ "mode": "edit|play", "result_detail": "failures" })');
+    expect(driver).toContain('list_mode != "edit|play"');
   });
 });

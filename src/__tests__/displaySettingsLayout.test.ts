@@ -93,9 +93,14 @@ describe("display settings transcript alignment", () => {
       expect(displaySettings).toContain(`${field}: true,`);
     }
 
+    expect(displaySettings).toContain("showAgentSelector: boolean;");
+    expect(displaySettings).toContain("showAgentSelector: false,");
+
     expect(displayPanel).toContain("settings.display.mainChromeTitle");
     expect(displayPanel).toContain(":model-value=\"display.showWelcomeSubtitle\"");
     expect(displayPanel).toContain("@update:model-value=\"setDisplay('showWelcomeSubtitle', $event)\"");
+    expect(displayPanel).toContain(":model-value=\"display.showAgentSelector\"");
+    expect(displayPanel).toContain("@update:model-value=\"setDisplay('showAgentSelector', $event)\"");
     expect(displayPanel).toContain("const topNavigationToggles = [");
     expect(displayPanel).toContain('{ key: "showKnowledgeTab", labelKey: "settings.display.showKnowledgeTab" }');
     expect(displayPanel).toContain('{ key: "showCollabTab", labelKey: "settings.display.showCollabTab" }');
@@ -107,6 +112,7 @@ describe("display settings transcript alignment", () => {
     expect(displayPanel).toContain("@update:model-value=\"setDisplay(item.key, $event)\"");
 
     expect(chatView).toContain('v-if="displaySettings.showWelcomeSubtitle"');
+    expect(chatView).toContain(':agents="displaySettings.showAgentSelector ? agents : undefined"');
 
     expect(app).toContain('import { initFonts, useDisplaySettings } from "./composables/useDisplaySettings";');
     expect(app).toContain("const { state: displaySettings } = useDisplaySettings();");
@@ -134,6 +140,7 @@ describe("display settings transcript alignment", () => {
     expect(zh).toContain('"settings.display.showViewsTab": "显示视图"');
     expect(zh).toContain('"settings.display.showPluginsTab": "显示插件"');
     expect(zh).toContain('"settings.display.showAgentTab": "显示 Agent"');
+    expect(zh).toContain('"settings.display.showAgentSelector": "显示 Agent 选择器"');
     expect(en).toContain('"settings.display.mainChromeTitle": "Main Interface"');
     expect(en).toContain('"settings.display.showWelcomeSubtitle": "Show top subtitle"');
     expect(en).toContain('"settings.display.showKnowledgeTab": "Show Knowledge"');
@@ -142,6 +149,7 @@ describe("display settings transcript alignment", () => {
     expect(en).toContain('"settings.display.showViewsTab": "Show Views"');
     expect(en).toContain('"settings.display.showPluginsTab": "Show Plugins"');
     expect(en).toContain('"settings.display.showAgentTab": "Show Agent"');
+    expect(en).toContain('"settings.display.showAgentSelector": "Show Agent selector"');
   });
 
   it("adds a session user message right-align toggle that defaults to on", () => {
@@ -290,6 +298,26 @@ describe("display settings transcript alignment", () => {
     expect(en).toContain('"settings.tab.notifications": "Notifications"');
     expect(en).toContain('"settings.notifications.notifyOnSubagentDone": "Notify when a Sub-agent completes"');
     expect(en).toContain('"notifications.subagentDoneTitle": "Sub-agent complete"');
+  });
+
+  it("adds cache invalidation warnings that default to off", () => {
+    const displaySettings = read("src/composables/useDisplaySettings.ts");
+    const notificationPanel = read("src/components/settings/NotificationsSettings.vue");
+    const bootstrap = read("src/composables/useAppBootstrap.ts");
+    const zh = read("src/language/zh.json");
+    const en = read("src/language/en.json");
+
+    expect(displaySettings).toContain("cacheInvalidationWarningsEnabled: boolean;");
+    expect(displaySettings).toContain("cacheInvalidationWarningsEnabled: false,");
+    expect(notificationPanel).toContain("settings.notifications.cacheTitle");
+    expect(notificationPanel).toContain(':model-value="display.cacheInvalidationWarningsEnabled"');
+    expect(notificationPanel).toContain(
+      "@update:model-value=\"setDisplay('cacheInvalidationWarningsEnabled', $event)\"",
+    );
+    expect(bootstrap).toContain("isPromptCacheInvalidation(payload)");
+    expect(bootstrap).toContain('notificationStore.addNotice(\n          "warning"');
+    expect(zh).toContain('"settings.notifications.cacheInvalidationWarningsEnabled": "缓存失效警告"');
+    expect(en).toContain('"settings.notifications.cacheInvalidationWarningsEnabled": "Cache invalidation warnings"');
   });
 
   it("adds independent sound alert toggles and selectable modes that default to off", () => {

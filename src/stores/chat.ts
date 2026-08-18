@@ -20,6 +20,10 @@ import {
 import { resolveToolCallDisplayShape } from "../composables/toolCallBatches";
 import { StreamingTextChunks } from "../composables/streamingTextChunks";
 import { useThrottledStreamingText } from "../composables/streamingRenderThrottle";
+import {
+  assistantRenderPartIdentityKey,
+  collectMaterializedAssistantRenderPartKeys,
+} from "../composables/assistantRenderParts";
 import { hydrateChatMessagesIntent, withClientMessageId } from "../composables/chatInputIntents";
 import {
   applyAsyncTaskUpdateToMessages,
@@ -57,6 +61,7 @@ function emptyTokenUsage(): TokenUsage {
   return {
     totalInputTokens: 0, totalOutputTokens: 0,
     totalCacheReadTokens: 0, totalCacheWriteTokens: 0,
+    timedOutputTokens: 0, modelActiveDurationMs: 0,
     totalCostUsd: 0, pricedRounds: 0, contextTokens: 0, contextLimit: 0,
   };
 }
@@ -349,6 +354,9 @@ export const useChatStore = defineStore("chat", () => {
   const pendingSelectionSessionId = ref<string | null>(null);
   const activeSessionType = ref<string | null>(null);
   const messages = ref<ChatMessage[]>([]);
+  const materializedHistoryRenderPartKeys = computed(() => (
+    collectMaterializedAssistantRenderPartKeys(messages.value)
+  ));
   // Streaming text refs are primitive strings — use shallowRef to skip deep reactive
   // proxy setup. Subscribers that want fine-grained updates (e.g. per-character) should
   // debounce themselves; ChatView debounces to STREAMING_RENDER_THROTTLE_MS (120ms) today.
@@ -828,22 +836,42 @@ export const useChatStore = defineStore("chat", () => {
     trackActiveRun(detail.id, runtime.activeRun.runId);
     if (activeSessionId.value !== detail.id) return;
 
+    const materializedRenderPartKeys = collectMaterializedAssistantRenderPartKeys(detail.messages);
+    const restoredLiveRenderParts = cloneRuntimeJson(runtime.liveRenderParts ?? []);
+    let removedMaterializedTextPart = false;
+    let removedMaterializedThinkingPart = false;
+    liveRenderParts.value = restoredLiveRenderParts.filter((part) => {
+      if (part.kind !== "text" && part.kind !== "thinking") return true;
+      if (!materializedRenderPartKeys.has(assistantRenderPartIdentityKey(part))) return true;
+      if (part.kind === "text") {
+        removedMaterializedTextPart = true;
+      } else {
+        removedMaterializedThinkingPart = true;
+      }
+      return false;
+    });
+    const hasRestoredTextPart = liveRenderParts.value.some((part) => part.kind === "text");
+    const hasRestoredThinkingPart = liveRenderParts.value.some((part) => part.kind === "thinking");
+
     resetStreamAnim();
-    rawStreamText.value = runtime.streamingText ?? "";
+    rawStreamText.value = removedMaterializedTextPart && !hasRestoredTextPart
+      ? ""
+      : runtime.streamingText ?? "";
     if (rawStreamText.value) {
       textStream.append(rawStreamText.value);
       typedStream.append(rawStreamText.value);
     }
     streamingText.value = rawStreamText.value;
-    streamingThinking.value = runtime.streamingThinking ?? "";
+    streamingThinking.value = removedMaterializedThinkingPart && !hasRestoredThinkingPart
+      ? ""
+      : runtime.streamingThinking ?? "";
     thinkingStream.reset();
     if (streamingThinking.value) {
       thinkingStream.append(streamingThinking.value);
     }
     streamSequence.value = runtime.streamSequence ?? 0;
-    streamingTextOrder.value = runtime.streamingTextOrder ?? 0;
-    thinkingOrder.value = runtime.thinkingOrder ?? 0;
-    liveRenderParts.value = cloneRuntimeJson(runtime.liveRenderParts ?? []);
+    streamingTextOrder.value = rawStreamText.value ? runtime.streamingTextOrder ?? 0 : 0;
+    thinkingOrder.value = streamingThinking.value ? runtime.thinkingOrder ?? 0 : 0;
     // Restored parts carry their accumulated content as the baseline; fresh
     // streams collect only post-restore growth on top of it.
     clearLivePartStreams();
@@ -852,7 +880,7 @@ export const useChatStore = defineStore("chat", () => {
         ensureLivePartStream(part.id);
       }
     }
-    isThinking.value = runtime.isThinking === true;
+    isThinking.value = runtime.isThinking === true && !removedMaterializedThinkingPart;
     thinkingStartTime.value = isThinking.value ? Date.now() : 0;
     thinkingDuration.value = runtime.thinkingDuration ?? 0;
     activeToolCalls.value = cloneRuntimeToolCalls(runtime.activeToolCalls);
@@ -2121,6 +2149,7 @@ export const useChatStore = defineStore("chat", () => {
       streamingTextOrder: streamingTextOrder.value,
       thinkingOrder: thinkingOrder.value,
       liveRenderParts: liveRenderParts.value,
+      materializedRenderPartKeys: materializedHistoryRenderPartKeys.value,
       isStreaming: isStreaming.value,
       isCompacting: isCompacting.value,
       isThinking: isThinking.value,

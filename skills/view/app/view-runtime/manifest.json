@@ -5,7 +5,7 @@
   "files": [
     {
       "path": "src/components/view/viewRuntime.ts",
-      "bytes": 83541
+      "bytes": 84047
     },
     {
       "path": "src/components/view/viewCompiler.ts",
@@ -137,7 +137,7 @@
     },
     {
       "path": "src/components/diff/rasterPreview.ts",
-      "bytes": 2220
+      "bytes": 2279
     },
     {
       "path": "src/components/diff/rendererRegistry.ts",
@@ -161,7 +161,7 @@
     },
     {
       "path": "src/components/unity/unitySerializedValue.ts",
-      "bytes": 23229
+      "bytes": 23886
     },
     {
       "path": "src/components/unity/UnityBoolField.vue",
@@ -297,11 +297,11 @@
     },
     {
       "path": "src/language/en.json",
-      "bytes": 257683
+      "bytes": 263705
     },
     {
       "path": "src/language/zh.json",
-      "bytes": 250930
+      "bytes": 256632
     },
     {
       "path": "src/services/asset.ts",
@@ -325,7 +325,7 @@
     },
     {
       "path": "src/services/unitySerializedProperty.ts",
-      "bytes": 3509
+      "bytes": 3806
     },
     {
       "path": "src/services/unityObjectDrawer.ts",
@@ -337,7 +337,7 @@
     },
     {
       "path": "src/services/propertyTree.ts",
-      "bytes": 59163
+      "bytes": 59808
     },
     {
       "path": "src/services/unityPropertyPath.ts",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/types.ts",
-      "bytes": 80691
+      "bytes": 83040
     }
   ]
 }

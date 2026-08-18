@@ -370,7 +370,7 @@ const webSearchDesc = computed(() => {
   border-radius: 6px;
   background: var(--input-bg);
   color: var(--text-color);
-  font-family: var(--font-mono-identifier, monospace);
+  font-family: var(--font-mono-identifier);
   font-size: 12px;
 }
 .web-search-key-input:disabled {

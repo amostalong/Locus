@@ -1098,29 +1098,41 @@ async fn run_unity_test_suite(
         }),
     );
 
-    let list_request = json!({ "mode": "edit", "max_results": 50 });
+    let list_request = json!({ "max_results": 50 });
     let list_text = unity_bridge::unity_test_list(project, &list_request).await?;
     let list: Value = serde_json::from_str(&list_text)
         .map_err(|error| format!("Unity Test list returned invalid JSON: {error}"))?;
+    let list_mode = list.get("mode").and_then(Value::as_str).unwrap_or_default();
+    if list_mode != "edit|play" {
+        return Err(format!(
+            "Unity Test list defaulted to unexpected mode '{list_mode}'"
+        ));
+    }
     let matched = list
         .get("matched")
         .and_then(Value::as_u64)
         .unwrap_or_default();
     if matched == 0 {
-        return Err("Unity Test Framework discovered no Edit Mode tests".to_string());
+        return Err("Unity Test Framework discovered no tests".to_string());
     }
     sink.emit(
         "suite_event",
         json!({
             "suite": suite.as_str(),
-            "line": format!("PASS  unity-test list: discovered {matched} Edit Mode test(s)"),
+            "line": format!("PASS  unity-test list: discovered {matched} Edit/Play Mode test(s)"),
             "passed": 2,
             "failed": 0,
         }),
     );
 
-    let run_request = json!({ "mode": "edit", "result_detail": "failures" });
+    let run_request = json!({ "mode": "edit|play", "result_detail": "failures" });
     let result = unity_bridge::unity_test_run(project, &run_request, config.suite_timeout).await?;
+    if result.mode != "edit|play" {
+        return Err(format!(
+            "Unity Test run used unexpected mode '{}'",
+            result.mode
+        ));
+    }
     let failed = u64::from(result.status != "passed");
     let passed_checks = if failed == 0 { 3 } else { 2 };
     sink.emit(
@@ -3858,6 +3870,41 @@ async fn run_execute_suite(
         "E3R sync ref-local",
         r#"var values = new[] { 41 }; ref int value = ref values[0]; value++; print("E3R:" + value);"#,
         "E3R:42",
+    )
+    .await;
+    run.check_marker(
+        project,
+        "E3J anonymous JSON",
+        r#"printJson(new { Migrated = 3, MainScene = "Assets/Main.unity", EntityScene = "Assets/Entity.unity", Counts = new Dictionary<string, int> { { "Enemy", 4 } } });"#,
+        r#"{"Migrated":3,"MainScene":"Assets/Main.unity","EntityScene":"Assets/Entity.unity","Counts":{"Enemy":4}}"#,
+    )
+    .await;
+    run.check_marker(
+        project,
+        "E3J reference loop",
+        r#"var value = new Dictionary<string, object>(); value["Count"] = 7; value["Self"] = value; printJson(value);"#,
+        r#"{"$id":1,"Count":7,"Self":{"$ref":1}}"#,
+    )
+    .await;
+    run.check_marker(
+        project,
+        "E3J BFS ownership",
+        r#"var shared = new Dictionary<string, object> { { "Value", 9 } }; var deep = new Dictionary<string, object> { { "Child", shared } }; var value = new Dictionary<string, object> { { "Deep", deep }, { "Shallow", shared } }; printJson(value);"#,
+        r#"{"Deep":{"Child":{"$ref":3}},"Shallow":{"$id":3,"Value":9}}"#,
+    )
+    .await;
+    run.check_marker(
+        project,
+        "E3J deferred enumerable",
+        r#"IEnumerable<int> Infinite() { while (true) yield return 1; } printJson(new { Values = Infinite() });"#,
+        r#""$deferredEnumerable":"#,
+    )
+    .await;
+    run.check_marker(
+        project,
+        "E3J nested Unity object",
+        r#"var go = new GameObject("LocusPrintJsonProbe"); try { printJson(new { UnityObject = go }); } finally { UnityEngine.Object.DestroyImmediate(go); }"#,
+        r#""UnityObject":{"$unityObject":true,"type":"UnityEngine.GameObject","instanceId":"#,
     )
     .await;
     match unity_bridge::unity_execute_code_with_non_public_access(

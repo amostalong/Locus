@@ -66,6 +66,7 @@ pub mod unity_bridge;
 pub mod unity_csharp;
 mod unity_docs;
 pub mod unity_hotreload;
+mod unity_project_config;
 pub mod unity_serialized_property;
 pub mod unity_serialized_schema;
 pub mod unity_type_index;
@@ -361,6 +362,7 @@ pub fn run() {
     let cli_driver_for_setup = cli_driver_config.clone();
     let external_script_open_for_setup = external_script_open_request.clone();
     let runtime_workspace_for_setup = runtime_launch_options.workspace_dir.clone();
+    let skip_onboarding_for_setup = runtime_launch_options.skip_onboarding;
 
     tauri::Builder::default()
         .on_page_load(move |webview, payload| {
@@ -637,11 +639,13 @@ pub fn run() {
                     external_script_open_for_setup.clone(),
                 );
 
-            let mut app_agent_dir_candidates = vec![
+            let mut app_agent_dir_candidates = Vec::new();
+            #[cfg(debug_assertions)]
+            app_agent_dir_candidates.extend([
                 std::path::PathBuf::from("../agent"), // dev: src-tauri/../agent
-                std::path::PathBuf::from("agent"),    // cwd
-                data_dir.join("agent"),               // production: app_data_dir/agent
-            ];
+                std::path::PathBuf::from("agent"),    // dev: cwd/agent
+            ]);
+            app_agent_dir_candidates.push(data_dir.join("agent"));
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(exe_dir) = exe.parent() {
                     app_agent_dir_candidates.push(exe_dir.join("agent"));
@@ -1105,7 +1109,14 @@ pub fn run() {
                 .find(|window| window.label == MAIN_WINDOW_LABEL)
                 .ok_or_else(|| format!("Missing '{}' window config", MAIN_WINDOW_LABEL))?;
             startup_for_setup.mark("main_window_build_start");
-            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_config)?.build()?;
+            let mut main_window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_config)?;
+            if skip_onboarding_for_setup {
+                main_window_builder = main_window_builder.initialization_script(
+                    "try { localStorage.setItem('locus-onboarding-completed', '1'); } catch (_) {}",
+                );
+            }
+            main_window_builder.build()?;
             startup_for_setup.mark("main_window_build_done");
             if let Err(error) = install_main_tray(app) {
                 eprintln!("[Locus] warning: failed to install tray icon: {}", error);
@@ -1240,6 +1251,7 @@ pub fn run() {
             commands::get_agent_rendered_env_prompt,
             commands::get_agent_system_prompt_stats,
             commands::list_agent_injected_items,
+            commands::set_agent_injection_enabled,
             commands::set_agent_tool_direct_load,
             commands::set_agent_tool_enabled,
             commands::load_session,
@@ -1259,6 +1271,7 @@ pub fn run() {
             commands::unarchive_session,
             commands::delete_session,
             commands::get_session_usage,
+            commands::get_session_context_usage_report,
             commands::get_model_usage_stats,
             commands::get_session_active_run,
             commands::get_session_resume_available,
@@ -1515,6 +1528,8 @@ pub fn run() {
             commands::save_last_model,
             commands::get_last_effort,
             commands::save_last_effort,
+            commands::get_agent_model_preferences,
+            commands::save_agent_model_preference,
             commands::get_codex_fast_mode,
             commands::save_codex_fast_mode,
             commands::get_model_defaults,
@@ -1632,6 +1647,7 @@ pub fn run() {
             commands::save_python_runtime_selection,
             commands::send_system_notification,
             commands::play_custom_notification_sound,
+            commands::get_running_task_count,
             commands::request_app_exit,
             commands::get_config_registry,
             commands::get_log_entries,

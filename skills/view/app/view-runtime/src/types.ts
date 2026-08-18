@@ -96,6 +96,16 @@ export interface ImageAttachment {
   mimeType: string;
 }
 
+export type ManagedLocalFileStatus = "loading" | "ready" | "error";
+
+export interface ManagedLocalFileAttachment {
+  id: string;
+  name: string;
+  path?: string;
+  typeLabel?: string;
+  status: ManagedLocalFileStatus;
+}
+
 export type AssetRefKind = "asset" | "sceneObject" | "knowledge";
 
 export type KnowledgeAccessMode = "disabled" | "read_only" | "full";
@@ -460,6 +470,7 @@ export interface SessionTurnPreview {
   messageId: string;
   prompt: string;
   response: string;
+  images?: ImageAttachment[];
 }
 
 export interface SessionMessagePage {
@@ -575,6 +586,11 @@ export interface AgentInfo {
   source: string;
 }
 
+export interface AgentModelPreference {
+  modelId: string;
+  effort: EffortLevel;
+}
+
 export type EffortLevel = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingLevel = EffortLevel;
 export type ModelRecommendation = "small" | "large";
@@ -587,6 +603,7 @@ export interface ModelOption {
     | "anthropic"
     | "claude_code"
     | "openai_codex"
+    | "mock"
     | "custom";
   contextWindow?: number;
   defaultEffort?: EffortLevel | null;
@@ -666,6 +683,8 @@ export interface CustomProvider {
   /** Keychain-backed; empty string means "keep existing / none". */
   apiKey: string;
   catalogId?: string | null;
+  /** Session prompt-prefix stability window after the latest provider response. */
+  prefixCacheTtlSeconds?: number;
   models: CustomProviderModel[];
 }
 
@@ -741,8 +760,12 @@ export type CodexTransportMode = "http" | "websocket";
 
 export interface CodexModelConfig {
   transport: CodexTransportMode;
-  extendedContext: boolean;
+  contextWindow: number;
+  /** Legacy 272K/372K switch retained while older config files migrate. */
+  extendedContext?: boolean;
   generateSessionTitles: boolean;
+  autoReview: boolean;
+  prefixCacheTtlSeconds: number;
 }
 
 export interface AuthStatus {
@@ -934,10 +957,56 @@ export interface TokenUsage {
   totalOutputTokens: number;
   totalCacheReadTokens: number;
   totalCacheWriteTokens: number;
+  timedOutputTokens: number;
+  modelActiveDurationMs: number;
   totalCostUsd: number;
   pricedRounds: number;
   contextTokens: number;
   contextLimit: number;
+}
+
+export interface SessionContextBreakdown {
+  systemPromptTokens: number;
+  environmentTokens: number;
+  rulesTokens: number;
+  knowledgeTokens: number;
+  runtimeInjectionTokens: number;
+  conversationTokens: number;
+  toolDefinitionTokens: number;
+  activeToolResultTokens: number;
+}
+
+export interface SessionContextToolUsage {
+  name: string;
+  callCount: number;
+  resultTokens: number;
+}
+
+export interface SessionCacheInvalidation {
+  messageId: string;
+  message: string;
+  modelId: string;
+  baselineTokens: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  excessInputTokens: number;
+  reason: string;
+  occurredAt: number;
+}
+
+export interface SessionContextUsageReport {
+  sessionId: string;
+  sessionTitle: string;
+  agentId: string;
+  modelId: string;
+  contextTokens: number;
+  contextLimit: number;
+  rawEstimatedContextTokens: number;
+  reportedContextTokens: number;
+  breakdown: SessionContextBreakdown;
+  tools: SessionContextToolUsage[];
+  cacheInvalidations: SessionCacheInvalidation[];
+  usage: TokenUsage;
 }
 
 export interface ModelUsageMetrics {
@@ -1181,10 +1250,15 @@ export type StreamEvent = { runId: string } & (
       outputTokens: number;
       cacheReadTokens: number;
       cacheWriteTokens: number;
+      cacheInvalidated?: boolean;
+      cacheBaselineTokens?: number;
+      cacheInvalidationReason?: string;
       totalInputTokens: number;
       totalOutputTokens: number;
       totalCacheReadTokens: number;
       totalCacheWriteTokens: number;
+      timedOutputTokens: number;
+      modelActiveDurationMs: number;
       totalCostUsd: number;
       pricedRounds: number;
       contextTokens: number;
@@ -1290,6 +1364,14 @@ export interface BasicToolConfirmDisplay {
   kind: "basic";
   toolName: string;
   arguments: string;
+  autoReview?: AutoReviewSummary | null;
+}
+
+export interface AutoReviewSummary {
+  status: "denied" | "failed";
+  riskLevel?: string | null;
+  authorization?: string | null;
+  rationale: string;
 }
 
 export type KnowledgeToolConfirmDirectoryMode = "auto" | "approval";
@@ -1444,9 +1526,10 @@ export type KnowledgeStorageSource = "project" | "app";
 export type KnowledgeInjectMode = "none" | "path" | "excerpt" | "full" | "rule";
 export type KnowledgeInjectModeSetting = "inherit" | KnowledgeInjectMode;
 export type KnowledgeAiMaintainedSetting = "inherit" | boolean;
+export type KnowledgeAiEditMode = "inherit" | "disabled" | "confirm" | "auto";
 export type KnowledgeEditMode =
   | "inherit_parent"
-  | "read_only"
+  | "disabled"
   | "proposal"
   | "auto";
 export type KnowledgeConfigSourceKind =
@@ -1489,6 +1572,7 @@ export interface KnowledgeDocumentSummary {
   effectiveInjectMode: KnowledgeInjectMode;
   injectModeSource?: KnowledgeConfigSource | null;
   readOnly: boolean;
+  aiEditMode?: KnowledgeAiEditMode;
   aiMaintained: KnowledgeAiMaintainedSetting;
   effectiveAiMaintained: boolean;
   storageSource?: KnowledgeStorageSource;
@@ -1853,6 +1937,7 @@ export interface KnowledgeDocumentPatch {
   commandTrigger?: string | null;
   argumentHint?: string | null;
   readOnly?: boolean;
+  aiEditMode?: KnowledgeAiEditMode;
   aiMaintained?: KnowledgeAiMaintainedSetting;
   externalSource?: KnowledgeExternalSource | null;
   newPath?: string;
@@ -2406,7 +2491,10 @@ export interface InjectedToolMeta {
   canConfigureDirectLoad?: boolean;
   enabled?: boolean;
   canToggleEnabled?: boolean;
+  enabledDefault?: boolean;
+  enabledOverride?: boolean | null;
   nativeLazy?: boolean;
+  descriptionOverridden?: boolean;
   toolSource?: "builtIn" | "skill" | string;
 }
 
