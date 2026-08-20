@@ -105,7 +105,6 @@ export interface ManagedLocalFileAttachment {
   typeLabel?: string;
   status: ManagedLocalFileStatus;
 }
-
 export type AssetRefKind = "asset" | "sceneObject" | "knowledge";
 
 export type KnowledgeAccessMode = "disabled" | "read_only" | "full";
@@ -590,7 +589,6 @@ export interface AgentModelPreference {
   modelId: string;
   effort: EffortLevel;
 }
-
 export type EffortLevel = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingLevel = EffortLevel;
 export type ModelRecommendation = "small" | "large";
@@ -2491,10 +2489,7 @@ export interface InjectedToolMeta {
   canConfigureDirectLoad?: boolean;
   enabled?: boolean;
   canToggleEnabled?: boolean;
-  enabledDefault?: boolean;
-  enabledOverride?: boolean | null;
   nativeLazy?: boolean;
-  descriptionOverridden?: boolean;
   toolSource?: "builtIn" | "skill" | string;
 }
 

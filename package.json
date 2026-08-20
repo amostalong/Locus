@@ -71,7 +71,7 @@
     "@codingame/monaco-vscode-theme-defaults-default-extension": "~33.0.9",
     "@codingame/monaco-vscode-theme-service-override": "~33.0.9",
     "@tauri-apps/api": "=2.11.1",
-    "@tauri-apps/plugin-dialog": "=2.6.0",
+    "@tauri-apps/plugin-dialog": "=2.7.2",
     "@tauri-apps/plugin-notification": "=2.3.3",
     "@tauri-apps/plugin-opener": "=2.5.3",
     "@types/three": "^0.183.1",
